@@ -5,7 +5,7 @@ import hashlib
 import hmac
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.sync import (
@@ -27,6 +27,11 @@ from upm_site.persistence.models import (
     SyncSequence,
 )
 from upm_site.persistence.queue import SiteQueue
+
+# PostgreSQL transaction-scoped advisory lock reserved for Site singleton initialization.
+# The lock spans identity and registration creation so every Site process observes one
+# permanent identity without relying on exception handling after a uniqueness violation.
+SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
 
 
 def cipher(settings: SiteSettings) -> Fernet:
@@ -54,7 +59,8 @@ def decrypt_secret(settings: SiteSettings, value: bytes | None) -> str | None:
 def bootstrap_identity(
     session: Session, settings: SiteSettings
 ) -> tuple[Site, CentralRegistration]:
-    identity = session.scalar(select(LocalSiteIdentity).limit(1))
+    session.execute(select(func.pg_advisory_xact_lock(SITE_IDENTITY_BOOTSTRAP_LOCK_ID)))
+    identity = session.scalar(select(LocalSiteIdentity).where(LocalSiteIdentity.singleton_key == 1))
     site = session.get(Site, identity.site_id) if identity else None
     if identity is None:
         site = Site(display_name=settings.default_display_name)

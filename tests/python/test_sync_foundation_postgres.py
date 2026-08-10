@@ -1,12 +1,17 @@
 """PostgreSQL tests for permanent identity and idempotent bidirectional sync."""
 
 import os
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from upm_central.api import create_app as create_central_app
 from upm_central.config import CentralDatabaseSettings
@@ -32,9 +37,12 @@ from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION, SyncEventEnvelo
 from upm_shared.enums import AuthorityScope, EnrollmentState
 from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
+from upm_site.persistence.base import SiteBase
 from upm_site.persistence.models import (
+    CentralRegistration,
     LocalSiteIdentity,
     ManagedSetting,
+    Site,
     SyncCursor,
     SyncReceipt,
 )
@@ -58,19 +66,99 @@ def site_settings() -> SiteSettings:
     )
 
 
-def test_site_identity_bootstrap_is_stable_and_singleton() -> None:
-    engine = create_engine(SITE_URL)
-    factory = sessionmaker(engine, expire_on_commit=False)
+@pytest.fixture
+def isolated_site_factory() -> Iterator[sessionmaker[Session]]:
+    admin_engine = create_engine(SITE_URL)
+    engine = None
+    schema = f"site_identity_{uuid4().hex}"
     try:
-        with factory.begin() as session:
-            first, _ = bootstrap_identity(session, site_settings())
-            first_id = first.site_id
-        with factory.begin() as session:
-            second, _ = bootstrap_identity(session, site_settings())
-            assert second.site_id == first_id
-            assert session.scalar(select(func.count()).select_from(LocalSiteIdentity)) == 1
+        with admin_engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        engine = create_engine(
+            SITE_URL,
+            connect_args={"options": f"-csearch_path={schema}"},
+            pool_size=8,
+            max_overflow=0,
+        )
+        SiteBase.metadata.create_all(engine)
+        yield sessionmaker(engine, expire_on_commit=False)
     finally:
-        engine.dispose()
+        if engine is not None:
+            engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        admin_engine.dispose()
+
+
+def test_site_identity_bootstrap_creates_one_stable_singleton(
+    isolated_site_factory: sessionmaker[Session],
+) -> None:
+    with isolated_site_factory.begin() as session:
+        first, _ = bootstrap_identity(session, site_settings())
+        first_id = first.site_id
+    with isolated_site_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(LocalSiteIdentity)) == 1
+        assert session.scalar(select(func.count()).select_from(Site)) == 1
+    with isolated_site_factory.begin() as session:
+        second, _ = bootstrap_identity(session, site_settings())
+        assert second.site_id == first_id
+        assert session.scalar(select(func.count()).select_from(LocalSiteIdentity)) == 1
+        assert session.scalar(select(func.count()).select_from(Site)) == 1
+
+
+def test_concurrent_site_identity_bootstrap_resolves_to_one_site(
+    isolated_site_factory: sessionmaker[Session],
+) -> None:
+    caller_count = 8
+    start = Barrier(caller_count)
+
+    def initialize() -> UUID:
+        with isolated_site_factory.begin() as session:
+            start.wait(timeout=10)
+            site, _ = bootstrap_identity(session, site_settings())
+            return site.site_id
+
+    with ThreadPoolExecutor(max_workers=caller_count) as executor:
+        site_ids = list(executor.map(lambda _: initialize(), range(caller_count)))
+
+    assert len(set(site_ids)) == 1
+    with isolated_site_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(LocalSiteIdentity)) == 1
+        assert session.scalar(select(func.count()).select_from(Site)) == 1
+        assert session.scalar(select(func.count()).select_from(CentralRegistration)) == 1
+
+
+def test_concurrent_bootstrap_preserves_existing_site_identity(
+    isolated_site_factory: sessionmaker[Session],
+) -> None:
+    with isolated_site_factory.begin() as session:
+        existing, _ = bootstrap_identity(session, site_settings())
+        existing_id = existing.site_id
+
+    caller_count = 8
+    start = Barrier(caller_count)
+    changed_settings = site_settings().model_copy(
+        update={"default_display_name": "Must not replace existing identity"}
+    )
+
+    def initialize() -> UUID:
+        with isolated_site_factory.begin() as session:
+            start.wait(timeout=10)
+            site, _ = bootstrap_identity(session, changed_settings)
+            return site.site_id
+
+    with ThreadPoolExecutor(max_workers=caller_count) as executor:
+        site_ids = list(executor.map(lambda _: initialize(), range(caller_count)))
+
+    assert set(site_ids) == {existing_id}
+    with isolated_site_factory.begin() as session:
+        identity = session.scalar(
+            select(LocalSiteIdentity).where(LocalSiteIdentity.singleton_key == 1)
+        )
+        assert identity is not None
+        assert identity.site_id == existing_id
+        assert identity.display_name != changed_settings.default_display_name
+        assert session.scalar(select(func.count()).select_from(LocalSiteIdentity)) == 1
 
 
 def test_site_to_central_event_is_idempotent_and_advances_cursor_after_apply() -> None:
