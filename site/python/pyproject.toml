@@ -10,6 +10,7 @@ dependencies = [
   "pydantic-settings>=2.10,<3",
   "sqlalchemy>=2.0.41,<3",
   "upm-shared",
+  "uvicorn>=0.35,<1",
 ]
 
 [tool.uv.sources]

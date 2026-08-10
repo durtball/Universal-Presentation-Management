@@ -26,3 +26,45 @@ The root `pyproject.toml` owns development tools. `shared/python`,
 `central/python`, and `site/python` remain separate workspace packages. See
 `docs/architecture/domain-data-foundation.md` for ownership and data-model
 details.
+
+## Independent Docker API services
+
+Copy `.env.example` to an ignored local `.env` and replace every placeholder
+password before using it outside disposable local development. Never commit the
+local file. Build the API images independently from the repository root:
+
+```powershell
+docker compose --env-file .env -f docker-compose.central.yml build central-api
+docker compose --env-file .env -f docker-compose.site.yml build site-api
+```
+
+Start either deployment without starting the other:
+
+```powershell
+docker compose --env-file .env -f docker-compose.central.yml up -d
+docker compose --env-file .env -f docker-compose.site.yml up -d
+```
+
+Check container state and the existing API health endpoints through each
+deployment's Caddy edge:
+
+```powershell
+docker compose --env-file .env -f docker-compose.central.yml ps
+Invoke-RestMethod http://localhost:8080/api/health
+
+docker compose --env-file .env -f docker-compose.site.yml ps
+Invoke-RestMethod http://localhost:9080/api/health
+```
+
+The responses identify `upm-central` and `upm-site` respectively. Shut down the
+deployments independently; named PostgreSQL and Caddy volumes are retained:
+
+```powershell
+docker compose --env-file .env -f docker-compose.central.yml down
+docker compose --env-file .env -f docker-compose.site.yml down
+```
+
+The API containers run as non-root users. Central and Site use distinct images,
+configuration variables, PostgreSQL services, networks, and deployment
+lifecycles. The worker and synchronization containers remain separate process
+placeholders; this milestone does not implement their logic.

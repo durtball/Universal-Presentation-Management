@@ -35,6 +35,12 @@ jobs:
       - name: Validate Site Compose configuration
         run: docker compose --env-file .env.example -f docker-compose.site.yml config --quiet
 
+      - name: Build Central API image
+        run: docker compose --env-file .env.example -f docker-compose.central.yml build central-api
+
+      - name: Build Site API image
+        run: docker compose --env-file .env.example -f docker-compose.site.yml build site-api
+
       - name: Check whitespace errors
         shell: bash
         run: |

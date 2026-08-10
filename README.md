@@ -37,7 +37,7 @@ Detailed backend decisions and the implemented domain ownership model are in
 
 The intended topology tests Central and standalone Site as independent systems. The development workstation is for builds only. Central runs on a Linux server and may run the unchanged Site stack beside it; a separate machine runs an independent Site; Windows 11 machines exercise Agent, Kiosk, Signage, primary/backup room, interruption, and reconnect scenarios.
 
-## Run the initial Docker scaffolding
+## Run the Docker foundation
 
 Requirements are Git, Docker, and Docker Compose v2. On Windows, verify prerequisites and prepare ignored local runtime directories with:
 
@@ -52,7 +52,17 @@ docker compose --env-file .env.example -f docker-compose.central.yml up -d
 docker compose --env-file .env.example -f docker-compose.site.yml up -d
 ```
 
-These definitions start service-boundary placeholders and separate PostgreSQL/Caddy resources; they do not provide a working UPM application yet. Use distinct project names and host ports when running multiple Site instances. Never create or commit a real `.env` file.
+These definitions run the independent Central and Site FastAPI foundations plus
+separate PostgreSQL/Caddy resources. Worker, synchronization, and web services
+remain explicit placeholders; no UPM business APIs are implemented. Use
+distinct project names and host ports when running multiple Site instances.
+Never create or commit a real `.env` file.
+
+The API health endpoints are available through Caddy at
+`http://localhost:8080/api/health` for Central and
+`http://localhost:9080/api/health` for Site. See the
+[development guide](docs/development/README.md) for build, startup, health, and
+shutdown commands.
 
 The Site media bind mount is configured through `SITE_MEDIA_HOST_PATH`; the
 container-visible path is configured separately through
