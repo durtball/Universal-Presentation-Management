@@ -1,7 +1,7 @@
 """Independent UPM Site FastAPI application boundary and media API."""
 
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -40,6 +40,8 @@ from upm_site.media.storage import (
 )
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.models import (
+    CentralRegistration,
+    EventDeploymentProjection,
     LocalSiteIdentity,
     ManagedSetting,
     MediaObject,
@@ -48,6 +50,7 @@ from upm_site.persistence.models import (
     ProcessingJob,
     StorageTarget,
     SyncCursor,
+    utc_now,
 )
 from upm_site.sync import (
     apply_central_event,
@@ -407,6 +410,38 @@ def create_app(
             for item in session.scalars(select(ManagedSetting).order_by(ManagedSetting.setting_key))
         ]
 
+    @app.get("/api/v1/event-deployments", tags=["events", "synchronization"])
+    def event_deployments(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[dict[str, object]]:
+        registration = session.scalar(select(CentralRegistration))
+        connected = bool(
+            registration
+            and registration.last_connection_at
+            and utc_now() - registration.last_connection_at < timedelta(seconds=90)
+        )
+        return [
+            {
+                "deployment_id": item.deployment_id,
+                "central_event_id": item.central_event_id,
+                "site_id": item.site_id,
+                "event_name": item.current_snapshot.get("event_name"),
+                "status": item.status,
+                "desired_revision": item.desired_revision,
+                "applied_revision": item.applied_revision,
+                "last_central_synchronization_at": item.last_central_synchronization_at,
+                "applied_at": item.applied_at,
+                "failure_reason": item.failure_reason,
+                "summary_counts": item.summary_counts,
+                "central_connected": connected,
+            }
+            for item in session.scalars(
+                select(EventDeploymentProjection).order_by(
+                    EventDeploymentProjection.updated_at.desc()
+                )
+            )
+        ]
+
     @app.post("/api/v1/sync/heartbeat", tags=["synchronization"])
     def queue_heartbeat(
         session: Annotated[Session, Depends(transaction)],
@@ -456,5 +491,17 @@ def create_app(
 <script>async function load(){const r=await fetch('/api/v1/central-registration');
 document.querySelector('#o').textContent=JSON.stringify(await r.json(),null,2)}load();</script>
 </body></html>"""
+
+    @app.get("/admin/event-deployments", response_class=HTMLResponse, tags=["administration"])
+    def event_deployments_page() -> str:
+        return """<!doctype html>
+<html><head><title>UPM Site Event Deployments</title></head><body>
+<nav><a href="/admin/central-registration">Central registration</a> |
+<a href="/admin/event-deployments">Event deployments</a></nav>
+<h1>Site event deployments</h1><button onclick="load()">Refresh</button><div id="o"></div>
+<script>async function load(){const r=await fetch('/api/v1/event-deployments');
+const rows=await r.json(),out=document.querySelector('#o');out.replaceChildren();
+for(const row of rows){const pre=document.createElement('pre');
+pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
     return app

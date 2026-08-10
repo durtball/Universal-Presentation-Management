@@ -28,6 +28,17 @@ class EnrollmentState(StrEnum):
     DISABLED = "disabled"
 
 
+class EventDeploymentStatus(StrEnum):
+    DRAFT = "draft"
+    PENDING = "pending"
+    DEPLOYING = "deploying"
+    DEPLOYED = "deployed"
+    UPDATE_PENDING = "update_pending"
+    FAILED = "failed"
+    REVOKED = "revoked"
+    ARCHIVED = "archived"
+
+
 class SyncDirection(StrEnum):
     SITE_TO_CENTRAL = "site_to_central"
     CENTRAL_TO_SITE = "central_to_site"

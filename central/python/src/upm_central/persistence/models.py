@@ -27,6 +27,7 @@ from upm_central.persistence.base import CentralBase
 from upm_shared.enums import (
     AssetKind,
     EnrollmentState,
+    EventDeploymentStatus,
     IdentitySignalType,
     JobPriority,
     JobStatus,
@@ -259,6 +260,76 @@ class Event(CentralRecordMixin, CentralBase):
 
     participations: Mapped[list["EventParticipation"]] = relationship(back_populates="event")
     sessions: Mapped[list["Session"]] = relationship(back_populates="event")
+    deployments: Mapped[list["EventDeployment"]] = relationship(back_populates="event")
+
+
+class EventDeployment(CentralRecordMixin, CentralBase):
+    __tablename__ = "event_deployments"
+    __table_args__ = (
+        UniqueConstraint("event_id", "site_id"),
+        CheckConstraint("desired_revision >= 0", name="desired_revision_nonnegative"),
+        CheckConstraint("acknowledged_revision >= 0", name="acknowledged_revision_nonnegative"),
+        CheckConstraint("acknowledged_revision <= desired_revision", name="acknowledged_not_ahead"),
+        Index("ix_central_event_deployments_site_status", "site_id", "status"),
+        Index("ix_central_event_deployments_event_status", "event_id", "status"),
+    )
+
+    deployment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[EventDeploymentStatus] = mapped_column(
+        Enum(
+            EventDeploymentStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        ),
+        default=EventDeploymentStatus.DRAFT,
+        nullable=False,
+    )
+    desired_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    acknowledged_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deployment_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synchronization_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    successfully_deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(2048))
+    site_status: Mapped[str | None] = mapped_column(String(32))
+    summary_counts: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    event: Mapped[Event] = relationship(back_populates="deployments")
+    snapshots: Mapped[list["EventDeploymentRevision"]] = relationship(back_populates="deployment")
+
+
+class EventDeploymentRevision(CentralBase):
+    __tablename__ = "event_deployment_revisions"
+    __table_args__ = (
+        UniqueConstraint("deployment_id", "deployment_revision"),
+        CheckConstraint("deployment_revision >= 1", name="revision_positive"),
+    )
+
+    deployment_revision_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    deployment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("event_deployments.deployment_id", ondelete="RESTRICT"), nullable=False
+    )
+    deployment_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    deployment: Mapped[EventDeployment] = relationship(back_populates="snapshots")
 
 
 class EventParticipation(CentralRecordMixin, CentralBase):

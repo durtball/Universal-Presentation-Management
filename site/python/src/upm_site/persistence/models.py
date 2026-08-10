@@ -29,6 +29,7 @@ from upm_shared.enums import (
     AssetKind,
     DeviceRole,
     EnrollmentState,
+    EventDeploymentStatus,
     JobPriority,
     JobStatus,
     MediaAvailability,
@@ -191,6 +192,58 @@ class Event(SiteRecordMixin, SiteBase):
 
     participations: Mapped[list["EventParticipation"]] = relationship(back_populates="event")
     sessions: Mapped[list["Session"]] = relationship(back_populates="event")
+
+
+class EventDeploymentProjection(SiteRecordMixin, SiteBase):
+    __tablename__ = "event_deployments"
+    __table_args__ = (
+        CheckConstraint("desired_revision >= 1", name="desired_revision_positive"),
+        CheckConstraint("applied_revision >= 0", name="applied_revision_nonnegative"),
+        CheckConstraint("applied_revision <= desired_revision", name="applied_not_ahead"),
+        Index("ix_site_event_deployments_status", "status"),
+    )
+
+    deployment_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    central_event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[EventDeploymentStatus] = mapped_column(
+        upm_enum(EventDeploymentStatus, length=24), nullable=False
+    )
+    desired_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    applied_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_central_synchronization_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(2048))
+    current_snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    summary_counts: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class EventDeploymentRevisionProjection(SiteBase):
+    __tablename__ = "event_deployment_revisions"
+    __table_args__ = (
+        UniqueConstraint("deployment_id", "deployment_revision"),
+        CheckConstraint("deployment_revision >= 1", name="deployment_revision_positive"),
+    )
+
+    deployment_revision_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    deployment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("event_deployments.deployment_id", ondelete="RESTRICT"), nullable=False
+    )
+    deployment_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class EventParticipation(SiteRecordMixin, SiteBase):

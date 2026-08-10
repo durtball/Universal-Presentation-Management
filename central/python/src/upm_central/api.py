@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -14,9 +15,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from upm_central.config import CentralDatabaseSettings
+from upm_central.event_deployments import (
+    create_deployment,
+    push_deployment,
+    retry_deployment,
+    revoke_deployment,
+)
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import (
     AuditRecord,
+    Event,
+    EventDeployment,
     OutboxEvent,
     Site,
     SiteCredential,
@@ -45,7 +54,7 @@ from upm_shared.contracts.sync import (
     SyncBatchRequest,
     SyncBatchResponse,
 )
-from upm_shared.enums import EnrollmentState, JobStatus
+from upm_shared.enums import EnrollmentState, EventDeploymentStatus, JobStatus
 
 
 class HealthResponse(BaseModel):
@@ -62,6 +71,22 @@ class StateChange(BaseModel):
 class SettingUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: dict[str, object]
+
+
+class EventCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: Annotated[str, Field(min_length=1, max_length=255)]
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+
+class EventUpdate(EventCreate):
+    pass
+
+
+class DeploymentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    site_id: UUID
 
 
 def bearer_token(authorization: str | None) -> str | None:
@@ -317,6 +342,19 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                     .group_by(OutboxEvent.status)
                 ).all()
             )
+            outbound_sequence = (
+                session.scalar(
+                    select(func.max(OutboxEvent.source_sequence)).where(
+                        OutboxEvent.owning_site_id == site.site_id
+                    )
+                )
+                or 0
+            )
+            central_to_site = session.get(SyncCursor, (site.site_id, "central_to_site"))
+            site_to_central = session.get(SyncCursor, (site.site_id, "site_to_central"))
+            deployments = session.scalars(
+                select(EventDeployment).where(EventDeployment.site_id == site.site_id)
+            ).all()
             result.append(
                 {
                     "site_id": site.site_id,
@@ -333,6 +371,14 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                     + counts.get(JobStatus.RUNNING, 0),
                     "failed_sync": counts.get(JobStatus.FAILED, 0)
                     + counts.get(JobStatus.EXHAUSTED, 0),
+                    "outbound_central_sequence": outbound_sequence,
+                    "site_acknowledged_through": (
+                        central_to_site.last_sequence if central_to_site else 0
+                    ),
+                    "inbound_site_sequence": site_to_central.last_sequence
+                    if site_to_central
+                    else 0,
+                    "deployments": [deployment_view(item) for item in deployments],
                 }
             )
         return result
@@ -367,6 +413,144 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             "revision": setting.revision,
             "event_id": event.outbox_event_id,
         }
+
+    def deployment_view(deployment: EventDeployment) -> dict[str, object]:
+        synchronization_state = (
+            "failed"
+            if deployment.status == EventDeploymentStatus.FAILED
+            else "current"
+            if deployment.acknowledged_revision == deployment.desired_revision
+            else "synchronizing"
+        )
+        return {
+            "deployment_id": deployment.deployment_id,
+            "event_id": deployment.event_id,
+            "site_id": deployment.site_id,
+            "status": deployment.status,
+            "desired_revision": deployment.desired_revision,
+            "applied_revision": deployment.acknowledged_revision,
+            "synchronization_state": synchronization_state,
+            "site_status": deployment.site_status,
+            "last_synchronization_at": deployment.last_synchronization_at,
+            "successfully_deployed_at": deployment.successfully_deployed_at,
+            "failure_at": deployment.failure_at,
+            "failure_reason": deployment.failure_reason,
+            "summary_counts": deployment.summary_counts,
+        }
+
+    @app.post("/api/v1/admin/events", status_code=201, dependencies=[Depends(require_admin)])
+    def create_event(payload: EventCreate, session: DbSession) -> dict[str, object]:
+        if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
+        event = Event(name=payload.name, starts_at=payload.starts_at, ends_at=payload.ends_at)
+        session.add(event)
+        session.flush()
+        return {"event_id": event.event_id, "name": event.name, "revision": event.revision}
+
+    @app.get("/api/v1/admin/events", dependencies=[Depends(require_admin)])
+    def list_events(session: DbSession) -> list[dict[str, object]]:
+        result = []
+        for event in session.scalars(select(Event).order_by(Event.name)):
+            deployments = session.scalars(
+                select(EventDeployment).where(EventDeployment.event_id == event.event_id)
+            ).all()
+            result.append(
+                {
+                    "event_id": event.event_id,
+                    "name": event.name,
+                    "starts_at": event.starts_at,
+                    "ends_at": event.ends_at,
+                    "revision": event.revision,
+                    "deployments": [deployment_view(item) for item in deployments],
+                }
+            )
+        return result
+
+    @app.put("/api/v1/admin/events/{event_id}", dependencies=[Depends(require_admin)])
+    def update_event(event_id: UUID, payload: EventUpdate, session: DbSession) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
+        event.name = payload.name
+        event.starts_at = payload.starts_at
+        event.ends_at = payload.ends_at
+        event.revision += 1
+        pushed = []
+        deployments = session.scalars(
+            select(EventDeployment).where(
+                EventDeployment.event_id == event_id,
+                EventDeployment.status.notin_(
+                    [EventDeploymentStatus.REVOKED, EventDeploymentStatus.ARCHIVED]
+                ),
+            )
+        ).all()
+        for deployment in deployments:
+            push_deployment(session, deployment)
+            pushed.append(deployment.deployment_id)
+        return {"event_id": event_id, "revision": event.revision, "deployments_pushed": pushed}
+
+    @app.get(
+        "/api/v1/admin/events/{event_id}/deployments",
+        dependencies=[Depends(require_admin)],
+    )
+    def list_deployments(event_id: UUID, session: DbSession) -> list[dict[str, object]]:
+        if session.get(Event, event_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        return [
+            deployment_view(item)
+            for item in session.scalars(
+                select(EventDeployment)
+                .where(EventDeployment.event_id == event_id)
+                .order_by(EventDeployment.created_at)
+            )
+        ]
+
+    @app.post(
+        "/api/v1/admin/events/{event_id}/deployments",
+        status_code=201,
+        dependencies=[Depends(require_admin)],
+    )
+    def deploy_event(
+        event_id: UUID, payload: DeploymentCreate, session: DbSession
+    ) -> dict[str, object]:
+        return deployment_view(create_deployment(session, event_id, payload.site_id))
+
+    def required_deployment(session: Session, deployment_id: UUID) -> EventDeployment:
+        deployment = session.get(EventDeployment, deployment_id)
+        if deployment is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="deployment not found")
+        return deployment
+
+    @app.post(
+        "/api/v1/admin/event-deployments/{deployment_id}/push",
+        dependencies=[Depends(require_admin)],
+    )
+    def push_event_deployment(deployment_id: UUID, session: DbSession) -> dict[str, object]:
+        return deployment_view(
+            push_deployment(session, required_deployment(session, deployment_id))
+        )
+
+    @app.post(
+        "/api/v1/admin/event-deployments/{deployment_id}/retry",
+        dependencies=[Depends(require_admin)],
+    )
+    def retry_event_deployment(deployment_id: UUID, session: DbSession) -> dict[str, object]:
+        return deployment_view(
+            retry_deployment(session, required_deployment(session, deployment_id))
+        )
+
+    @app.post(
+        "/api/v1/admin/event-deployments/{deployment_id}/revoke",
+        dependencies=[Depends(require_admin)],
+    )
+    def revoke_event_deployment(
+        deployment_id: UUID, change: StateChange, session: DbSession
+    ) -> dict[str, object]:
+        return deployment_view(
+            revoke_deployment(session, required_deployment(session, deployment_id), change.reason)
+        )
 
     @app.post("/api/v1/sync/site-events", response_model=SyncBatchResponse)
     def receive_site_events(
@@ -435,6 +619,8 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         if x_upm_site_id is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="missing site identity")
         site = authenticate_site(session, x_upm_site_id, bearer_token(authorization))
+        if payload.protocol_version != UPM_SYNC_PROTOCOL_VERSION:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="incompatible_sync_protocol")
         events = session.scalars(
             select(OutboxEvent).where(
                 OutboxEvent.owning_site_id == site.site_id,
@@ -450,6 +636,11 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         if cursor is None:
             cursor = SyncCursor(site_id=site.site_id, direction="central_to_site", last_sequence=0)
             session.add(cursor)
+        highest_owned_sequence = max(
+            (event.source_sequence or 0 for event in events), default=cursor.last_sequence
+        )
+        if payload.checkpoint_sequence > highest_owned_sequence:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="invalid checkpoint sequence")
         cursor.last_sequence = max(cursor.last_sequence, payload.checkpoint_sequence)
         site.last_successful_sync_at = utc_now()
         return {"acknowledged": len(events), "checkpoint_sequence": cursor.last_sequence}
@@ -458,6 +649,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     def sites_page() -> str:
         return """<!doctype html>
 <html><head><title>UPM Central Sites</title></head><body>
+<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a></nav>
 <h1>Sites</h1><p>Enter the configured administrator token.</p>
 <input id="t" type="password"><button onclick="load()">Refresh</button><div id="o"></div>
 <script>async function load(){const t=document.querySelector('#t').value;
@@ -471,5 +663,42 @@ async function act(id,a){await fetch(`/api/v1/admin/sites/${id}/${a}`,{method:'P
 headers:{'Content-Type':'application/json','X-UPM-Admin-Token':document.querySelector('#t').value},
 body:'{}'});load()}</script>
 </body></html>"""
+
+    @app.get("/admin/events", response_class=HTMLResponse)
+    def events_page() -> str:
+        return """<!doctype html>
+<html><head><title>UPM Central Events</title></head><body>
+<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a></nav>
+<h1>Event deployments</h1><p>Enter the configured administrator token.</p>
+<input id="t" type="password"><button onclick="load()">Refresh</button>
+<p><input id="event-name" placeholder="Event name"><button onclick="createEvent()">
+Create Event</button></p><div id="o"></div>
+<script>async function load(){const t=document.querySelector('#t').value;
+const headers={'X-UPM-Admin-Token':t};
+const [er,sr]=await Promise.all([fetch('/api/v1/admin/events',{headers}),
+fetch('/api/v1/admin/sites',{headers})]);
+const events=await er.json(),sites=await sr.json(),out=document.querySelector('#o');
+out.replaceChildren();
+for(const e of events){const h=document.createElement('h2');
+h.textContent=`${e.name} (${e.event_id})`;
+out.append(h);const select=document.createElement('select');
+for(const s of sites.filter(x=>x.enrollment_state==='active')){const option=new Option(
+s.display_name,s.site_id);select.add(option)}out.append(select);
+const deploy=document.createElement('button');deploy.textContent='Deploy to Site';
+deploy.onclick=()=>deployTo(e.event_id,select.value);out.append(deploy);
+for(const d of e.deployments){const pre=document.createElement('pre');
+pre.textContent=JSON.stringify(d,null,2);out.append(pre);for(const a of ['push','retry','revoke']){
+const b=document.createElement('button');b.textContent=a;b.onclick=()=>act(d.deployment_id,a);
+out.append(b)}}}}async function act(id,a){await fetch(`/api/v1/admin/event-deployments/${id}/${a}`,
+{method:'POST',headers:{'Content-Type':'application/json','X-UPM-Admin-Token':
+document.querySelector('#t').value},body:JSON.stringify({})});load()}
+async function deployTo(eventId,siteId){if(!siteId)return;await fetch(
+`/api/v1/admin/events/${eventId}/deployments`,{method:'POST',headers:{
+'Content-Type':'application/json','X-UPM-Admin-Token':document.querySelector('#t').value},
+body:JSON.stringify({site_id:siteId})});load()}
+async function createEvent(){await fetch('/api/v1/admin/events',{method:'POST',headers:{
+'Content-Type':'application/json','X-UPM-Admin-Token':document.querySelector('#t').value},
+body:JSON.stringify({name:document.querySelector('#event-name').value})});load()}
+</script></body></html>"""
 
     return app
