@@ -133,9 +133,6 @@ jobs:
           export SITE_MEDIA_HOST_PATH="$RUNNER_TEMP/upm-site-media"
           mkdir -p "$SITE_MEDIA_HOST_PATH"
           chmod 0777 "$SITE_MEDIA_HOST_PATH"
-          docker compose --env-file .env.example -f docker-compose.site.yml up -d site-postgres
-          docker compose --env-file .env.example -f docker-compose.site.yml run --rm site-api \
-            alembic -c database/site/alembic.ini upgrade head
           docker compose --env-file .env.example -f docker-compose.site.yml up -d site-api
           for attempt in {1..30}; do
             if docker compose --env-file .env.example -f docker-compose.site.yml exec -T site-api \
@@ -158,3 +155,12 @@ jobs:
           export UPM_SITE_PROJECT_NAME=upm-site-media-ci
           export SITE_MEDIA_HOST_PATH="$RUNNER_TEMP/upm-site-media"
           docker compose --env-file .env.example -f docker-compose.site.yml down --volumes --remove-orphans
+
+  validate-compose-migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate fresh and repeated container migrations
+        run: ./scripts/test-compose-migrations.sh
