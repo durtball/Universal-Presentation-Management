@@ -181,6 +181,8 @@ Use:
 - Resumable transfers
 - Clear sync status reporting
 
+Internal entity identifiers use PostgreSQL-native UUID columns. New identifiers are generated as UUIDv7 in the application/domain layer so Central, Sites, and disconnected clients can create globally unique IDs without sequential database coordination. Names, labels, titles, filenames, and imported row numbers are not identity keys.
+
 ### Connectivity expectations
 
 The design must assume:
@@ -345,6 +347,12 @@ They must remain clearly distinguishable from entry-linked presentations.
 ## 10. File and Media Architecture
 
 Each Site owns authoritative local media required for its operations.
+
+Site media storage is administrator-configurable through Site-owned storage targets. Each target has a globally unique `storage_target_id` and refers to a host-provided filesystem root or mount. The Linux host/infrastructure layer owns partitioning, formatting, mounting, RAID, and hardware management; UPM does not implement those functions.
+
+Media locations reference a `storage_target_id` plus a validated logical relative object key rather than treating an absolute operating-system path as media identity. Sites may configure multiple targets, but UPM does not automatically pool them or invent placement policy. Storage health, runtime capacity observations, and configurable warning/critical thresholds must be visible independently for each target.
+
+Detailed storage decisions are recorded in [ADR-0002](decisions/ADR-0002-site-media-storage.md).
 
 ### Media requirements
 
@@ -761,6 +769,10 @@ It must not contain required Central logic.
 
 UPM Central and UPM Site use Docker from the beginning.
 
+Central and Site server-side APIs, workers, synchronization services, and related processing services use Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2.x, psycopg 3, Alembic, PostgreSQL, and uv-managed `pyproject.toml` projects. OpenAPI and JSON Schema provide language-neutral external contracts. This decision does not select a technology for Windows clients.
+
+Central and Site remain separate applications with separate persistence metadata, sessions, configuration, and migration histories. See [ADR-0001](decisions/ADR-0001-backend-persistence-stack.md).
+
 ### Central service boundaries
 
 Expected Central deployment includes separate services such as:
@@ -798,6 +810,7 @@ Recommended top-level structure:
 ```text
 docs/
   architecture/
+    decisions/
   api/
   deployment/
   development/
@@ -872,6 +885,8 @@ Requirements:
 - Migration state is observable.
 - Backup/recovery procedures account for migration versions.
 - Downgrade/rollback strategy should be defined where feasible.
+- Alembic is the migration framework for the Python server stack.
+- Central and Site use separate Alembic configurations and independent revision graphs; neither database must be reachable to migrate the other.
 
 ---
 
@@ -1082,6 +1097,8 @@ Potential uses include:
 
 CPU fallback must remain possible for required core functions.
 
+Core PostgreSQL, API, synchronization, worker, and local Site operations take priority over optional AI, LLM, and noncritical accelerated workloads during resource pressure. Future GPU-capable workers may advertise capability requirements, but GPU availability must not be required for core UPM operation.
+
 ---
 
 ## 37. Testing Strategy
@@ -1287,4 +1304,3 @@ UPM should behave as a professional distributed presentation-management platform
 - The architecture remains understandable years after initial implementation.
 
 This document governs the implementation until deliberately amended.
-

@@ -29,6 +29,10 @@ docs/                    Architecture, API, deployment, and development document
 
 The authoritative specification is [docs/architecture/UPM_MASTER_ARCHITECTURE.md](docs/architecture/UPM_MASTER_ARCHITECTURE.md). Read it before substantial implementation work.
 
+Detailed backend decisions and the implemented domain ownership model are in
+[docs/architecture/decisions](docs/architecture/decisions) and
+[docs/architecture/domain-data-foundation.md](docs/architecture/domain-data-foundation.md).
+
 ## Development and test topology
 
 The intended topology tests Central and standalone Site as independent systems. The development workstation is for builds only. Central runs on a Linux server and may run the unchanged Site stack beside it; a separate machine runs an independent Site; Windows 11 machines exercise Agent, Kiosk, Signage, primary/backup room, interruption, and reconnect scenarios.
@@ -49,6 +53,24 @@ docker compose --env-file .env.example -f docker-compose.site.yml up -d
 ```
 
 These definitions start service-boundary placeholders and separate PostgreSQL/Caddy resources; they do not provide a working UPM application yet. Use distinct project names and host ports when running multiple Site instances. Never create or commit a real `.env` file.
+
+The Site media bind mount is configured through `SITE_MEDIA_HOST_PATH`; the
+container-visible path is configured separately through
+`UPM_SITE_MEDIA_MOUNT_PATH`. The host remains responsible for the filesystem.
+
+## Python development
+
+Install Python 3.13 through `uv`, then synchronize the committed workspace lock:
+
+```powershell
+uv python install 3.13
+uv sync --locked --all-packages
+```
+
+Central and Site are separate FastAPI applications backed by separate
+PostgreSQL databases and Alembic histories. See the
+[development guide](docs/development/README.md) for validation and migration
+commands.
 
 Stop the stacks independently:
 

@@ -23,6 +23,7 @@ services:
     environment:
       UPM_COMPONENT: central-api
       DATABASE_HOST: central-postgres
+      UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -46,6 +47,7 @@ services:
     environment:
       UPM_COMPONENT: central-worker
       DATABASE_HOST: central-postgres
+      UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -59,6 +61,7 @@ services:
     environment:
       UPM_COMPONENT: central-sync
       DATABASE_HOST: central-postgres
+      UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
     depends_on:
       central-postgres:
         condition: service_healthy
