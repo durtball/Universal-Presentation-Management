@@ -19,6 +19,7 @@ RUN uv sync --frozen --no-dev --package upm-central --no-install-workspace
 
 COPY shared/python/src shared/python/src
 COPY central/python/src central/python/src
+COPY database/central database/central
 
 RUN uv sync --frozen --no-dev --package upm-central --no-editable
 
@@ -33,6 +34,7 @@ RUN groupadd --gid 10001 upm \
     && useradd --uid 10001 --gid upm --no-create-home --shell /usr/sbin/nologin upm
 
 COPY --from=builder --chown=upm:upm /app/.venv /app/.venv
+COPY --from=builder --chown=upm:upm /app/database /app/database
 
 USER upm
 EXPOSE 8080

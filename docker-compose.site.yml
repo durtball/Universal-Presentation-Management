@@ -11,8 +11,10 @@ services:
       - site-caddy-data:/data
       - site-caddy-config:/config
     depends_on:
-      - site-api
-      - site-web
+      site-api:
+        condition: service_healthy
+      site-web:
+        condition: service_started
     networks:
       - site-edge
 
@@ -32,6 +34,8 @@ services:
     depends_on:
       site-postgres:
         condition: service_healthy
+      site-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
       interval: 10s
@@ -53,10 +57,21 @@ services:
     networks:
       - site-edge
 
+  site-migrate:
+    image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
+    restart: "no"
+    command: ["alembic", "-c", "database/site/alembic.ini", "upgrade", "head"]
+    environment:
+      UPM_COMPONENT: site-migrate
+      DATABASE_HOST: site-postgres
+      UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
+    depends_on:
+      site-postgres:
+        condition: service_healthy
+    networks:
+      - site-internal
+
   site-worker:
-    build:
-      context: .
-      dockerfile: site/Dockerfile
     image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
     restart: unless-stopped
     command: ["python", "-m", "upm_site.worker"]
@@ -71,6 +86,8 @@ services:
     depends_on:
       site-postgres:
         condition: service_healthy
+      site-migrate:
+        condition: service_completed_successfully
     volumes:
       - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:
@@ -82,9 +99,6 @@ services:
       retries: 5
 
   site-sync:
-    build:
-      context: .
-      dockerfile: site/Dockerfile
     image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
     restart: unless-stopped
     command: ["python", "-m", "upm_site.worker", "--sync"]
@@ -97,6 +111,8 @@ services:
     depends_on:
       site-postgres:
         condition: service_healthy
+      site-migrate:
+        condition: service_completed_successfully
     volumes:
       - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:

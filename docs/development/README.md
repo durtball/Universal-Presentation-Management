@@ -45,6 +45,15 @@ docker compose --env-file .env -f docker-compose.central.yml up -d
 docker compose --env-file .env -f docker-compose.site.yml up -d
 ```
 
+Each Compose deployment first waits for its own PostgreSQL health check, then runs its
+one-shot migration service (`central-migrate` or `site-migrate`). The API, worker, and
+synchronization services start only after `alembic upgrade head` exits successfully. A migration
+failure makes Compose fail and leaves dependent services stopped. Repeating `up` safely applies
+only migrations that are not already recorded in that deployment's Alembic version table.
+
+The application images contain their corresponding migration directory. Production and test
+execution must not bind-mount `database/` from a Git working tree.
+
 Check container state and the existing API health endpoints through each
 deployment's Caddy edge:
 
@@ -66,5 +75,16 @@ docker compose --env-file .env -f docker-compose.site.yml down
 
 The API containers run as non-root users. Central and Site use distinct images,
 configuration variables, PostgreSQL services, networks, and deployment
-lifecycles. The worker and synchronization containers remain separate process
-placeholders; this milestone does not implement their logic.
+lifecycles. Central migration code cannot reach the Site database and Site migration code cannot
+reach the Central database. See [ADR-0005](../architecture/decisions/ADR-0005-container-migration-gates.md)
+for deployment ordering and failure semantics.
+
+On Linux with Docker available, the full fresh-stack, repeated-migration, failure-gate, worker
+health, and database-separation smoke test is:
+
+```bash
+./scripts/test-compose-migrations.sh
+```
+
+The smoke test creates uniquely named disposable Compose projects and removes only those test
+projects and their volumes when it exits.

@@ -11,8 +11,10 @@ services:
       - central-caddy-data:/data
       - central-caddy-config:/config
     depends_on:
-      - central-api
-      - central-web
+      central-api:
+        condition: service_healthy
+      central-web:
+        condition: service_started
     networks:
       - central-edge
 
@@ -29,6 +31,8 @@ services:
     depends_on:
       central-postgres:
         condition: service_healthy
+      central-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
       interval: 10s
@@ -48,10 +52,21 @@ services:
     networks:
       - central-edge
 
+  central-migrate:
+    image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
+    restart: "no"
+    command: ["alembic", "-c", "database/central/alembic.ini", "upgrade", "head"]
+    environment:
+      UPM_COMPONENT: central-migrate
+      DATABASE_HOST: central-postgres
+      UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+    depends_on:
+      central-postgres:
+        condition: service_healthy
+    networks:
+      - central-internal
+
   central-worker:
-    build:
-      context: .
-      dockerfile: central/Dockerfile
     image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
     restart: unless-stopped
     command: ["python", "-m", "upm_central.worker"]
@@ -65,6 +80,8 @@ services:
     depends_on:
       central-postgres:
         condition: service_healthy
+      central-migrate:
+        condition: service_completed_successfully
     networks:
       - central-internal
     healthcheck:
@@ -74,9 +91,6 @@ services:
       retries: 5
 
   central-sync:
-    build:
-      context: .
-      dockerfile: central/Dockerfile
     image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
     restart: unless-stopped
     command: ["python", "-m", "upm_central.worker", "--sync"]
@@ -88,6 +102,8 @@ services:
     depends_on:
       central-postgres:
         condition: service_healthy
+      central-migrate:
+        condition: service_completed_successfully
     networks:
       - central-internal
       - central-sync-egress

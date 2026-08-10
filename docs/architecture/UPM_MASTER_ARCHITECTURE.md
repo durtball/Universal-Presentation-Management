@@ -893,6 +893,9 @@ Requirements:
 - Downgrade/rollback strategy should be defined where feasible.
 - Alembic is the migration framework for the Python server stack.
 - Central and Site use separate Alembic configurations and independent revision graphs; neither database must be reachable to migrate the other.
+- Container deployments run version-matched, one-shot migration services before starting APIs,
+  workers, or synchronization processes. Central and Site migration gates remain independent;
+  see [ADR-0005](decisions/ADR-0005-container-migration-gates.md).
 
 ---
 
