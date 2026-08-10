@@ -41,3 +41,59 @@ jobs:
           set -euo pipefail
           empty_tree="$(git hash-object -t tree /dev/null)"
           git diff --check "$empty_tree" HEAD -- . ':!docs/architecture/UPM_MASTER_ARCHITECTURE.md'
+
+  validate-python-domain:
+    runs-on: ubuntu-latest
+    services:
+      central-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: upm_central_test
+          POSTGRES_USER: upm_central_test
+          POSTGRES_PASSWORD: upm-test-only-password
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U upm_central_test -d upm_central_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      site-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: upm_site_test
+          POSTGRES_USER: upm_site_test
+          POSTGRES_PASSWORD: upm-test-only-password
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U upm_site_test -d upm_site_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      UPM_CENTRAL_DATABASE_URL: postgresql+psycopg://upm_central_test:upm-test-only-password@127.0.0.1:55432/upm_central_test
+      UPM_SITE_DATABASE_URL: postgresql+psycopg://upm_site_test:upm-test-only-password@127.0.0.1:55433/upm_site_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Synchronize locked dependencies
+        run: uv sync --locked --all-packages
+
+      - name: Lint and format check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Apply isolated migrations
+        run: |
+          uv run alembic -c database/central/alembic.ini upgrade head
+          uv run alembic -c database/site/alembic.ini upgrade head
+          uv run alembic -c database/central/alembic.ini check
+          uv run alembic -c database/site/alembic.ini check
+
+      - name: Test domain foundation
+        run: uv run pytest

@@ -21,6 +21,7 @@ Write-Host 'Checking UPM development prerequisites...'
 
 Assert-Command -Name 'git' -InstallHint 'Install Git and ensure it is available on PATH.'
 Assert-Command -Name 'docker' -InstallHint 'Install Docker Desktop or Docker Engine and ensure it is available on PATH.'
+Assert-Command -Name 'uv' -InstallHint 'Install uv from https://docs.astral.sh/uv/ and ensure it is available on PATH.'
 
 try {
     docker compose version | Out-Host
@@ -44,6 +45,8 @@ foreach ($directory in $developmentDirectories) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
-Write-Host 'Git, Docker, and Docker Compose are available.'
+uv --version | Out-Host
+
+Write-Host 'Git, Docker, Docker Compose, and uv are available.'
 Write-Host 'Prepared ignored local development directories under .local/.'
 Write-Host 'No software was installed and no containers were started.'

@@ -1,0 +1,557 @@
+"""Site-local persistence models required for autonomous event operation."""
+
+from datetime import UTC, datetime
+from decimal import Decimal
+from enum import Enum as PythonEnum
+from uuid import UUID
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from upm_shared.enums import (
+    AssetKind,
+    DeviceRole,
+    JobStatus,
+    MediaCategory,
+    SourceSystem,
+    StorageHealth,
+    StorageType,
+    SyncState,
+)
+from upm_shared.identifiers import new_uuid7
+from upm_site.persistence.base import SiteBase
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def enum_values(enum_class: type[PythonEnum]) -> list[str]:
+    return [str(member.value) for member in enum_class]
+
+
+def upm_enum(enum_class: type[PythonEnum], *, length: int) -> Enum:
+    return Enum(
+        enum_class,
+        native_enum=False,
+        create_constraint=True,
+        values_callable=enum_values,
+        length=length,
+    )
+
+
+class SiteRecordMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class Site(SiteRecordMixin, SiteBase):
+    __tablename__ = "sites"
+
+    site_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=new_uuid7)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    central_revision: Mapped[int | None] = mapped_column(Integer)
+
+
+class PersonProjection(SiteRecordMixin, SiteBase):
+    """Site-local projection of a Central-owned permanent identity."""
+
+    __tablename__ = "person_projections"
+
+    person_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    primary_email: Mapped[str | None] = mapped_column(String(320))
+    organization: Mapped[str | None] = mapped_column(String(255))
+    central_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(upm_enum(SyncState, length=24), nullable=False)
+
+
+class Event(SiteRecordMixin, SiteBase):
+    __tablename__ = "events"
+
+    event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    participations: Mapped[list["EventParticipation"]] = relationship(back_populates="event")
+    sessions: Mapped[list["Session"]] = relationship(back_populates="event")
+
+
+class EventParticipation(SiteRecordMixin, SiteBase):
+    __tablename__ = "event_participations"
+    __table_args__ = (UniqueConstraint("event_id", "person_id"),)
+
+    event_participation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    person_id: Mapped[UUID] = mapped_column(
+        ForeignKey("person_projections.person_id", ondelete="RESTRICT"), nullable=False
+    )
+    role: Mapped[str | None] = mapped_column(String(100))
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    event: Mapped[Event] = relationship(back_populates="participations")
+    session_participations: Mapped[list["SessionParticipant"]] = relationship(
+        back_populates="event_participation"
+    )
+
+
+class Session(SiteRecordMixin, SiteBase):
+    __tablename__ = "sessions"
+
+    session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    event: Mapped[Event] = relationship(back_populates="sessions")
+    participants: Mapped[list["SessionParticipant"]] = relationship(back_populates="session")
+    presentations: Mapped[list["Presentation"]] = relationship(back_populates="session")
+    room_assignments: Mapped[list["RoomAssignment"]] = relationship(back_populates="session")
+
+
+class SessionParticipant(SiteRecordMixin, SiteBase):
+    __tablename__ = "session_participants"
+    __table_args__ = (UniqueConstraint("session_id", "event_participation_id", "role"),)
+
+    session_participant_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_participation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("event_participations.event_participation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    session: Mapped[Session] = relationship(back_populates="participants")
+    event_participation: Mapped[EventParticipation] = relationship(
+        back_populates="session_participations"
+    )
+
+
+class Presentation(SiteRecordMixin, SiteBase):
+    __tablename__ = "presentations"
+
+    presentation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT")
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    session: Mapped[Session | None] = relationship(back_populates="presentations")
+    versions: Mapped[list["PresentationVersion"]] = relationship(back_populates="presentation")
+
+
+class PresentationPresenter(SiteBase):
+    __tablename__ = "presentation_presenters"
+
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), primary_key=True
+    )
+    session_participant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("session_participants.session_participant_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+
+
+class PresentationVersion(SiteRecordMixin, SiteBase):
+    __tablename__ = "presentation_versions"
+    __table_args__ = (
+        UniqueConstraint("presentation_id", "version_number"),
+        CheckConstraint("version_number >= 1", name="version_number_positive"),
+    )
+
+    presentation_version_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    presentation: Mapped[Presentation] = relationship(back_populates="versions")
+    assets: Mapped[list["PresentationAsset"]] = relationship(back_populates="version")
+
+
+class Room(SiteRecordMixin, SiteBase):
+    __tablename__ = "rooms"
+    __table_args__ = (UniqueConstraint("site_id", "label"),)
+
+    room_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=new_uuid7)
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+
+    session_assignments: Mapped[list["RoomAssignment"]] = relationship(back_populates="room")
+    device_assignments: Mapped[list["DeviceAssignment"]] = relationship(back_populates="room")
+
+
+class RoomAssignment(SiteRecordMixin, SiteBase):
+    __tablename__ = "room_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at",
+            name="valid_time_range",
+        ),
+    )
+
+    room_assignment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("rooms.room_id", ondelete="RESTRICT"), nullable=False
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT"), nullable=False
+    )
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    room: Mapped[Room] = relationship(back_populates="session_assignments")
+    session: Mapped[Session] = relationship(back_populates="room_assignments")
+
+
+class Device(SiteRecordMixin, SiteBase):
+    __tablename__ = "devices"
+
+    device_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    assignments: Mapped[list["DeviceAssignment"]] = relationship(back_populates="device")
+
+
+class DeviceAssignment(SiteRecordMixin, SiteBase):
+    __tablename__ = "device_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at",
+            name="valid_time_range",
+        ),
+    )
+
+    device_assignment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    device_id: Mapped[UUID] = mapped_column(
+        ForeignKey("devices.device_id", ondelete="RESTRICT"), nullable=False
+    )
+    room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("rooms.room_id", ondelete="RESTRICT"), nullable=False
+    )
+    role: Mapped[DeviceRole] = mapped_column(upm_enum(DeviceRole, length=16), nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    device: Mapped[Device] = relationship(back_populates="assignments")
+    room: Mapped[Room] = relationship(back_populates="device_assignments")
+
+
+class StorageTarget(SiteRecordMixin, SiteBase):
+    __tablename__ = "storage_targets"
+    __table_args__ = (
+        UniqueConstraint("site_id", "display_name"),
+        CheckConstraint("root_path LIKE '/%'", name="root_path_absolute"),
+        CheckConstraint(
+            "warning_free_bytes IS NULL OR warning_free_bytes >= 0",
+            name="warning_nonnegative",
+        ),
+        CheckConstraint(
+            "critical_free_bytes IS NULL OR critical_free_bytes >= 0",
+            name="critical_nonnegative",
+        ),
+        CheckConstraint(
+            "warning_free_bytes IS NULL OR critical_free_bytes IS NULL OR "
+            "warning_free_bytes >= critical_free_bytes",
+            name="threshold_order",
+        ),
+        Index(
+            "uq_site_one_primary_storage_target",
+            "site_id",
+            unique=True,
+            postgresql_where=text("primary_media AND enabled"),
+        ),
+    )
+
+    storage_target_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_type: Mapped[StorageType] = mapped_column(
+        upm_enum(StorageType, length=32), nullable=False
+    )
+    root_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    primary_media: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    health: Mapped[StorageHealth] = mapped_column(
+        upm_enum(StorageHealth, length=24),
+        default=StorageHealth.UNKNOWN,
+        nullable=False,
+    )
+    warning_free_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    critical_free_bytes: Mapped[int | None] = mapped_column(BigInteger)
+
+    media_objects: Mapped[list["MediaObject"]] = relationship(back_populates="storage_target")
+
+
+class MediaObject(SiteRecordMixin, SiteBase):
+    __tablename__ = "media_objects"
+    __table_args__ = (
+        UniqueConstraint("storage_target_id", "object_key"),
+        CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="size_nonnegative"),
+        CheckConstraint(
+            "object_key !~ '(^/|^\\\\|(^|/)\\.\\.(/|$))'",
+            name="object_key_relative",
+        ),
+    )
+
+    media_object_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    storage_target_id: Mapped[UUID] = mapped_column(
+        ForeignKey("storage_targets.storage_target_id", ondelete="RESTRICT"), nullable=False
+    )
+    object_key: Mapped[str] = mapped_column(String(2048), nullable=False)
+    category: Mapped[MediaCategory] = mapped_column(
+        upm_enum(MediaCategory, length=32), nullable=False
+    )
+    content_hash: Mapped[str | None] = mapped_column(String(255))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    mime_type: Mapped[str | None] = mapped_column(String(255))
+    source_media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
+    )
+    available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    storage_target: Mapped[StorageTarget] = relationship(back_populates="media_objects")
+
+
+class PresentationAsset(SiteRecordMixin, SiteBase):
+    __tablename__ = "presentation_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "(kind = 'original' AND source_asset_id IS NULL) OR "
+            "(kind = 'derivative' AND source_asset_id IS NOT NULL)",
+            name="derivative_source",
+        ),
+    )
+
+    presentation_asset_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    presentation_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    media_object_id: Mapped[UUID] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT"), nullable=False
+    )
+    kind: Mapped[AssetKind] = mapped_column(upm_enum(AssetKind, length=16), nullable=False)
+    source_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_assets.presentation_asset_id", ondelete="RESTRICT")
+    )
+
+    version: Mapped[PresentationVersion] = relationship(back_populates="assets")
+
+
+class TransferJob(SiteRecordMixin, SiteBase):
+    __tablename__ = "transfer_jobs"
+    __table_args__ = (
+        CheckConstraint("progress >= 0 AND progress <= 100", name="progress_range"),
+        CheckConstraint("retry_count >= 0", name="retry_count_nonnegative"),
+        CheckConstraint("max_retries >= 0", name="max_retries_nonnegative"),
+    )
+
+    transfer_job_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
+    )
+    status: Mapped[JobStatus] = mapped_column(
+        upm_enum(JobStatus, length=16), default=JobStatus.QUEUED, nullable=False
+    )
+    progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"), nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProcessingJob(SiteRecordMixin, SiteBase):
+    __tablename__ = "processing_jobs"
+    __table_args__ = (
+        CheckConstraint("progress >= 0 AND progress <= 100", name="progress_range"),
+        CheckConstraint("retry_count >= 0", name="retry_count_nonnegative"),
+        CheckConstraint("max_retries >= 0", name="max_retries_nonnegative"),
+    )
+
+    processing_job_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
+    )
+    job_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        upm_enum(JobStatus, length=16), default=JobStatus.QUEUED, nullable=False
+    )
+    progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"), nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    required_capability: Mapped[str | None] = mapped_column(String(100))
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SyncEvent(SiteRecordMixin, SiteBase):
+    __tablename__ = "sync_events"
+    __table_args__ = (
+        UniqueConstraint("source_system", "idempotency_key"),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+    )
+
+    sync_event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    source_system: Mapped[SourceSystem] = mapped_column(
+        upm_enum(SourceSystem, length=16), nullable=False
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    aggregate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.PENDING, nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class AuditRecord(SiteBase):
+    __tablename__ = "audit_records"
+
+    audit_record_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    actor_id: Mapped[str | None] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    before_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    after_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)

@@ -23,11 +23,13 @@ services:
     environment:
       UPM_COMPONENT: site-api
       DATABASE_HOST: site-postgres
+      UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
+      UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     depends_on:
       site-postgres:
         condition: service_healthy
     volumes:
-      - site-media-data:/var/lib/upm/media
+      - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:
       - site-edge
       - site-internal
@@ -48,11 +50,13 @@ services:
     environment:
       UPM_COMPONENT: site-worker
       DATABASE_HOST: site-postgres
+      UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
+      UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     depends_on:
       site-postgres:
         condition: service_healthy
     volumes:
-      - site-media-data:/var/lib/upm/media
+      - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:
       - site-internal
 
@@ -63,11 +67,13 @@ services:
     environment:
       UPM_COMPONENT: site-sync
       DATABASE_HOST: site-postgres
+      UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
+      UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     depends_on:
       site-postgres:
         condition: service_healthy
     volumes:
-      - site-media-data:/var/lib/upm/media
+      - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:
       - site-internal
       - site-sync-egress
@@ -99,4 +105,3 @@ volumes:
   site-caddy-data:
   site-caddy-config:
   site-postgres-data:
-  site-media-data:
