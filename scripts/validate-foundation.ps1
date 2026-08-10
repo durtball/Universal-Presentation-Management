@@ -58,7 +58,7 @@ try {
 
     $emptyFiles = @($requiredPaths | Where-Object {
         (Test-Path -LiteralPath $_ -PathType Leaf) -and
-        (Get-Item -LiteralPath $_).Length -eq 0
+        (Get-Item -Force -LiteralPath $_).Length -eq 0
     })
     if ($emptyFiles.Count -gt 0) {
         throw "Required foundation files are empty:`n$($emptyFiles -join "`n")"
@@ -75,7 +75,7 @@ try {
         throw "Forbidden environment files are tracked:`n$($trackedEnvironmentFiles -join "`n")"
     }
 
-    $gitignore = Get-Content -LiteralPath '.gitignore' -Raw
+    $gitignore = Get-Content -Force -LiteralPath '.gitignore' -Raw
     if ($gitignore -notmatch '(?m)^\.env$' -or $gitignore -notmatch '(?m)^!\.env\.example$') {
         throw '.gitignore must ignore .env while allowing .env.example.'
     }
