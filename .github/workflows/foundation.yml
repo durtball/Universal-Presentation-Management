@@ -83,6 +83,8 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       UPM_CENTRAL_DATABASE_URL: postgresql+psycopg://upm_central_test:upm-test-only-password@127.0.0.1:55432/upm_central_test
+      UPM_CENTRAL_ADMIN_TOKEN: ci-test-only-central-admin-token-at-least-32-characters
+      UPM_CENTRAL_CREDENTIAL_ISSUER_KEY: ci-test-only-central-issuer-key-at-least-32-characters
       UPM_SITE_DATABASE_URL: postgresql+psycopg://upm_site_test:upm-test-only-password@127.0.0.1:55433/upm_site_test
     steps:
       - name: Check out repository
