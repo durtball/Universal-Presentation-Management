@@ -1,9 +1,31 @@
-"""Independent UPM Site FastAPI application boundary."""
+"""Independent UPM Site FastAPI application boundary and media API."""
 
-from typing import Literal
+from collections.abc import Iterator
+from datetime import datetime
+from typing import Annotated, Literal
+from uuid import UUID
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from upm_shared.enums import MediaAvailability, MediaCategory, StorageHealth
+from upm_site.config import SiteSettings
+from upm_site.media.ingestion import (
+    IngestionConflictError,
+    IngestionError,
+    IngestionRequest,
+    MediaIngestionService,
+)
+from upm_site.media.storage import (
+    InsufficientCapacityError,
+    StorageError,
+    StorageObservation,
+    observe_storage,
+)
+from upm_site.persistence.database import create_site_engine, create_site_session_factory
+from upm_site.persistence.models import MediaObject, PresentationAsset, ProcessingJob, StorageTarget
 
 
 class HealthResponse(BaseModel):
@@ -13,16 +35,237 @@ class HealthResponse(BaseModel):
     status: Literal["foundation-ready"] = "foundation-ready"
 
 
-def create_app() -> FastAPI:
+class MediaResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    media_object_id: UUID
+    site_id: UUID
+    event_id: UUID | None
+    storage_target_id: UUID
+    object_key: str
+    category: MediaCategory
+    original_filename: str
+    mime_type: str | None
+    size_bytes: int | None = Field(ge=0)
+    hash_algorithm: str | None
+    content_hash: str | None
+    availability: MediaAvailability
+    failure_reason: str | None
+    presentation_asset_id: UUID | None = None
+    processing_job_id: UUID | None = None
+    created_at: datetime
+
+
+class IngestionResponse(MediaResponse):
+    duplicate_retry: bool = False
+
+
+class IngestionStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    media_object_id: UUID
+    availability: MediaAvailability
+    failure_reason: str | None
+    size_bytes: int | None
+    content_hash: str | None
+
+
+class StorageHealthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    storage_target_id: UUID
+    display_name: str
+    enabled: bool
+    primary_media: bool
+    observed_at: datetime
+    available: bool
+    root_exists: bool
+    writable: bool
+    total_bytes: int | None
+    used_bytes: int | None
+    free_bytes: int | None
+    health: StorageHealth
+    warning_threshold_reached: bool
+    critical_threshold_reached: bool
+    detail: str | None
+
+
+def _media_response(session: Session, media: MediaObject) -> MediaResponse:
+    asset_id = session.scalar(
+        select(PresentationAsset.presentation_asset_id).where(
+            PresentationAsset.media_object_id == media.media_object_id
+        )
+    )
+    job_id = session.scalar(
+        select(ProcessingJob.processing_job_id).where(
+            ProcessingJob.media_object_id == media.media_object_id
+        )
+    )
+    return MediaResponse(
+        media_object_id=media.media_object_id,
+        site_id=media.site_id,
+        event_id=media.event_id,
+        storage_target_id=media.storage_target_id,
+        object_key=media.object_key,
+        category=media.category,
+        original_filename=media.original_filename,
+        mime_type=media.mime_type,
+        size_bytes=media.size_bytes,
+        hash_algorithm=media.hash_algorithm,
+        content_hash=media.content_hash,
+        availability=media.availability,
+        failure_reason=media.failure_reason,
+        presentation_asset_id=asset_id,
+        processing_job_id=job_id,
+        created_at=media.created_at,
+    )
+
+
+def _health_response(
+    target: StorageTarget, observation: StorageObservation
+) -> StorageHealthResponse:
+    return StorageHealthResponse(
+        display_name=target.display_name,
+        enabled=target.enabled,
+        primary_media=target.primary_media,
+        **{field: getattr(observation, field) for field in StorageObservation.__dataclass_fields__},
+    )
+
+
+def create_app(
+    *,
+    settings: SiteSettings | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> FastAPI:
     """Create the Site API without importing Central application state."""
     app = FastAPI(
         title="UPM Site API",
-        version="0.1.0",
-        description="UPM Site foundation API; operational endpoints are not implemented yet.",
+        version="0.2.0",
+        description="Site-local operational API including authoritative media ingestion.",
     )
+    resources: dict[str, object] = {}
+
+    def get_settings() -> SiteSettings:
+        configured = settings
+        if configured is None:
+            configured = resources.get("settings")  # type: ignore[assignment]
+        if configured is None:
+            configured = SiteSettings()
+            resources["settings"] = configured
+        return configured
+
+    def get_factory() -> sessionmaker[Session]:
+        configured = session_factory
+        if configured is not None:
+            return configured
+        cached = resources.get("factory")
+        if cached is None:
+            engine = create_site_engine(get_settings())
+            cached = create_site_session_factory(engine)
+            resources["engine"] = engine
+            resources["factory"] = cached
+        return cached  # type: ignore[return-value]
+
+    def get_session() -> Iterator[Session]:
+        with get_factory()() as session:
+            yield session
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.post(
+        "/api/v1/media/ingestions",
+        response_model=IngestionResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["media"],
+    )
+    async def ingest_media(
+        http_request: Request,
+        site_id: Annotated[UUID, Query()],
+        category: Annotated[MediaCategory, Query()],
+        original_filename: Annotated[str, Header(alias="X-UPM-Original-Filename")],
+        expected_size: Annotated[int | None, Query(ge=0)] = None,
+        event_id: Annotated[UUID | None, Query()] = None,
+        presentation_version_id: Annotated[UUID | None, Query()] = None,
+        storage_target_id: Annotated[UUID | None, Query()] = None,
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=255)
+        ] = None,
+        content_length: Annotated[int | None, Header(alias="Content-Length", ge=0)] = None,
+        content_type: Annotated[str | None, Header(alias="Content-Type")] = None,
+    ) -> IngestionResponse:
+        service = MediaIngestionService(
+            get_factory(), max_upload_bytes=get_settings().max_upload_bytes
+        )
+        request = IngestionRequest(
+            site_id=site_id,
+            original_filename=original_filename,
+            category=category,
+            expected_size=expected_size if expected_size is not None else content_length,
+            event_id=event_id,
+            presentation_version_id=presentation_version_id,
+            storage_target_id=storage_target_id,
+            idempotency_key=idempotency_key,
+            client_mime_type=content_type,
+        )
+        try:
+            result = await service.ingest_async(request, http_request.stream())
+        except IngestionConflictError as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except InsufficientCapacityError as error:
+            raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, detail=str(error)) from error
+        except (IngestionError, StorageError, ValueError) as error:
+            code = (
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                if getattr(error, "code", "") == "too_large"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(code, detail=str(error)) from error
+        with get_factory()() as session:
+            media = session.get(MediaObject, result.media_object_id)
+            if media is None:
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "media metadata missing")
+            response = _media_response(session, media)
+        return IngestionResponse(**response.model_dump(), duplicate_retry=result.duplicate_retry)
+
+    @app.get("/api/v1/media/{media_object_id}", response_model=MediaResponse, tags=["media"])
+    def get_media(
+        media_object_id: UUID, session: Annotated[Session, Depends(get_session)]
+    ) -> MediaResponse:
+        media = session.get(MediaObject, media_object_id)
+        if media is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "media object not found")
+        return _media_response(session, media)
+
+    @app.get(
+        "/api/v1/media/{media_object_id}/status",
+        response_model=IngestionStatusResponse,
+        tags=["media"],
+    )
+    def get_ingestion_status(
+        media_object_id: UUID, session: Annotated[Session, Depends(get_session)]
+    ) -> IngestionStatusResponse:
+        media = session.get(MediaObject, media_object_id)
+        if media is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "media object not found")
+        return IngestionStatusResponse(
+            media_object_id=media.media_object_id,
+            availability=media.availability,
+            failure_reason=media.failure_reason,
+            size_bytes=media.size_bytes,
+            content_hash=media.content_hash,
+        )
+
+    @app.get(
+        "/api/v1/storage-targets/health",
+        response_model=list[StorageHealthResponse],
+        tags=["storage"],
+    )
+    def storage_health(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[StorageHealthResponse]:
+        targets = session.scalars(select(StorageTarget).order_by(StorageTarget.display_name)).all()
+        return [_health_response(target, observe_storage(target)) for target in targets]
 
     return app

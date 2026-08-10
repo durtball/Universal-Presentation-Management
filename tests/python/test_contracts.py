@@ -16,6 +16,7 @@ from upm_shared.contracts.entities import (
 from upm_shared.domain.media import LogicalMediaLocation, validate_object_key
 from upm_shared.enums import (
     AssetKind,
+    MediaAvailability,
     MediaCategory,
     SourceSystem,
     StorageType,
@@ -96,6 +97,11 @@ def test_media_location_uses_storage_target_and_logical_key() -> None:
         storage_target_id=target_id,
         object_key=location.object_key,
         category=MediaCategory.PRESENTATION,
+        original_filename="presentation.pptx",
+        size_bytes=1,
+        content_hash="a" * 64,
+        hash_algorithm="sha256",
+        availability=MediaAvailability.AVAILABLE,
         ownership=OwnershipMetadata(owning_site_id=new_uuid7(), source_system=SourceSystem.SITE),
         metadata=sync_metadata(),
     )

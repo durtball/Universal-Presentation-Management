@@ -27,6 +27,8 @@ services:
       DATABASE_HOST: site-postgres
       UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
       UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
+      UPM_SITE_MAX_UPLOAD_BYTES: ${UPM_SITE_MAX_UPLOAD_BYTES:-549755813888}
+      UPM_SITE_STAGING_MAX_AGE_SECONDS: ${UPM_SITE_STAGING_MAX_AGE_SECONDS:-86400}
     depends_on:
       site-postgres:
         condition: service_healthy

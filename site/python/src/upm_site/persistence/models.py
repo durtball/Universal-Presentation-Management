@@ -29,6 +29,7 @@ from upm_shared.enums import (
     DeviceRole,
     JobPriority,
     JobStatus,
+    MediaAvailability,
     MediaCategory,
     SourceSystem,
     StorageHealth,
@@ -343,6 +344,7 @@ class StorageTarget(SiteRecordMixin, SiteBase):
             "warning_free_bytes >= critical_free_bytes",
             name="threshold_order",
         ),
+        CheckConstraint("safety_reserve_bytes >= 0", name="safety_reserve_nonnegative"),
         Index(
             "uq_site_one_primary_storage_target",
             "site_id",
@@ -371,6 +373,9 @@ class StorageTarget(SiteRecordMixin, SiteBase):
     )
     warning_free_bytes: Mapped[int | None] = mapped_column(BigInteger)
     critical_free_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    safety_reserve_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=1_073_741_824, nullable=False
+    )
 
     media_objects: Mapped[list["MediaObject"]] = relationship(back_populates="storage_target")
 
@@ -383,6 +388,13 @@ class MediaObject(SiteRecordMixin, SiteBase):
         CheckConstraint(
             "object_key !~ '(^/|^\\\\|(^|/)\\.\\.(/|$))'",
             name="object_key_relative",
+        ),
+        UniqueConstraint("site_id", "ingestion_idempotency_key"),
+        CheckConstraint(
+            "(availability = 'available' AND size_bytes IS NOT NULL AND "
+            "content_hash IS NOT NULL AND hash_algorithm IS NOT NULL) OR "
+            "availability <> 'available'",
+            name="available_metadata_complete",
         ),
     )
 
@@ -402,13 +414,21 @@ class MediaObject(SiteRecordMixin, SiteBase):
     category: Mapped[MediaCategory] = mapped_column(
         upm_enum(MediaCategory, length=32), nullable=False
     )
+    original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_hash: Mapped[str | None] = mapped_column(String(255))
+    hash_algorithm: Mapped[str | None] = mapped_column(String(32))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(255))
+    availability: Mapped[MediaAvailability] = mapped_column(
+        upm_enum(MediaAvailability, length=16),
+        default=MediaAvailability.STAGING,
+        nullable=False,
+    )
+    ingestion_idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    failure_reason: Mapped[str | None] = mapped_column(String(1024))
     source_media_object_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
     )
-    available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     storage_target: Mapped[StorageTarget] = relationship(back_populates="media_objects")

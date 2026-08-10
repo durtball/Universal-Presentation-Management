@@ -46,6 +46,9 @@ jobs:
           docker compose --env-file .env.example -f docker-compose.central.yml build central-worker central-sync
           docker compose --env-file .env.example -f docker-compose.site.yml build site-worker site-sync
 
+      - name: Scan tracked content for secrets
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.27.2 detect --source=/repo --redact --no-banner
+
       - name: Check whitespace errors
         shell: bash
         run: |
@@ -115,3 +118,43 @@ jobs:
           uv run python -m upm_central.worker --sync --once
           uv run python -m upm_site.worker --once
           uv run python -m upm_site.worker --sync --once
+
+  site-media-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start Site with an isolated media bind mount
+        shell: bash
+        run: |
+          set -euo pipefail
+          export UPM_SITE_PROJECT_NAME=upm-site-media-ci
+          export SITE_MEDIA_HOST_PATH="$RUNNER_TEMP/upm-site-media"
+          mkdir -p "$SITE_MEDIA_HOST_PATH"
+          chmod 0777 "$SITE_MEDIA_HOST_PATH"
+          docker compose --env-file .env.example -f docker-compose.site.yml up -d site-postgres
+          docker compose --env-file .env.example -f docker-compose.site.yml run --rm site-api \
+            alembic -c database/site/alembic.ini upgrade head
+          docker compose --env-file .env.example -f docker-compose.site.yml up -d site-api
+          for attempt in {1..30}; do
+            if docker compose --env-file .env.example -f docker-compose.site.yml exec -T site-api \
+              python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()"; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker compose --env-file .env.example -f docker-compose.site.yml logs site-api
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose --env-file .env.example -f docker-compose.site.yml exec -T site-api \
+            python scripts/site-media-smoke.py
+
+      - name: Stop temporary Site containers
+        if: always()
+        shell: bash
+        run: |
+          export UPM_SITE_PROJECT_NAME=upm-site-media-ci
+          export SITE_MEDIA_HOST_PATH="$RUNNER_TEMP/upm-site-media"
+          docker compose --env-file .env.example -f docker-compose.site.yml down --volumes --remove-orphans

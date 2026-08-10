@@ -7,5 +7,6 @@ Architecture Decision Records (ADRs) capture implementation decisions that refin
 | [ADR-0001](ADR-0001-backend-persistence-stack.md) | Accepted | Backend and persistence stack |
 | [ADR-0002](ADR-0002-site-media-storage.md) | Accepted | Site-authoritative configurable media storage |
 | [ADR-0003](ADR-0003-postgresql-durable-jobs-and-outbox.md) | Accepted | PostgreSQL durable jobs and transactional outbox |
+| [ADR-0004](ADR-0004-site-media-ingestion-finalization.md) | Accepted | Site media ingestion and filesystem finalization |
 
 New decisions must not silently weaken Central/Site separation, Site offline autonomy, PostgreSQL requirements, or other master-architecture constraints.

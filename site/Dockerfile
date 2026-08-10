@@ -19,6 +19,8 @@ RUN uv sync --frozen --no-dev --package upm-site --no-install-workspace
 
 COPY shared/python/src shared/python/src
 COPY site/python/src site/python/src
+COPY database/site database/site
+COPY scripts/site-media-smoke.py scripts/site-media-smoke.py
 
 RUN uv sync --frozen --no-dev --package upm-site --no-editable
 
@@ -33,6 +35,8 @@ RUN groupadd --gid 10001 upm \
     && useradd --uid 10001 --gid upm --no-create-home --shell /usr/sbin/nologin upm
 
 COPY --from=builder --chown=upm:upm /app/.venv /app/.venv
+COPY --from=builder --chown=upm:upm /app/database /app/database
+COPY --from=builder --chown=upm:upm /app/scripts /app/scripts
 
 USER upm
 EXPOSE 8080

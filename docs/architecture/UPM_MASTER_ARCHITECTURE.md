@@ -354,6 +354,10 @@ Media locations reference a `storage_target_id` plus a validated logical relativ
 
 Detailed storage decisions are recorded in [ADR-0002](decisions/ADR-0002-site-media-storage.md).
 
+Site ingestion uses same-target staging, generated logical object keys, SHA-256 verification,
+explicit availability states, no-replace atomic publication, and recovery reconciliation as
+recorded in [ADR-0004](decisions/ADR-0004-site-media-ingestion-finalization.md).
+
 ### Media requirements
 
 The media subsystem must support:

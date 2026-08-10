@@ -96,6 +96,14 @@ class MediaCategory(StrEnum):
     ARCHIVE = "archive"
 
 
+class MediaAvailability(StrEnum):
+    STAGING = "staging"
+    FINALIZING = "finalizing"
+    AVAILABLE = "available"
+    FAILED = "failed"
+    QUARANTINED = "quarantined"
+
+
 class AssetKind(StrEnum):
     ORIGINAL = "original"
     DERIVATIVE = "derivative"
