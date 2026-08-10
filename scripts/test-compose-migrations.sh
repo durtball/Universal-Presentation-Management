@@ -19,6 +19,7 @@ cd "$repository_root"
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/upm-compose-migrations.XXXXXX")"
 run_id="$(date +%s)-$$"
+integration_network="upm-integration-migration-test-$run_id"
 env_file="$test_root/test.env"
 failure_override="$test_root/failing-migration.yml"
 mkdir -p "$test_root/site-media"
@@ -31,6 +32,8 @@ CENTRAL_POSTGRES_DB=upm_central_test
 CENTRAL_POSTGRES_USER=upm_central_test
 CENTRAL_POSTGRES_PASSWORD=compose-test-only-password
 UPM_CENTRAL_DATABASE_URL=postgresql+psycopg://upm_central_test:compose-test-only-password@central-postgres:5432/upm_central_test
+UPM_CENTRAL_ADMIN_TOKEN=compose-test-only-central-admin-token-at-least-32-characters
+UPM_CENTRAL_CREDENTIAL_ISSUER_KEY=compose-test-only-central-issuer-key-at-least-32-characters
 UPM_SITE_PROJECT_NAME=upm-site-migration-test-$run_id
 UPM_SITE_API_IMAGE=upm-site-api:migration-test-$run_id
 SITE_HTTP_PORT=0
@@ -40,6 +43,10 @@ SITE_POSTGRES_PASSWORD=compose-test-only-password
 UPM_SITE_DATABASE_URL=postgresql+psycopg://upm_site_test:compose-test-only-password@site-postgres:5432/upm_site_test
 SITE_MEDIA_HOST_PATH=$test_root/site-media
 UPM_SITE_MEDIA_MOUNT_PATH=/var/lib/upm/media
+UPM_SITE_CREDENTIAL_ENCRYPTION_KEY=compose-test-only-site-encryption-key-at-least-32-characters
+UPM_SITE_CENTRAL_URL=http://upm-central
+UPM_INTEGRATION_NETWORK=$integration_network
+UPM_INTEGRATION_NETWORK_EXTERNAL=true
 EOF
 
 cat >"$failure_override" <<'EOF'
@@ -56,11 +63,14 @@ cleanup() {
     "${failure[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
     "${site[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
     "${central[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    docker network rm "$integration_network" >/dev/null 2>&1 || true
     if [[ "$test_root" == "${TMPDIR:-/tmp}"/upm-compose-migrations.* ]]; then
         rm -rf -- "$test_root"
     fi
 }
 trap cleanup EXIT
+
+docker network create "$integration_network" >/dev/null
 
 container_health() {
     local compose_name="$1"
@@ -93,9 +103,9 @@ central_port="$("${central[@]}" port caddy 80 | tail -n 1)"
 central_port="${central_port##*:}"
 site_port="$("${site[@]}" port caddy 80 | tail -n 1)"
 site_port="${site_port##*:}"
-curl --fail --silent --show-error "http://127.0.0.1:${central_port}/api/health" |
+curl --fail --silent --show-error "http://127.0.0.1:${central_port}/health" |
     grep -q '"service":"upm-central"'
-curl --fail --silent --show-error "http://127.0.0.1:${site_port}/api/health" |
+curl --fail --silent --show-error "http://127.0.0.1:${site_port}/health" |
     grep -q '"service":"upm-site"'
 
 central_migrate_id="$("${central[@]}" ps --all --quiet central-migrate)"

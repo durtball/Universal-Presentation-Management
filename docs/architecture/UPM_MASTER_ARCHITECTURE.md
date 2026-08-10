@@ -206,6 +206,12 @@ Even if they run on the same physical host:
 - Site database remains Site-owned.
 - Shared state crosses boundaries through defined APIs/events.
 
+The registration and synchronization foundation uses permanent Site UUID identity,
+per-Site revocable application credentials, durable monotonic sequences, receiver receipts,
+and per-direction checkpoints. Sites push Site-owned events and poll for Central-owned events,
+so Central does not require inbound connectivity to a Site. See
+[ADR-0006](decisions/ADR-0006-central-site-registration-and-sync.md).
+
 ---
 
 ## 7. Identity Architecture

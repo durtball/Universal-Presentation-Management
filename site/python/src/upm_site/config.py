@@ -18,6 +18,13 @@ class SiteSettings(BaseSettings):
     worker_retry_base_seconds: Annotated[float, Field(gt=0)] = 5.0
     worker_capabilities: str = "cpu,pdf-conversion,transfer"
     worker_ready_file: str = "/tmp/upm-site-worker-ready"
+    credential_encryption_key: Annotated[str, Field(min_length=32)] | None = None
+    default_display_name: str = "UPM Site"
+    application_version: str = "0.1.0"
+    central_url: str | None = None
+    sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
+    sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
+    heartbeat_interval_seconds: Annotated[float, Field(gt=0)] = 30.0
 
     @field_validator("database_url")
     @classmethod

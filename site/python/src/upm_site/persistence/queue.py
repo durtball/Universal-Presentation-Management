@@ -168,11 +168,15 @@ class SiteQueue:
         self.session.flush()
         return event
 
-    def claim_outbox(self, worker_id: str, lease: timedelta) -> OutboxEvent | None:
+    def claim_outbox(
+        self, worker_id: str, lease: timedelta, *, synchronization_only: bool = False
+    ) -> OutboxEvent | None:
         now = utc_now()
+        statement = select(OutboxEvent)
+        if synchronization_only:
+            statement = statement.where(OutboxEvent.source_sequence.is_not(None))
         statement = (
-            select(OutboxEvent)
-            .where(
+            statement.where(
                 or_(
                     and_(
                         OutboxEvent.status.in_([JobStatus.PENDING, JobStatus.RETRY_WAIT]),

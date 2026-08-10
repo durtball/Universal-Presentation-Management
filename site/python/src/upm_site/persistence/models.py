@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from upm_shared.enums import (
     AssetKind,
     DeviceRole,
+    EnrollmentState,
     JobPriority,
     JobStatus,
     MediaAvailability,
@@ -75,6 +77,86 @@ class Site(SiteRecordMixin, SiteBase):
     site_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=new_uuid7)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     central_revision: Mapped[int | None] = mapped_column(Integer)
+
+
+class LocalSiteIdentity(SiteBase):
+    __tablename__ = "local_site_identity"
+    __table_args__ = (CheckConstraint("singleton_key = 1", name="singleton"),)
+
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), primary_key=True
+    )
+    singleton_key: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, default=1)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    installation_version: Mapped[str] = mapped_column(String(64), nullable=False, default="0.1.0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class CentralRegistration(SiteBase):
+    __tablename__ = "central_registration"
+
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), primary_key=True
+    )
+    central_url: Mapped[str | None] = mapped_column(String(2048))
+    state: Mapped[EnrollmentState] = mapped_column(
+        upm_enum(EnrollmentState, length=16), default=EnrollmentState.UNREGISTERED, nullable=False
+    )
+    claim_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    poll_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    credential_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connection_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    protocol_compatible: Mapped[bool | None] = mapped_column(Boolean)
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class SyncReceipt(SiteBase):
+    __tablename__ = "sync_receipts"
+    __table_args__ = (UniqueConstraint("event_id"),)
+
+    receipt_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    source_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SyncCursor(SiteBase):
+    __tablename__ = "sync_cursors"
+
+    direction: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    last_event_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class SyncSequence(SiteBase):
+    __tablename__ = "sync_sequences"
+
+    singleton_key: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    next_value: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+
+
+class ManagedSetting(SiteRecordMixin, SiteBase):
+    __tablename__ = "managed_settings"
+
+    setting_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    central_revision: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class PersonProjection(SiteRecordMixin, SiteBase):
@@ -614,6 +696,10 @@ class OutboxEvent(SiteBase):
     )
     payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     payload_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    protocol_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    source_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    correlation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    causation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
         upm_enum(JobStatus, length=16), default=JobStatus.PENDING, nullable=False

@@ -3,6 +3,14 @@
 }
 
 :80 {
+	handle /health {
+		reverse_proxy site-api:8080
+	}
+
+	handle /admin/* {
+		reverse_proxy site-api:8080
+	}
+
 	handle /api/health {
 		rewrite * /health
 		reverse_proxy site-api:8080

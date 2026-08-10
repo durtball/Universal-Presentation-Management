@@ -64,26 +64,24 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     service_role=role,
                     capabilities=capabilities,
                 )
-                if sync:
-                    work = queue.claim_outbox(worker_id, lease)
-                    kind = "outbox"
-                else:
+                if not sync:
                     work = queue.claim_processing(worker_id, capabilities, lease)
                     kind = "processing"
                     if work is None:
                         work = queue.claim_transfer(worker_id, capabilities, lease)
                         kind = "transfer"
+                else:
+                    # Site polling owns delivery acknowledgement. This process maintains
+                    # the dedicated lifecycle/health boundary without completing events.
+                    work = None
+                    kind = "sync"
                 if work is not None:
                     work_id = getattr(
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if sync:
-                        queue.process_outbox(work, worker_id)
-                        log("outbox_processed", worker_id=worker_id, work_id=work_id)
-                    else:
-                        queue.complete(work, worker_id)
-                        log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
+                    queue.complete(work, worker_id)
+                    log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if once:
                 break
             stop.wait(settings.worker_poll_interval_seconds)

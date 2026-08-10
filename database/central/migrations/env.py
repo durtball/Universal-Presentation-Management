@@ -17,6 +17,7 @@ target_metadata = CentralBase.metadata
 VERSION_TABLE = "alembic_version_central"
 ENUM_CHECK_SUFFIXES = (
     "_assetkind",
+    "_enrollmentstate",
     "_identitysignaltype",
     "_jobstatus",
     "_mediacategory",
