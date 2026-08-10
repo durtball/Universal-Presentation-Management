@@ -14,6 +14,7 @@ from upm_shared.enums import (
     DeviceRole,
     IdentitySignalType,
     JobStatus,
+    MediaAvailability,
     MediaCategory,
     StorageHealth,
     StorageType,
@@ -176,6 +177,7 @@ class StorageTargetContract(ContractModel):
     health: StorageHealth = StorageHealth.UNKNOWN
     warning_free_bytes: int | None = Field(default=None, ge=0)
     critical_free_bytes: int | None = Field(default=None, ge=0)
+    safety_reserve_bytes: int = Field(default=1_073_741_824, ge=0)
     metadata: SyncMetadata
 
     @field_validator("root_path")
@@ -212,8 +214,12 @@ class MediaObjectContract(ContractModel):
     storage_target_id: StorageTargetId
     object_key: str = Field(min_length=1, max_length=2048)
     category: MediaCategory
+    original_filename: str = Field(min_length=1, max_length=1024)
     size_bytes: int | None = Field(default=None, ge=0)
     content_hash: str | None = Field(default=None, max_length=255)
+    hash_algorithm: str | None = Field(default=None, max_length=32)
+    mime_type: str | None = Field(default=None, max_length=255)
+    availability: MediaAvailability
     source_media_object_id: MediaObjectId | None = None
     ownership: OwnershipMetadata
     metadata: SyncMetadata

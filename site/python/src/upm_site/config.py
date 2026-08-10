@@ -11,6 +11,8 @@ class SiteSettings(BaseSettings):
 
     database_url: str
     media_mount_path: str = "/var/lib/upm/media"
+    max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888
+    staging_max_age_seconds: Annotated[int, Field(ge=300)] = 86_400
     worker_poll_interval_seconds: Annotated[float, Field(gt=0)] = 1.0
     worker_lease_seconds: Annotated[int, Field(ge=5)] = 60
     worker_retry_base_seconds: Annotated[float, Field(gt=0)] = 5.0

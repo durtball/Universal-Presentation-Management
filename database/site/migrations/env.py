@@ -20,6 +20,7 @@ ENUM_CHECK_SUFFIXES = (
     "_devicerole",
     "_jobstatus",
     "_mediacategory",
+    "_mediaavailability",
     "_sourcesystem",
     "_storagehealth",
     "_storagetype",
