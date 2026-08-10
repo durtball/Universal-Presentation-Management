@@ -18,6 +18,7 @@ VERSION_TABLE = "alembic_version_central"
 ENUM_CHECK_SUFFIXES = (
     "_assetkind",
     "_enrollmentstate",
+    "_eventdeploymentstatus",
     "_identitysignaltype",
     "_jobstatus",
     "_mediacategory",

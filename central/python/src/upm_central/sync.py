@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from upm_central.persistence.models import (
+    EventDeployment,
     OutboxEvent,
     Site,
     SiteCredential,
@@ -22,12 +23,18 @@ from upm_central.persistence.models import (
     utc_now,
 )
 from upm_central.persistence.queue import CentralQueue
+from upm_shared.contracts.deployments import SiteDeploymentStatus
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
     EventAcknowledgement,
     SyncEventEnvelope,
 )
-from upm_shared.enums import AuthorityScope, EnrollmentState, SourceSystem
+from upm_shared.enums import (
+    AuthorityScope,
+    EnrollmentState,
+    EventDeploymentStatus,
+    SourceSystem,
+)
 from upm_shared.jobs import OutboxPayload
 
 
@@ -135,6 +142,75 @@ def apply_site_event(
         site.capabilities = list(payload.get("capabilities", []))
         site.health_summary = dict(payload)
         site.protocol_error = None
+    elif event.event_type in {
+        "site.event_deployment.received",
+        "site.event_deployment.applied",
+        "site.event_deployment.failed",
+        "site.event_deployment.status",
+        "site.event_deployment.stale",
+        "site.event_deployment.revoked",
+    }:
+        try:
+            report = SiteDeploymentStatus.model_validate(event.payload)
+        except ValueError as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_deployment_status",
+                detail=str(exc)[:512],
+            )
+        deployment = session.get(EventDeployment, report.deployment_id)
+        if (
+            deployment is None
+            or report.site_id != site.site_id
+            or deployment.site_id != site.site_id
+            or deployment.event_id != report.event_id
+            or event.entity_id != deployment.deployment_id
+        ):
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="invalid_deployment_identity",
+            )
+        deployment.last_synchronization_at = utc_now()
+        deployment.site_status = report.status
+        deployment.summary_counts = report.summary_counts
+        if report.status in {"applied", "stale"}:
+            deployment.acknowledged_revision = max(
+                deployment.acknowledged_revision,
+                min(report.applied_revision, deployment.desired_revision),
+            )
+            if deployment.acknowledged_revision == deployment.desired_revision:
+                deployment.status = (
+                    EventDeploymentStatus.REVOKED
+                    if report.status == "revoked"
+                    else EventDeploymentStatus.DEPLOYED
+                )
+                deployment.successfully_deployed_at = utc_now()
+                deployment.failure_at = None
+                deployment.failure_reason = None
+            else:
+                deployment.status = EventDeploymentStatus.UPDATE_PENDING
+        elif report.status == "received":
+            if deployment.status in {
+                EventDeploymentStatus.PENDING,
+                EventDeploymentStatus.UPDATE_PENDING,
+            }:
+                deployment.status = EventDeploymentStatus.DEPLOYING
+        elif report.status == "failed":
+            deployment.status = EventDeploymentStatus.FAILED
+            deployment.failure_at = utc_now()
+            deployment.failure_reason = report.failure_reason or "Site failed to apply deployment"
+        elif report.status == "revoked":
+            deployment.acknowledged_revision = max(
+                deployment.acknowledged_revision,
+                min(report.desired_revision, deployment.desired_revision),
+            )
+            deployment.status = EventDeploymentStatus.REVOKED
+            deployment.failure_at = None
+            deployment.failure_reason = None
+        site.last_seen_at = utc_now()
+        site.last_successful_sync_at = utc_now()
     else:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="unsupported_event_type"

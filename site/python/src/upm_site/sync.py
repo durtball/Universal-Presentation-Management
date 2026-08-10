@@ -3,21 +3,31 @@
 import base64
 import hashlib
 import hmac
+from datetime import UTC, datetime
+from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from upm_shared.contracts.deployments import EVENT_DEPLOYMENT_SCHEMA_VERSION, SiteDeploymentStatus
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
     EventAcknowledgement,
     SyncEventEnvelope,
 )
-from upm_shared.enums import AuthorityScope, EnrollmentState, SourceSystem
+from upm_shared.enums import (
+    AuthorityScope,
+    EnrollmentState,
+    EventDeploymentStatus,
+    SourceSystem,
+)
 from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
+from upm_site.event_deployments import apply_revocation_event, apply_snapshot_event
 from upm_site.persistence.models import (
     CentralRegistration,
+    Event,
     LocalSiteIdentity,
     ManagedSetting,
     OutboxEvent,
@@ -155,21 +165,46 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
             error_code="sequence_gap",
             detail=f"expected {last + 1}",
         )
-    if event.event_type != "site.configuration.updated":
+    application_error = None
+    if event.event_type == "site.configuration.updated":
+        key = str(event.payload["setting_key"])
+        revision = int(event.payload["revision"])
+        setting = session.get(ManagedSetting, key)
+        if setting is None:
+            setting = ManagedSetting(
+                setting_key=key, value=dict(event.payload["value"]), central_revision=revision
+            )
+            session.add(setting)
+        elif revision > setting.central_revision:
+            setting.value = dict(event.payload["value"])
+            setting.central_revision = revision
+    elif event.event_type in {
+        "central.event_deployment.requested",
+        "central.event_deployment.updated",
+    }:
+        try:
+            apply_snapshot_event(session, event)
+        except PermissionError:
+            return EventAcknowledgement(
+                event_id=event.event_id, accepted=False, error_code="invalid_authority"
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            application_error = str(exc)[:2048]
+            _enqueue_deployment_failure(session, event, application_error)
+    elif event.event_type == "central.event_deployment.revoked":
+        try:
+            apply_revocation_event(session, event)
+        except PermissionError:
+            return EventAcknowledgement(
+                event_id=event.event_id, accepted=False, error_code="invalid_authority"
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            application_error = str(exc)[:2048]
+            _enqueue_deployment_failure(session, event, application_error)
+    else:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="unsupported_event_type"
         )
-    key = str(event.payload["setting_key"])
-    revision = int(event.payload["revision"])
-    setting = session.get(ManagedSetting, key)
-    if setting is None:
-        setting = ManagedSetting(
-            setting_key=key, value=dict(event.payload["value"]), central_revision=revision
-        )
-        session.add(setting)
-    elif revision > setting.central_revision:
-        setting.value = dict(event.payload["value"])
-        setting.central_revision = revision
     session.add(
         SyncReceipt(
             event_id=event.event_id,
@@ -182,7 +217,68 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         session.add(cursor)
     cursor.last_sequence = event.source_sequence
     cursor.last_event_id = event.event_id
-    return EventAcknowledgement(event_id=event.event_id, accepted=True)
+    return EventAcknowledgement(
+        event_id=event.event_id,
+        accepted=True,
+        error_code="application_failed" if application_error else None,
+        detail=application_error,
+    )
+
+
+def _enqueue_deployment_failure(session: Session, event: SyncEventEnvelope, reason: str) -> None:
+    """Report a permanently malformed deployment while still advancing the transport cursor."""
+    try:
+        deployment_id = event.entity_id or UUID(str(event.payload["deployment_id"]))
+        event_id = UUID(str(event.payload["event_id"]))
+        site_id = _local_site_id(session)
+        desired_revision = max(1, int(event.payload.get("deployment_revision", 1)))
+    except (KeyError, TypeError, ValueError):
+        return
+    from upm_site.persistence.models import EventDeploymentProjection
+
+    deployment = session.get(EventDeploymentProjection, deployment_id)
+    applied_revision = deployment.applied_revision if deployment else 0
+    if deployment is not None:
+        deployment.status = EventDeploymentStatus.FAILED
+        deployment.desired_revision = max(deployment.desired_revision, desired_revision)
+        deployment.failure_at = datetime.now(UTC)
+        deployment.failure_reason = reason
+    payload = SiteDeploymentStatus(
+        deployment_id=deployment_id,
+        event_id=event_id,
+        site_id=site_id,
+        desired_revision=desired_revision,
+        applied_revision=applied_revision,
+        status="failed",
+        failure_reason=reason,
+        observed_at=datetime.now(UTC),
+    )
+    sequence = next_sequence(session)
+    SiteQueue(session).enqueue_outbox(
+        event_type="site.event_deployment.failed",
+        aggregate_type="event_deployment",
+        aggregate_id=deployment_id,
+        event_id=event_id if session.get(Event, event_id) else None,
+        site_id=site_id,
+        source_sequence=sequence,
+        correlation_id=deployment_id,
+        causation_id=event.event_id,
+        idempotency_key=f"deployment-failed:{deployment_id}:{desired_revision}:{event.event_id}",
+        payload=OutboxPayload(
+            source_system=SourceSystem.SITE,
+            schema_version=EVENT_DEPLOYMENT_SCHEMA_VERSION,
+            data=payload.model_dump(mode="json"),
+        ),
+    )
+
+
+def _local_site_id(session: Session) -> UUID:
+    from upm_site.persistence.models import LocalSiteIdentity
+
+    identity = session.scalar(select(LocalSiteIdentity).where(LocalSiteIdentity.singleton_key == 1))
+    if identity is None:
+        raise ValueError("Site identity has not been initialized")
+    return identity.site_id
 
 
 def credential_matches(

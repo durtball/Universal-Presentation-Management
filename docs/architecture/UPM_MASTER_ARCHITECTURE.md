@@ -212,6 +212,13 @@ and per-direction checkpoints. Sites push Site-owned events and poll for Central
 so Central does not require inbound connectivity to a Site. See
 [ADR-0006](decisions/ADR-0006-central-site-registration-and-sync.md).
 
+Event/show assignment uses a Central-owned deployment record per Event + Site, immutable complete
+snapshot revisions, and the existing protocol-v1 outbox transport. A Site may advance directly to a
+newer complete revision after an outage, never rolls back for a stale revision, retains local event
+and deployment history on revocation, and reports applied revision and operational summaries through
+Site-owned status events. See
+[ADR-0007](decisions/ADR-0007-event-deployment-snapshots.md).
+
 ---
 
 ## 7. Identity Architecture
