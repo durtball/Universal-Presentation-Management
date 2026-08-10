@@ -1,0 +1,95 @@
+name: ${UPM_CENTRAL_PROJECT_NAME:-upm-central}
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${CENTRAL_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./infrastructure/caddy/central/Caddyfile:/etc/caddy/Caddyfile:ro
+      - central-caddy-data:/data
+      - central-caddy-config:/config
+    depends_on:
+      - central-api
+      - central-web
+    networks:
+      - central-edge
+
+  central-api:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'central-api scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: central-api
+      DATABASE_HOST: central-postgres
+    depends_on:
+      central-postgres:
+        condition: service_healthy
+    networks:
+      - central-edge
+      - central-internal
+
+  central-web:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'central-web scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: central-web
+    networks:
+      - central-edge
+
+  central-worker:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'central-worker scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: central-worker
+      DATABASE_HOST: central-postgres
+    depends_on:
+      central-postgres:
+        condition: service_healthy
+    networks:
+      - central-internal
+
+  central-sync:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'central-sync scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: central-sync
+      DATABASE_HOST: central-postgres
+    depends_on:
+      central-postgres:
+        condition: service_healthy
+    networks:
+      - central-internal
+      - central-sync-egress
+
+  central-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CENTRAL_POSTGRES_DB:?Set CENTRAL_POSTGRES_DB}
+      POSTGRES_USER: ${CENTRAL_POSTGRES_USER:?Set CENTRAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${CENTRAL_POSTGRES_PASSWORD:?Set CENTRAL_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CENTRAL_POSTGRES_USER:?Set CENTRAL_POSTGRES_USER} -d ${CENTRAL_POSTGRES_DB:?Set CENTRAL_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - central-postgres-data:/var/lib/postgresql/data
+    networks:
+      - central-internal
+
+networks:
+  central-edge:
+  central-internal:
+    internal: true
+  central-sync-egress:
+
+volumes:
+  central-caddy-data:
+  central-caddy-config:
+  central-postgres-data:

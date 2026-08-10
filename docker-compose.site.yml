@@ -1,0 +1,102 @@
+name: ${UPM_SITE_PROJECT_NAME:-upm-site}
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${SITE_HTTP_PORT:-9080}:80"
+    volumes:
+      - ./infrastructure/caddy/site/Caddyfile:/etc/caddy/Caddyfile:ro
+      - site-caddy-data:/data
+      - site-caddy-config:/config
+    depends_on:
+      - site-api
+      - site-web
+    networks:
+      - site-edge
+
+  site-api:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'site-api scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: site-api
+      DATABASE_HOST: site-postgres
+    depends_on:
+      site-postgres:
+        condition: service_healthy
+    volumes:
+      - site-media-data:/var/lib/upm/media
+    networks:
+      - site-edge
+      - site-internal
+
+  site-web:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'site-web scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: site-web
+    networks:
+      - site-edge
+
+  site-worker:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'site-worker scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: site-worker
+      DATABASE_HOST: site-postgres
+    depends_on:
+      site-postgres:
+        condition: service_healthy
+    volumes:
+      - site-media-data:/var/lib/upm/media
+    networks:
+      - site-internal
+
+  site-sync:
+    image: alpine:3.20
+    restart: unless-stopped
+    command: ["/bin/sh", "-c", "echo 'site-sync scaffold boundary'; exec sleep infinity"]
+    environment:
+      UPM_COMPONENT: site-sync
+      DATABASE_HOST: site-postgres
+    depends_on:
+      site-postgres:
+        condition: service_healthy
+    volumes:
+      - site-media-data:/var/lib/upm/media
+    networks:
+      - site-internal
+      - site-sync-egress
+
+  site-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SITE_POSTGRES_DB:?Set SITE_POSTGRES_DB}
+      POSTGRES_USER: ${SITE_POSTGRES_USER:?Set SITE_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${SITE_POSTGRES_PASSWORD:?Set SITE_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SITE_POSTGRES_USER:?Set SITE_POSTGRES_USER} -d ${SITE_POSTGRES_DB:?Set SITE_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - site-postgres-data:/var/lib/postgresql/data
+    networks:
+      - site-internal
+
+networks:
+  site-edge:
+  site-internal:
+    internal: true
+  site-sync-egress:
+
+volumes:
+  site-caddy-data:
+  site-caddy-config:
+  site-postgres-data:
+  site-media-data:

@@ -1,0 +1,13 @@
+{
+	auto_https off
+}
+
+:80 {
+	handle /api/* {
+		reverse_proxy central-api:8080
+	}
+
+	handle {
+		reverse_proxy central-web:3000
+	}
+}

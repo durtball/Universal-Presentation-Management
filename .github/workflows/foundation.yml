@@ -1,0 +1,43 @@
+name: Foundation validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-foundation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate repository structure and configuration
+        shell: pwsh
+        run: ./scripts/validate-foundation.ps1
+
+      - name: Reject committed environment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$(git ls-files | awk 'BEGIN { FS="/" } { name=$NF; if (name == ".env" || (name ~ /^\.env\./ && name != ".env.example")) print }')"
+          if [[ -n "$forbidden" ]]; then
+            echo "Forbidden environment files are tracked:"
+            echo "$forbidden"
+            exit 1
+          fi
+
+      - name: Validate Central Compose configuration
+        run: docker compose --env-file .env.example -f docker-compose.central.yml config --quiet
+
+      - name: Validate Site Compose configuration
+        run: docker compose --env-file .env.example -f docker-compose.site.yml config --quiet
+
+      - name: Check whitespace errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          git diff --check "$empty_tree" HEAD -- . ':!docs/architecture/UPM_MASTER_ARCHITECTURE.md'
