@@ -27,6 +27,9 @@ The root `pyproject.toml` owns development tools. `shared/python`,
 `docs/architecture/domain-data-foundation.md` for ownership and data-model
 details.
 
+See [Central/Site registration and synchronization](central-site-synchronization.md) for
+enrollment, bidirectional synchronization, and failure-recovery procedures.
+
 ## Independent Docker API services
 
 Copy `.env.example` to an ignored local `.env` and replace every placeholder

@@ -6,11 +6,25 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from upm_shared.enums import MediaAvailability, MediaCategory, StorageHealth
+from upm_shared.contracts.sync import (
+    UPM_SYNC_PROTOCOL_VERSION,
+    CentralEndpointUpdate,
+    SiteIdentityUpdate,
+    SyncBatchRequest,
+    SyncBatchResponse,
+)
+from upm_shared.enums import (
+    EnrollmentState,
+    JobStatus,
+    MediaAvailability,
+    MediaCategory,
+    StorageHealth,
+)
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import (
     IngestionConflictError,
@@ -25,7 +39,22 @@ from upm_site.media.storage import (
     observe_storage,
 )
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
-from upm_site.persistence.models import MediaObject, PresentationAsset, ProcessingJob, StorageTarget
+from upm_site.persistence.models import (
+    LocalSiteIdentity,
+    ManagedSetting,
+    MediaObject,
+    OutboxEvent,
+    PresentationAsset,
+    ProcessingJob,
+    StorageTarget,
+    SyncCursor,
+)
+from upm_site.sync import (
+    apply_central_event,
+    bootstrap_identity,
+    credential_matches,
+    enqueue_heartbeat,
+)
 
 
 class HealthResponse(BaseModel):
@@ -154,6 +183,14 @@ def create_app(
             resources["settings"] = configured
         return configured
 
+    @app.middleware("http")
+    async def limit_sync_requests(request: Request, call_next):
+        if request.method in {"POST", "PUT"} and request.url.path.startswith("/api/v1/sync"):
+            body = await request.body()
+            if len(body) > get_settings().sync_max_payload_bytes:
+                return JSONResponse(status_code=413, content={"detail": "request_too_large"})
+        return await call_next(request)
+
     def get_factory() -> sessionmaker[Session]:
         configured = session_factory
         if configured is not None:
@@ -168,6 +205,10 @@ def create_app(
 
     def get_session() -> Iterator[Session]:
         with get_factory()() as session:
+            yield session
+
+    def transaction() -> Iterator[Session]:
+        with get_factory().begin() as session:
             yield session
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
@@ -267,5 +308,153 @@ def create_app(
     ) -> list[StorageHealthResponse]:
         targets = session.scalars(select(StorageTarget).order_by(StorageTarget.display_name)).all()
         return [_health_response(target, observe_storage(target)) for target in targets]
+
+    @app.get("/api/v1/central-registration", tags=["synchronization"])
+    def registration_status(session: Annotated[Session, Depends(transaction)]) -> dict[str, object]:
+        site, registration = bootstrap_identity(session, get_settings())
+        counts = dict(
+            session.execute(
+                select(OutboxEvent.status, func.count())
+                .where(OutboxEvent.source_sequence.is_not(None))
+                .group_by(OutboxEvent.status)
+            ).all()
+        )
+        return {
+            "site_id": site.site_id,
+            "display_name": site.display_name,
+            "central_url": registration.central_url,
+            "registration_state": registration.state,
+            "connection_status": "connected"
+            if registration.last_connection_at
+            else "never_connected",
+            "last_successful_heartbeat": registration.last_heartbeat_at,
+            "last_successful_sync": registration.last_successful_sync_at,
+            "pending_outbound": counts.get(JobStatus.PENDING, 0)
+            + counts.get(JobStatus.RETRY_WAIT, 0)
+            + counts.get(JobStatus.RUNNING, 0),
+            "failed_sync": counts.get(JobStatus.FAILED, 0) + counts.get(JobStatus.EXHAUSTED, 0),
+            "protocol_version": UPM_SYNC_PROTOCOL_VERSION,
+            "protocol_compatible": registration.protocol_compatible,
+            "last_error": registration.last_error,
+            "credential_present": registration.credential_encrypted is not None,
+        }
+
+    @app.put("/api/v1/central-registration/endpoint", tags=["synchronization"])
+    def configure_endpoint(
+        update: CentralEndpointUpdate, session: Annotated[Session, Depends(transaction)]
+    ) -> dict[str, object]:
+        site, registration = bootstrap_identity(session, get_settings())
+        registration.central_url = str(update.central_url).rstrip("/")
+        registration.last_error = None
+        return {"site_id": site.site_id, "central_url": registration.central_url}
+
+    @app.post("/api/v1/central-registration/request", tags=["synchronization"])
+    def restart_enrollment(
+        session: Annotated[Session, Depends(transaction)],
+    ) -> dict[str, object]:
+        site, registration = bootstrap_identity(session, get_settings())
+        registration.state = EnrollmentState.UNREGISTERED
+        registration.claim_secret_encrypted = None
+        registration.poll_token_encrypted = None
+        registration.credential_encrypted = None
+        registration.last_error = None
+        return {"site_id": site.site_id, "registration_state": registration.state}
+
+    @app.put("/api/v1/site-identity", tags=["system"])
+    def update_identity(
+        update: SiteIdentityUpdate, session: Annotated[Session, Depends(transaction)]
+    ) -> dict[str, object]:
+        site, _ = bootstrap_identity(session, get_settings())
+        site.display_name = update.display_name
+        site.revision += 1
+        identity = session.get(LocalSiteIdentity, site.site_id)
+        identity.display_name = update.display_name
+        return {"site_id": site.site_id, "display_name": site.display_name}
+
+    @app.post(
+        "/api/v1/sync/central-events", response_model=SyncBatchResponse, tags=["synchronization"]
+    )
+    def receive_central_events(
+        payload: SyncBatchRequest,
+        session: Annotated[Session, Depends(transaction)],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> SyncBatchResponse:
+        site, registration = bootstrap_identity(session, get_settings())
+        bearer = (
+            authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+        )
+        if not credential_matches(get_settings(), registration, bearer):
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, detail="invalid synchronization credential"
+            )
+        acknowledgements = [apply_central_event(session, event) for event in payload.events]
+        cursor = session.get(SyncCursor, "central_to_site")
+        return SyncBatchResponse(
+            acknowledgements=acknowledgements,
+            checkpoint_sequence=cursor.last_sequence if cursor else 0,
+        )
+
+    @app.get("/api/v1/managed-settings", tags=["synchronization"])
+    def managed_settings(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "setting_key": item.setting_key,
+                "value": item.value,
+                "central_revision": item.central_revision,
+            }
+            for item in session.scalars(select(ManagedSetting).order_by(ManagedSetting.setting_key))
+        ]
+
+    @app.post("/api/v1/sync/heartbeat", tags=["synchronization"])
+    def queue_heartbeat(
+        session: Annotated[Session, Depends(transaction)],
+    ) -> dict[str, object]:
+        site, _ = bootstrap_identity(session, get_settings())
+        event = enqueue_heartbeat(
+            session,
+            site,
+            {
+                "observed_at": datetime.now().astimezone().isoformat(),
+                "application_version": get_settings().application_version,
+                "protocol_version": UPM_SYNC_PROTOCOL_VERSION,
+                "site_health": "healthy",
+                "database_health": "healthy",
+                "worker_health": "healthy",
+                "storage": {},
+                "queue": {},
+                "capabilities": ["sync-v1", "site-health", "managed-settings"],
+            },
+        )
+        return {"event_id": event.outbox_event_id, "queued": True}
+
+    @app.post("/api/v1/sync/retry-failed", tags=["synchronization"])
+    def retry_failed_sync(
+        session: Annotated[Session, Depends(transaction)],
+    ) -> dict[str, object]:
+        events = session.scalars(
+            select(OutboxEvent).where(
+                OutboxEvent.source_sequence.is_not(None),
+                OutboxEvent.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED]),
+            )
+        ).all()
+        for event in events:
+            event.status = JobStatus.RETRY_WAIT
+            event.available_at = datetime.now().astimezone()
+            event.claimed_by_worker_id = None
+            event.lease_expires_at = None
+            event.error_code = None
+            event.last_error = None
+        return {"retried": len(events)}
+
+    @app.get("/admin/central-registration", response_class=HTMLResponse, tags=["administration"])
+    def registration_page() -> str:
+        return """<!doctype html>
+<html><head><title>UPM Site Registration</title></head><body>
+<h1>Central registration</h1><button onclick="load()">Refresh</button><pre id="o"></pre>
+<script>async function load(){const r=await fetch('/api/v1/central-registration');
+document.querySelector('#o').textContent=JSON.stringify(await r.json(),null,2)}load();</script>
+</body></html>"""
 
     return app

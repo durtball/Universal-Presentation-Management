@@ -16,7 +16,10 @@ services:
       central-web:
         condition: service_started
     networks:
-      - central-edge
+      central-edge:
+      upm-integration:
+        aliases:
+          - upm-central
 
   central-api:
     build:
@@ -28,6 +31,9 @@ services:
       UPM_COMPONENT: central-api
       DATABASE_HOST: central-postgres
       UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+      UPM_CENTRAL_ADMIN_TOKEN: ${UPM_CENTRAL_ADMIN_TOKEN:?Set UPM_CENTRAL_ADMIN_TOKEN}
+      UPM_CENTRAL_CREDENTIAL_ISSUER_KEY: ${UPM_CENTRAL_CREDENTIAL_ISSUER_KEY:?Set UPM_CENTRAL_CREDENTIAL_ISSUER_KEY}
+      UPM_CENTRAL_PUBLIC_URL: ${UPM_CENTRAL_PUBLIC_URL:-http://upm-central}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -74,6 +80,8 @@ services:
       UPM_COMPONENT: central-worker
       DATABASE_HOST: central-postgres
       UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+      UPM_CENTRAL_ADMIN_TOKEN: ${UPM_CENTRAL_ADMIN_TOKEN:?Set UPM_CENTRAL_ADMIN_TOKEN}
+      UPM_CENTRAL_CREDENTIAL_ISSUER_KEY: ${UPM_CENTRAL_CREDENTIAL_ISSUER_KEY:?Set UPM_CENTRAL_CREDENTIAL_ISSUER_KEY}
       UPM_CENTRAL_WORKER_CAPABILITIES: ${UPM_CENTRAL_WORKER_CAPABILITIES:-cpu,pdf-conversion,transfer}
       UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS: ${UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS:-1}
       UPM_CENTRAL_WORKER_LEASE_SECONDS: ${UPM_CENTRAL_WORKER_LEASE_SECONDS:-60}
@@ -98,6 +106,8 @@ services:
       UPM_COMPONENT: central-sync
       DATABASE_HOST: central-postgres
       UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+      UPM_CENTRAL_ADMIN_TOKEN: ${UPM_CENTRAL_ADMIN_TOKEN:?Set UPM_CENTRAL_ADMIN_TOKEN}
+      UPM_CENTRAL_CREDENTIAL_ISSUER_KEY: ${UPM_CENTRAL_CREDENTIAL_ISSUER_KEY:?Set UPM_CENTRAL_CREDENTIAL_ISSUER_KEY}
       UPM_CENTRAL_WORKER_CAPABILITIES: sync
     depends_on:
       central-postgres:
@@ -135,6 +145,9 @@ networks:
   central-internal:
     internal: true
   central-sync-egress:
+  upm-integration:
+    name: ${UPM_INTEGRATION_NETWORK:-upm-integration}
+    external: ${UPM_INTEGRATION_NETWORK_EXTERNAL:-true}
 
 volumes:
   central-caddy-data:

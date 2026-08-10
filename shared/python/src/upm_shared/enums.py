@@ -19,6 +19,25 @@ class SyncState(StrEnum):
     FAILED = "failed"
 
 
+class EnrollmentState(StrEnum):
+    UNREGISTERED = "unregistered"
+    PENDING = "pending"
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    REVOKED = "revoked"
+    DISABLED = "disabled"
+
+
+class SyncDirection(StrEnum):
+    SITE_TO_CENTRAL = "site_to_central"
+    CENTRAL_TO_SITE = "central_to_site"
+
+
+class AuthorityScope(StrEnum):
+    CENTRAL = "central"
+    SITE = "site"
+
+
 class JobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"

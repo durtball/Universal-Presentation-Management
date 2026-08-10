@@ -17,6 +17,7 @@ target_metadata = SiteBase.metadata
 VERSION_TABLE = "alembic_version_site"
 ENUM_CHECK_SUFFIXES = (
     "_assetkind",
+    "_enrollmentstate",
     "_devicerole",
     "_jobstatus",
     "_mediacategory",

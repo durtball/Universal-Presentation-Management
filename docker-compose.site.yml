@@ -31,6 +31,9 @@ services:
       UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
       UPM_SITE_MAX_UPLOAD_BYTES: ${UPM_SITE_MAX_UPLOAD_BYTES:-549755813888}
       UPM_SITE_STAGING_MAX_AGE_SECONDS: ${UPM_SITE_STAGING_MAX_AGE_SECONDS:-86400}
+      UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
+      UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}
+      UPM_SITE_DEFAULT_DISPLAY_NAME: ${UPM_SITE_DEFAULT_DISPLAY_NAME:-UPM Site}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -83,6 +86,7 @@ services:
       UPM_SITE_WORKER_CAPABILITIES: ${UPM_SITE_WORKER_CAPABILITIES:-cpu,pdf-conversion,transfer}
       UPM_SITE_WORKER_POLL_INTERVAL_SECONDS: ${UPM_SITE_WORKER_POLL_INTERVAL_SECONDS:-1}
       UPM_SITE_WORKER_LEASE_SECONDS: ${UPM_SITE_WORKER_LEASE_SECONDS:-60}
+      UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -108,6 +112,8 @@ services:
       UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
       UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
       UPM_SITE_WORKER_CAPABILITIES: sync
+      UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
+      UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -118,6 +124,7 @@ services:
     networks:
       - site-internal
       - site-sync-egress
+      - upm-integration
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/upm-site-worker-ready-sync"]
       interval: 10s
@@ -146,6 +153,9 @@ networks:
   site-internal:
     internal: true
   site-sync-egress:
+  upm-integration:
+    name: ${UPM_INTEGRATION_NETWORK:-upm-integration}
+    external: ${UPM_INTEGRATION_NETWORK_EXTERNAL:-true}
 
 volumes:
   site-caddy-data:

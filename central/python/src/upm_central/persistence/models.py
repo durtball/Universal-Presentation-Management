@@ -26,6 +26,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from upm_central.persistence.base import CentralBase
 from upm_shared.enums import (
     AssetKind,
+    EnrollmentState,
     IdentitySignalType,
     JobPriority,
     JobStatus,
@@ -132,9 +133,114 @@ class PersonIdentityLink(CentralBase):
 class Site(CentralRecordMixin, CentralBase):
     __tablename__ = "sites"
 
+    __table_args__ = (
+        Index("ix_central_sites_enrollment_last_seen", "enrollment_state", "last_seen_at"),
+    )
+
     site_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=new_uuid7)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    enrollment_state: Mapped[EnrollmentState] = mapped_column(
+        Enum(
+            EnrollmentState,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        default=EnrollmentState.PENDING,
+        nullable=False,
+    )
+    first_registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    application_version: Mapped[str | None] = mapped_column(String(64))
+    protocol_version: Mapped[int | None] = mapped_column(Integer)
+    reported_hostname: Mapped[str | None] = mapped_column(String(255))
+    reported_address: Mapped[str | None] = mapped_column(String(255))
+    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    health_summary: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    protocol_error: Mapped[str | None] = mapped_column(String(255))
+
+
+class SiteEnrollmentClaim(CentralBase):
+    __tablename__ = "site_enrollment_claims"
+
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), primary_key=True
+    )
+    claim_secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    poll_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    credential_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SiteCredential(CentralBase):
+    __tablename__ = "site_credentials"
+
+    credential_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SyncReceipt(CentralBase):
+    __tablename__ = "sync_receipts"
+    __table_args__ = (UniqueConstraint("site_id", "event_id"),)
+
+    receipt_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(ForeignKey("sites.site_id", ondelete="RESTRICT"))
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    source_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SyncCursor(CentralBase):
+    __tablename__ = "sync_cursors"
+
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), primary_key=True
+    )
+    direction: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    last_event_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class SyncSequence(CentralBase):
+    __tablename__ = "sync_sequences"
+
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), primary_key=True
+    )
+    next_value: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+
+
+class SiteManagedSetting(CentralRecordMixin, CentralBase):
+    __tablename__ = "site_managed_settings"
+    __table_args__ = (UniqueConstraint("site_id", "setting_key"),)
+
+    setting_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), nullable=False
+    )
+    setting_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
 
 
 class Event(CentralRecordMixin, CentralBase):
@@ -513,6 +619,10 @@ class OutboxEvent(CentralBase):
     )
     payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     payload_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    protocol_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    source_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    correlation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    causation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
         job_status_enum(), default=JobStatus.PENDING, nullable=False
