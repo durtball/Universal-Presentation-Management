@@ -49,33 +49,53 @@ services:
       - central-edge
 
   central-worker:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: central/Dockerfile
+    image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'central-worker scaffold boundary'; exec sleep infinity"]
+    command: ["python", "-m", "upm_central.worker"]
     environment:
       UPM_COMPONENT: central-worker
       DATABASE_HOST: central-postgres
       UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+      UPM_CENTRAL_WORKER_CAPABILITIES: ${UPM_CENTRAL_WORKER_CAPABILITIES:-cpu,pdf-conversion,transfer}
+      UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS: ${UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS:-1}
+      UPM_CENTRAL_WORKER_LEASE_SECONDS: ${UPM_CENTRAL_WORKER_LEASE_SECONDS:-60}
     depends_on:
       central-postgres:
         condition: service_healthy
     networks:
       - central-internal
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/upm-central-worker-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   central-sync:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: central/Dockerfile
+    image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'central-sync scaffold boundary'; exec sleep infinity"]
+    command: ["python", "-m", "upm_central.worker", "--sync"]
     environment:
       UPM_COMPONENT: central-sync
       DATABASE_HOST: central-postgres
       UPM_CENTRAL_DATABASE_URL: ${UPM_CENTRAL_DATABASE_URL:?Set UPM_CENTRAL_DATABASE_URL}
+      UPM_CENTRAL_WORKER_CAPABILITIES: sync
     depends_on:
       central-postgres:
         condition: service_healthy
     networks:
       - central-internal
       - central-sync-egress
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/upm-central-worker-ready-sync"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   central-postgres:
     image: postgres:16-alpine

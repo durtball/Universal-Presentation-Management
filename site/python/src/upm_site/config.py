@@ -1,6 +1,8 @@
-"""Site-only database and media mount configuration."""
+"""Site-only service configuration."""
 
-from pydantic import field_validator
+from typing import Annotated
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +11,11 @@ class SiteSettings(BaseSettings):
 
     database_url: str
     media_mount_path: str = "/var/lib/upm/media"
+    worker_poll_interval_seconds: Annotated[float, Field(gt=0)] = 1.0
+    worker_lease_seconds: Annotated[int, Field(ge=5)] = 60
+    worker_retry_base_seconds: Annotated[float, Field(gt=0)] = 5.0
+    worker_capabilities: str = "cpu,pdf-conversion,transfer"
+    worker_ready_file: str = "/tmp/upm-site-worker-ready"
 
     @field_validator("database_url")
     @classmethod

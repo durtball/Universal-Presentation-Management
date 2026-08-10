@@ -52,14 +52,20 @@ services:
       - site-edge
 
   site-worker:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: site/Dockerfile
+    image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'site-worker scaffold boundary'; exec sleep infinity"]
+    command: ["python", "-m", "upm_site.worker"]
     environment:
       UPM_COMPONENT: site-worker
       DATABASE_HOST: site-postgres
       UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
       UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
+      UPM_SITE_WORKER_CAPABILITIES: ${UPM_SITE_WORKER_CAPABILITIES:-cpu,pdf-conversion,transfer}
+      UPM_SITE_WORKER_POLL_INTERVAL_SECONDS: ${UPM_SITE_WORKER_POLL_INTERVAL_SECONDS:-1}
+      UPM_SITE_WORKER_LEASE_SECONDS: ${UPM_SITE_WORKER_LEASE_SECONDS:-60}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -67,16 +73,25 @@ services:
       - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
     networks:
       - site-internal
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/upm-site-worker-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   site-sync:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: site/Dockerfile
+    image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'site-sync scaffold boundary'; exec sleep infinity"]
+    command: ["python", "-m", "upm_site.worker", "--sync"]
     environment:
       UPM_COMPONENT: site-sync
       DATABASE_HOST: site-postgres
       UPM_SITE_DATABASE_URL: ${UPM_SITE_DATABASE_URL:?Set UPM_SITE_DATABASE_URL}
       UPM_SITE_MEDIA_MOUNT_PATH: ${UPM_SITE_MEDIA_MOUNT_PATH:-/var/lib/upm/media}
+      UPM_SITE_WORKER_CAPABILITIES: sync
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -85,6 +100,11 @@ services:
     networks:
       - site-internal
       - site-sync-egress
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/upm-site-worker-ready-sync"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   site-postgres:
     image: postgres:16-alpine
