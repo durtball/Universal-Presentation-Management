@@ -68,9 +68,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.CheckConstraint("desired_revision >= 0", name="desired_revision_nonnegative"),
-        sa.CheckConstraint(
-            "acknowledged_revision >= 0", name="acknowledged_revision_nonnegative"
-        ),
+        sa.CheckConstraint("acknowledged_revision >= 0", name="acknowledged_revision_nonnegative"),
         sa.CheckConstraint(
             "acknowledged_revision <= desired_revision", name="acknowledged_not_ahead"
         ),
