@@ -3,7 +3,7 @@
 }
 
 :80 {
-	handle /api/* {
+	handle_path /api/* {
 		reverse_proxy site-api:8080
 	}
 

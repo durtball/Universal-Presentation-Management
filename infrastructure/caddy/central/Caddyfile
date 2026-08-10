@@ -3,7 +3,7 @@
 }
 
 :80 {
-	handle /api/* {
+	handle_path /api/* {
 		reverse_proxy central-api:8080
 	}
 

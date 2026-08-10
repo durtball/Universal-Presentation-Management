@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from upm_central.api import create_app as create_central_app
 from upm_central.persistence import models as central_models  # noqa: F401
 from upm_central.persistence.base import CentralBase
@@ -19,6 +21,22 @@ def test_central_and_site_are_distinct_fastapi_applications() -> None:
     assert central_app is not site_app
     assert central_app.openapi()["info"]["title"] == "UPM Central API"
     assert site_app.openapi()["info"]["title"] == "UPM Site API"
+
+
+def test_central_application_starts_and_reports_health() -> None:
+    with TestClient(create_central_app()) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"service": "upm-central", "status": "foundation-ready"}
+
+
+def test_site_application_starts_and_reports_health() -> None:
+    with TestClient(create_site_app()) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"service": "upm-site", "status": "foundation-ready"}
 
 
 def test_central_and_site_metadata_are_separate() -> None:
