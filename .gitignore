@@ -30,6 +30,7 @@ dist/
 build/
 coverage/
 node_modules/
+*.tsbuildinfo
 
 # Editors and operating systems
 .idea/

@@ -14,7 +14,7 @@ services:
       central-api:
         condition: service_healthy
       central-web:
-        condition: service_started
+        condition: service_healthy
     networks:
       central-edge:
       upm-integration:
@@ -50,11 +50,19 @@ services:
       - central-internal
 
   central-web:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: central/web/Dockerfile
+    image: ${UPM_CENTRAL_WEB_IMAGE:-upm-central-web:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'central-web scaffold boundary'; exec sleep infinity"]
     environment:
       UPM_COMPONENT: central-web
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     networks:
       - central-edge
 

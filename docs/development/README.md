@@ -1,5 +1,7 @@
 # Development Documentation
 
+See [UPM Admin frontend](frontend.md) for browser architecture, design tokens, local development, production builds, tests, routing, and smoke testing.
+
 UPM server development uses Python 3.13 and
 [uv](https://docs.astral.sh/uv/) without global application dependency
 installation.

@@ -14,7 +14,7 @@ services:
       site-api:
         condition: service_healthy
       site-web:
-        condition: service_started
+        condition: service_healthy
     networks:
       - site-edge
 
@@ -52,11 +52,19 @@ services:
       - site-internal
 
   site-web:
-    image: alpine:3.20
+    build:
+      context: .
+      dockerfile: site/web/Dockerfile
+    image: ${UPM_SITE_WEB_IMAGE:-upm-site-web:local}
     restart: unless-stopped
-    command: ["/bin/sh", "-c", "echo 'site-web scaffold boundary'; exec sleep infinity"]
     environment:
       UPM_COMPONENT: site-web
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     networks:
       - site-edge
 
