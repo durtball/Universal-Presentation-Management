@@ -7,15 +7,17 @@
 		reverse_proxy central-api:8080
 	}
 
-	handle /admin/* {
-		reverse_proxy central-api:8080
-	}
-
 	handle /api/* {
 		reverse_proxy central-api:8080
 	}
 
 	handle {
-		reverse_proxy central-web:3000
+		reverse_proxy {
+			dynamic a {
+				name central-web
+				port 8080
+				refresh 5s
+			}
+		}
 	}
 }

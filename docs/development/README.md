@@ -1,5 +1,7 @@
 # Development Documentation
 
+See [UPM Admin frontend](frontend.md) for browser architecture, design tokens, local development, production builds, tests, routing, and smoke testing.
+
 UPM server development uses Python 3.13 and
 [uv](https://docs.astral.sh/uv/) without global application dependency
 installation.
@@ -82,12 +84,13 @@ lifecycles. Central migration code cannot reach the Site database and Site migra
 reach the Central database. See [ADR-0005](../architecture/decisions/ADR-0005-container-migration-gates.md)
 for deployment ordering and failure semantics.
 
-On Linux with Docker available, the full fresh-stack, repeated-migration, failure-gate, worker
-health, and database-separation smoke test is:
+On Linux with Docker available, the isolated fresh-migration, repeated-migration, API
+failure-gate, and database-separation smoke test is:
 
 ```bash
 ./scripts/test-compose-migrations.sh
 ```
 
 The smoke test creates uniquely named disposable Compose projects and removes only those test
-projects and their volumes when it exits.
+projects and their volumes when it exits. It starts each API with only its PostgreSQL and
+migration dependencies; it does not require the web, proxy, worker, or sync services.

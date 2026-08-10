@@ -2,7 +2,7 @@
 
 Universal Presentation Management (UPM) is a clean rebuild of the earlier SpeakerReady system. It is intended for reliable presentation operations across conferences, hotels, events, meeting rooms, and speaker-ready environments, including periods of degraded or unavailable WAN connectivity.
 
-This repository currently contains architecture-aligned scaffolding only. Application business logic has not been implemented.
+The repository contains the Central/Site persistence, durable jobs, synchronization, media-ingestion and event-program foundations plus production browser administration frontends.
 
 ## System responsibilities
 
@@ -17,6 +17,7 @@ Central and Site are separate Linux/Docker deployments. They have distinct proce
 ```text
 central/                 Central API, web, worker, sync, Caddy, and PostgreSQL boundaries
 site/                    Site API, web, worker, sync, media, device, Caddy, and PostgreSQL boundaries
+web/                     Shared typed browser shell, design system, components, APIs, pages, and tests
 clients/                 Windows Agent, Kiosk, Signage, and Room Client roots
 shared/                  Contracts, models, schemas, and utilities
 database/                Separate Central and Site migration roots
@@ -52,15 +53,14 @@ docker compose --env-file .env.example -f docker-compose.central.yml up -d
 docker compose --env-file .env.example -f docker-compose.site.yml up -d
 ```
 
-These definitions run the independent Central and Site FastAPI foundations plus
-separate PostgreSQL/Caddy resources. Worker, synchronization, and web services
-remain explicit placeholders; no UPM business APIs are implemented. Use
+These definitions run independent Central and Site APIs, workers, synchronization services,
+production web frontends, PostgreSQL databases, and Caddy edges. Use
 distinct project names and host ports when running multiple Site instances.
 Never create or commit a real `.env` file.
 
-The API health endpoints are available through Caddy at
-`http://localhost:8080/api/health` for Central and
-`http://localhost:9080/api/health` for Site. See the
+The browser applications are available through Caddy at `http://localhost:8080/`
+for Central and `http://localhost:9080/` for Site. API health is available at
+`/health`. See the
 [development guide](docs/development/README.md) for build, startup, health, and
 shutdown commands.
 
@@ -89,7 +89,7 @@ docker compose --env-file .env.example -f docker-compose.central.yml down
 docker compose --env-file .env.example -f docker-compose.site.yml down
 ```
 
-Named volumes are intentionally retained by these commands. Add `--volumes` only when deliberately discarding local scaffold data.
+Named volumes are intentionally retained by these commands. Add `--volumes` only when deliberately discarding local data.
 
 ## Validation
 
@@ -101,4 +101,4 @@ docker compose --env-file .env.example -f docker-compose.central.yml config --qu
 docker compose --env-file .env.example -f docker-compose.site.yml config --quiet
 ```
 
-Production deployment automation, production credentials, certificate issuance policy, and application implementations are intentionally out of scope for this foundation.
+Production credentials and certificate issuance policy remain deployment-owned concerns. See the [frontend guide](docs/development/frontend.md) for browser development and validation.

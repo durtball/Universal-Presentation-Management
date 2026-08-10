@@ -117,3 +117,31 @@ def test_site_caddy_preserves_media_paths_and_health_compatibility() -> None:
     media_route = caddyfile.index("handle /api/*")
     assert "rewrite * /health" in caddyfile
     assert health_route < media_route
+
+
+@pytest.mark.parametrize("deployment", ["central", "site"])
+def test_web_frontend_is_a_separate_production_service(deployment: str) -> None:
+    config = compose_config(f"docker-compose.{deployment}.yml")
+    services = config["services"]
+    web = services[f"{deployment}-web"]
+
+    assert web["build"]["dockerfile"] == f"{deployment}/web/Dockerfile"
+    assert web["healthcheck"]["test"] == [
+        "CMD",
+        "wget",
+        "-qO-",
+        "http://127.0.0.1:8080/healthz",
+    ]
+    assert web["networks"] == {f"{deployment}-edge": None}
+    assert services["caddy"]["depends_on"][f"{deployment}-web"]["condition"] == ("service_healthy")
+
+
+@pytest.mark.parametrize("deployment", ["central", "site"])
+def test_caddy_routes_api_before_shared_frontend(deployment: str) -> None:
+    caddyfile = (REPOSITORY_ROOT / f"infrastructure/caddy/{deployment}/Caddyfile").read_text()
+
+    assert f"reverse_proxy {deployment}-api:8080" in caddyfile
+    assert f"name {deployment}-web" in caddyfile
+    assert "port 8080" in caddyfile
+    assert "refresh 5s" in caddyfile
+    assert caddyfile.index("handle /api/*") < caddyfile.index("dynamic a")

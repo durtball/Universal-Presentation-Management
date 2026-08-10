@@ -41,6 +41,11 @@ jobs:
       - name: Build Site API image
         run: docker compose --env-file .env.example -f docker-compose.site.yml build site-api
 
+      - name: Build production web images
+        run: |
+          docker compose --env-file .env.example -f docker-compose.central.yml build central-web
+          docker compose --env-file .env.example -f docker-compose.site.yml build site-web
+
       - name: Build worker and sync images
         run: |
           docker compose --env-file .env.example -f docker-compose.central.yml build central-worker central-sync
@@ -55,6 +60,34 @@ jobs:
           set -euo pipefail
           empty_tree="$(git hash-object -t tree /dev/null)"
           git diff --check "$empty_tree" HEAD -- . ':!docs/architecture/UPM_MASTER_ARCHITECTURE.md'
+
+  validate-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deterministic frontend dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run test
+          npm run build:central
+          npm run build:site
+          npm audit --audit-level=high
 
   validate-python-domain:
     runs-on: ubuntu-latest

@@ -7,10 +7,6 @@
 		reverse_proxy site-api:8080
 	}
 
-	handle /admin/* {
-		reverse_proxy site-api:8080
-	}
-
 	handle /api/health {
 		rewrite * /health
 		reverse_proxy site-api:8080
@@ -21,6 +17,12 @@
 	}
 
 	handle {
-		reverse_proxy site-web:3000
+		reverse_proxy {
+			dynamic a {
+				name site-web
+				port 8080
+				refresh 5s
+			}
+		}
 	}
 }

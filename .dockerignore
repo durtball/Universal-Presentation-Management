@@ -12,3 +12,6 @@ __pycache__
 !.env.example
 docs
 tests
+web/node_modules
+web/dist
+web/*.tsbuildinfo

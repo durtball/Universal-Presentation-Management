@@ -1,0 +1,69 @@
+# UPM Admin Frontend
+
+## Architecture
+
+`web/` is the shared React/TypeScript application source. A compile-time deployment discriminator selects Central or Site routes, while both builds use the same shell, design tokens, feedback surfaces, tables, forms, preferences, and API primitives. It is not a combined backend: Central and Site web images are built, deployed, health-checked, and restarted independently.
+
+Central pages are Dashboard, Sites, Events and event detail, People, Sessions, Presenters, Presentations, and Imports. Site pages are Overview, local Program, and Storage. Site views depend only on Site-local endpoints and remain usable when Central/WAN connectivity is unavailable.
+
+## Design System
+
+Components use semantic tokens from `web/src/styles.css`.
+
+- UPM Glass is the default dark, translucent, softly highlighted theme.
+- UPM Classic uses the same markup with dense spacing, flat gray surfaces, square geometry, classic borders, and high contrast.
+
+The Settings dialog switches themes immediately without navigation or reload. `upm.theme` persists in `localStorage` and defaults to `glass`.
+
+Motion is `full`, `reduced`, or `off`. `upm.motion` persists in `localStorage`. A browser/OS reduced-motion preference changes an explicit `full` selection to the effective `reduced` mode. Motion is limited to event-driven transitions, dialogs, feedback, and route entry; there is no perpetual decoration.
+
+Status labels and tones are centralized in `StatusBadge`. Each status includes text and a shape, so meaning does not depend on color.
+
+## API and Session Boundaries
+
+`ApiClient` provides base URL handling, injected headers, JSON parsing, typed structured errors, status classification, timeouts, AbortSignal cancellation, safe GET-only retry, query serialization, and stale-response protection through `useApi`. `centralApi` and `siteApi` expose ownership-specific operations.
+
+Production authentication/RBAC is intentionally deferred. The current Central administrative API requires its existing token. Operators enter it in Settings; it is held only in tab-scoped `sessionStorage` and is never built into an asset or persisted to disk. `SessionProvider`, `user`, roles, `can()`, unauthorized surfaces, and injected client headers are the replacement boundary for a later server-issued session. Site endpoints used here require no browser secret.
+
+## Route Ownership
+
+For both deployments:
+
+| Route | Owner |
+| --- | --- |
+| `/health` | local FastAPI service through Caddy |
+| `/api/*` | local FastAPI service through Caddy |
+| `/`, `/admin`, `/admin/*` | local web service through Caddy |
+| `/healthz` inside the container | Nginx frontend health only |
+
+Caddy uses dynamic DNS A-record upstream discovery for web containers, refreshed every five seconds, so container recreation does not leave a stale web address. Nginx uses an SPA fallback for browser navigation and immutable caching only for content-hashed assets.
+
+## Local Development
+
+From `web/`:
+
+```powershell
+npm ci
+npm run dev:central
+# or
+npm run dev:site
+```
+
+Vite proxies `/health` and `/api` to a local API on port 8080. Production checks are:
+
+```powershell
+npm run typecheck
+npm run lint
+npm run test
+npm run build:central
+npm run build:site
+npm audit --audit-level=high
+```
+
+## Production and Smoke Testing
+
+Compose builds the appropriate web image and waits for its independent health check before Caddy starts. Use the existing `.env` deployment configuration; never use `.env.example` for production secrets.
+
+After startup, verify each Caddy port, deep-link navigation, local API data, Glass/Classic runtime switching and persistence, all motion choices, refresh/recreation recovery, and Site pages while Central is stopped or unreachable. HTTP checks do not replace the rendered browser smoke test.
+
+Current limitations: import parsing remains synchronous; full authentication/RBAC, worker-specific health endpoints, write forms beyond existing safe actions/import upload, and advanced diagnostics remain later milestones.
