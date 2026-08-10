@@ -35,6 +35,8 @@ from upm_central.persistence.models import (
     SyncSequence,
     utc_now,
 )
+from upm_central.program import require_aware, validate_timezone
+from upm_central.program_api import register_program_routes
 from upm_central.sync import (
     apply_site_event,
     authenticate_site,
@@ -76,6 +78,8 @@ class SettingUpdate(BaseModel):
 class EventCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Annotated[str, Field(min_length=1, max_length=255)]
+    description: str | None = None
+    timezone: Annotated[str, Field(min_length=1, max_length=100)] = "UTC"
     starts_at: datetime | None = None
     ends_at: datetime | None = None
 
@@ -440,9 +444,12 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
 
     @app.post("/api/v1/admin/events", status_code=201, dependencies=[Depends(require_admin)])
     def create_event(payload: EventCreate, session: DbSession) -> dict[str, object]:
+        validate_timezone(payload.timezone)
+        require_aware(payload.starts_at, "starts_at")
+        require_aware(payload.ends_at, "ends_at")
         if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
-        event = Event(name=payload.name, starts_at=payload.starts_at, ends_at=payload.ends_at)
+        event = Event(**payload.model_dump())
         session.add(event)
         session.flush()
         return {"event_id": event.event_id, "name": event.name, "revision": event.revision}
@@ -458,6 +465,8 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                 {
                     "event_id": event.event_id,
                     "name": event.name,
+                    "description": event.description,
+                    "timezone": event.timezone,
                     "starts_at": event.starts_at,
                     "ends_at": event.ends_at,
                     "revision": event.revision,
@@ -471,9 +480,14 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         event = session.get(Event, event_id)
         if event is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        validate_timezone(payload.timezone)
+        require_aware(payload.starts_at, "starts_at")
+        require_aware(payload.ends_at, "ends_at")
         if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
         event.name = payload.name
+        event.description = payload.description
+        event.timezone = payload.timezone
         event.starts_at = payload.starts_at
         event.ends_at = payload.ends_at
         event.revision += 1
@@ -649,7 +663,8 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     def sites_page() -> str:
         return """<!doctype html>
 <html><head><title>UPM Central Sites</title></head><body>
-<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a></nav>
+<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a> |
+<a href="/admin/program">Program</a> | <a href="/admin/people">People</a></nav>
 <h1>Sites</h1><p>Enter the configured administrator token.</p>
 <input id="t" type="password"><button onclick="load()">Refresh</button><div id="o"></div>
 <script>async function load(){const t=document.querySelector('#t').value;
@@ -668,7 +683,8 @@ body:'{}'});load()}</script>
     def events_page() -> str:
         return """<!doctype html>
 <html><head><title>UPM Central Events</title></head><body>
-<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a></nav>
+<nav><a href="/admin/sites">Sites</a> | <a href="/admin/events">Events</a> |
+<a href="/admin/program">Program</a> | <a href="/admin/people">People</a></nav>
 <h1>Event deployments</h1><p>Enter the configured administrator token.</p>
 <input id="t" type="password"><button onclick="load()">Refresh</button>
 <p><input id="event-name" placeholder="Event name"><button onclick="createEvent()">
@@ -701,4 +717,5 @@ async function createEvent(){await fetch('/api/v1/admin/events',{method:'POST',h
 body:JSON.stringify({name:document.querySelector('#event-name').value})});load()}
 </script></body></html>"""
 
+    register_program_routes(app, db, require_admin)
     return app

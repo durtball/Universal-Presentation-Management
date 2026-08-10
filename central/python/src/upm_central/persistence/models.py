@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -28,12 +29,26 @@ from upm_shared.enums import (
     AssetKind,
     EnrollmentState,
     EventDeploymentStatus,
+    ExternalEntityType,
+    ExternalIdentifierScope,
+    IdentityMatchOutcome,
     IdentitySignalType,
+    ImportEntityType,
+    ImportProposedAction,
+    ImportSourceType,
+    ImportStatus,
+    ImportValidationState,
     JobPriority,
     JobStatus,
     MediaCategory,
+    ParticipantStatus,
+    PresentationProcessingStatus,
+    PresentationWorkflowStatus,
+    ReconciliationAction,
+    SessionStatus,
     SourceSystem,
     SyncState,
+    ValidationSeverity,
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import PRIORITY_VALUES
@@ -64,9 +79,20 @@ class Person(CentralRecordMixin, CentralBase):
     person_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
     )
+    given_name: Mapped[str | None] = mapped_column(String(255))
+    middle_name: Mapped[str | None] = mapped_column(String(255))
+    family_name: Mapped[str | None] = mapped_column(String(255))
+    prefix: Mapped[str | None] = mapped_column(String(64))
+    suffix: Mapped[str | None] = mapped_column(String(64))
+    preferred_name: Mapped[str | None] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     primary_email: Mapped[str | None] = mapped_column(String(320))
+    normalized_email: Mapped[str | None] = mapped_column(String(320), index=True)
+    phone: Mapped[str | None] = mapped_column(String(64))
+    professional_title: Mapped[str | None] = mapped_column(String(255))
     organization: Mapped[str | None] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     identity_signals: Mapped[list["PersonIdentitySignal"]] = relationship(back_populates="person")
@@ -129,6 +155,48 @@ class PersonIdentityLink(CentralBase):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class ExternalIdentifier(CentralRecordMixin, CentralBase):
+    __tablename__ = "external_identifiers"
+    __table_args__ = (
+        UniqueConstraint("namespace", "normalized_external_id", "scope_key"),
+        UniqueConstraint("entity_type", "entity_id", "namespace", "scope_key"),
+        Index("ix_central_external_identifier_entity", "entity_type", "entity_id"),
+    )
+
+    external_identifier_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    entity_type: Mapped[ExternalEntityType] = mapped_column(
+        Enum(
+            ExternalEntityType,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=32,
+        ),
+        nullable=False,
+    )
+    entity_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    normalized_external_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    scope: Mapped[ExternalIdentifierScope] = mapped_column(
+        Enum(
+            ExternalIdentifierScope,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        nullable=False,
+    )
+    scope_key: Mapped[str] = mapped_column(String(64), nullable=False, default="global")
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    source: Mapped[str | None] = mapped_column(String(255))
 
 
 class Site(CentralRecordMixin, CentralBase):
@@ -254,12 +322,15 @@ class Event(CentralRecordMixin, CentralBase):
         ForeignKey("sites.site_id", ondelete="RESTRICT")
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    timezone: Mapped[str] = mapped_column(String(100), nullable=False, default="UTC")
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     participations: Mapped[list["EventParticipation"]] = relationship(back_populates="event")
     sessions: Mapped[list["Session"]] = relationship(back_populates="event")
+    presentations: Mapped[list["Presentation"]] = relationship(back_populates="event")
     deployments: Mapped[list["EventDeployment"]] = relationship(back_populates="event")
 
 
@@ -346,6 +417,25 @@ class EventParticipation(CentralRecordMixin, CentralBase):
         ForeignKey("persons.person_id", ondelete="RESTRICT"), nullable=False
     )
     role: Mapped[str | None] = mapped_column(String(100))
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    professional_title: Mapped[str | None] = mapped_column(String(255))
+    organization: Mapped[str | None] = mapped_column(String(255))
+    registration_status: Mapped[str | None] = mapped_column(String(100))
+    participant_status: Mapped[ParticipantStatus] = mapped_column(
+        Enum(
+            ParticipantStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        default=ParticipantStatus.ACTIVE,
+        nullable=False,
+    )
+    is_presenter: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(255))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
 
     event: Mapped[Event] = relationship(back_populates="participations")
     person: Mapped[Person] = relationship(back_populates="event_participations")
@@ -356,6 +446,13 @@ class EventParticipation(CentralRecordMixin, CentralBase):
 
 class Session(CentralRecordMixin, CentralBase):
     __tablename__ = "sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at", name="schedule_order"
+        ),
+        UniqueConstraint("event_id", "session_code"),
+        Index("ix_central_sessions_event_schedule", "event_id", "starts_at"),
+    )
 
     session_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -364,8 +461,30 @@ class Session(CentralRecordMixin, CentralBase):
         ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    subtitle: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    session_code: Mapped[str | None] = mapped_column(String(255))
+    session_type: Mapped[str | None] = mapped_column(String(100))
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    location_name: Mapped[str | None] = mapped_column(String(255))
+    location_metadata: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    status: Mapped[SessionStatus] = mapped_column(
+        Enum(
+            SessionStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        default=SessionStatus.DRAFT,
+        nullable=False,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(255))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
 
     event: Mapped[Event] = relationship(back_populates="sessions")
     participants: Mapped[list["SessionParticipant"]] = relationship(back_populates="session")
@@ -387,6 +506,11 @@ class SessionParticipant(CentralRecordMixin, CentralBase):
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(64), nullable=False)
+    presenter_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    primary_presenter: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    external_relationship_id: Mapped[str | None] = mapped_column(String(512))
+    source: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
 
     session: Mapped[Session] = relationship(back_populates="participants")
     event_participation: Mapped[EventParticipation] = relationship(
@@ -396,6 +520,7 @@ class SessionParticipant(CentralRecordMixin, CentralBase):
 
 class Presentation(CentralRecordMixin, CentralBase):
     __tablename__ = "presentations"
+    __table_args__ = (UniqueConstraint("event_id", "presentation_code"),)
 
     presentation_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -407,21 +532,84 @@ class Presentation(CentralRecordMixin, CentralBase):
         ForeignKey("sessions.session_id", ondelete="RESTRICT")
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    presentation_code: Mapped[str | None] = mapped_column(String(255))
+    workflow_status: Mapped[PresentationWorkflowStatus] = mapped_column(
+        Enum(
+            PresentationWorkflowStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        ),
+        default=PresentationWorkflowStatus.EXPECTED,
+        nullable=False,
+    )
+    processing_status: Mapped[PresentationProcessingStatus] = mapped_column(
+        Enum(
+            PresentationProcessingStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        default=PresentationProcessingStatus.NOT_STARTED,
+        nullable=False,
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str | None] = mapped_column(String(255))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
 
     session: Mapped[Session | None] = relationship(back_populates="presentations")
+    event: Mapped[Event] = relationship(back_populates="presentations")
     versions: Mapped[list["PresentationVersion"]] = relationship(back_populates="presentation")
+    session_links: Mapped[list["PresentationSession"]] = relationship(back_populates="presentation")
+    presenter_links: Mapped[list["PresentationPresenter"]] = relationship(
+        back_populates="presentation"
+    )
 
 
-class PresentationPresenter(CentralBase):
-    __tablename__ = "presentation_presenters"
+class PresentationSession(CentralRecordMixin, CentralBase):
+    __tablename__ = "presentation_sessions"
+    __table_args__ = (UniqueConstraint("presentation_id", "session_id"),)
 
+    presentation_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
     presentation_id: Mapped[UUID] = mapped_column(
-        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), primary_key=True
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), nullable=False
     )
-    session_participant_id: Mapped[UUID] = mapped_column(
-        ForeignKey("session_participants.session_participant_id", ondelete="RESTRICT"),
-        primary_key=True,
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT"), nullable=False
     )
+    association_type: Mapped[str] = mapped_column(String(64), default="scheduled", nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    primary_session: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(255))
+
+    presentation: Mapped[Presentation] = relationship(back_populates="session_links")
+
+
+class PresentationPresenter(CentralRecordMixin, CentralBase):
+    __tablename__ = "presentation_presenters"
+    __table_args__ = (UniqueConstraint("presentation_id", "event_participation_id", "role"),)
+
+    presentation_presenter_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_participation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("event_participations.event_participation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(64), default="presenter", nullable=False)
+    presenter_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    primary_presenter: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(255))
+
+    presentation: Mapped[Presentation] = relationship(back_populates="presenter_links")
 
 
 class PresentationVersion(CentralRecordMixin, CentralBase):
@@ -441,6 +629,223 @@ class PresentationVersion(CentralRecordMixin, CentralBase):
 
     presentation: Mapped[Presentation] = relationship(back_populates="versions")
     assets: Mapped[list["PresentationAsset"]] = relationship(back_populates="version")
+
+
+class ImportSource(CentralBase):
+    __tablename__ = "import_sources"
+
+    import_source_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[ImportSourceType] = mapped_column(
+        Enum(
+            ImportSourceType,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=8,
+        ),
+        nullable=False,
+    )
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class ImportBatch(CentralRecordMixin, CentralBase):
+    __tablename__ = "import_batches"
+    __table_args__ = (
+        UniqueConstraint("event_id", "source_sha256", "importer_type"),
+        Index("ix_central_import_batches_event_status", "event_id", "status"),
+    )
+
+    import_batch_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    import_source_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_sources.import_source_id", ondelete="RESTRICT"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    importer_type: Mapped[str] = mapped_column(String(100), default="program", nullable=False)
+    status: Mapped[ImportStatus] = mapped_column(
+        Enum(
+            ImportStatus,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        default=ImportStatus.UPLOADED,
+        nullable=False,
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    valid_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    conflict_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    committed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_summary: Mapped[str | None] = mapped_column(Text)
+    reviewed_domain_revision: Mapped[int | None] = mapped_column(Integer)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    rows: Mapped[list["ImportRow"]] = relationship(back_populates="batch")
+
+
+class ImportRow(CentralRecordMixin, CentralBase):
+    __tablename__ = "import_rows"
+    __table_args__ = (
+        UniqueConstraint("import_batch_id", "source_row_number"),
+        Index("ix_central_import_rows_batch_state", "import_batch_id", "validation_state"),
+    )
+
+    import_row_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    import_batch_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_batches.import_batch_id", ondelete="RESTRICT"), nullable=False
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_values: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    normalized_values: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    corrected_values: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    entity_type: Mapped[ImportEntityType] = mapped_column(
+        Enum(
+            ImportEntityType,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        nullable=False,
+    )
+    validation_state: Mapped[ImportValidationState] = mapped_column(
+        Enum(
+            ImportValidationState,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=16,
+        ),
+        nullable=False,
+    )
+    match_outcome: Mapped[IdentityMatchOutcome | None] = mapped_column(
+        Enum(
+            IdentityMatchOutcome,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        )
+    )
+    proposed_person_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="RESTRICT")
+    )
+    candidate_person_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    match_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    match_reason: Mapped[str | None] = mapped_column(Text)
+    proposed_action: Mapped[ImportProposedAction | None] = mapped_column(
+        Enum(
+            ImportProposedAction,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        )
+    )
+    conflict_state: Mapped[str | None] = mapped_column(String(64))
+    resolution_action: Mapped[ReconciliationAction | None] = mapped_column(
+        Enum(
+            ReconciliationAction,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        )
+    )
+    resolved_person_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="RESTRICT")
+    )
+    resolved_by: Mapped[str | None] = mapped_column(String(255))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committed_entity_ids: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    batch: Mapped[ImportBatch] = relationship(back_populates="rows")
+    issues: Mapped[list["ImportValidationIssue"]] = relationship(back_populates="row")
+
+
+class ImportValidationIssue(CentralBase):
+    __tablename__ = "import_validation_issues"
+    __table_args__ = (Index("ix_central_import_issues_row_severity", "import_row_id", "severity"),)
+
+    import_validation_issue_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    import_row_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_rows.import_row_id", ondelete="CASCADE"), nullable=False
+    )
+    severity: Mapped[ValidationSeverity] = mapped_column(
+        Enum(
+            ValidationSeverity,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=8,
+        ),
+        nullable=False,
+    )
+    code: Mapped[str] = mapped_column(String(100), nullable=False)
+    field_name: Mapped[str | None] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    row: Mapped[ImportRow] = relationship(back_populates="issues")
+
+
+class ReconciliationDecision(CentralBase):
+    __tablename__ = "reconciliation_decisions"
+
+    reconciliation_decision_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    import_row_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_rows.import_row_id", ondelete="RESTRICT"), nullable=False
+    )
+    action: Mapped[ReconciliationAction] = mapped_column(
+        Enum(
+            ReconciliationAction,
+            native_enum=False,
+            create_constraint=True,
+            values_callable=enum_values,
+            length=24,
+        ),
+        nullable=False,
+    )
+    selected_person_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="RESTRICT")
+    )
+    corrected_values: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    decided_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
 
 
 class MediaObjectReplica(CentralRecordMixin, CentralBase):

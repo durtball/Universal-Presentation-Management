@@ -3,7 +3,7 @@
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from upm_central.persistence.models import (
@@ -12,8 +12,8 @@ from upm_central.persistence.models import (
     EventDeployment,
     EventDeploymentRevision,
     EventParticipation,
+    ExternalIdentifier,
     Presentation,
-    PresentationPresenter,
     Site,
     utc_now,
 )
@@ -26,8 +26,11 @@ from upm_shared.contracts.deployments import (
     EVENT_DEPLOYMENT_SCHEMA_VERSION,
     DeploymentRevocation,
     EventDeploymentSnapshot,
+    ExternalIdentifierSnapshot,
     ParticipationSnapshot,
     PersonProfile,
+    PresentationPresenterSnapshot,
+    PresentationSessionSnapshot,
     PresentationSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
@@ -118,30 +121,47 @@ def build_snapshot(
     presentations = session.scalars(
         select(Presentation)
         .where(Presentation.event_id == event.event_id)
-        .options(selectinload(Presentation.versions))
+        .options(
+            selectinload(Presentation.versions),
+            selectinload(Presentation.session_links),
+            selectinload(Presentation.presenter_links),
+        )
         .order_by(Presentation.presentation_id)
     ).all()
-    presenter_rows = session.execute(
-        select(PresentationPresenter.presentation_id, PresentationPresenter.session_participant_id)
-        .join(Presentation, Presentation.presentation_id == PresentationPresenter.presentation_id)
-        .where(Presentation.event_id == event.event_id)
-    ).all()
-    presenter_ids: dict[UUID, list[UUID]] = {}
-    for presentation_id, participant_id in presenter_rows:
-        presenter_ids.setdefault(presentation_id, []).append(participant_id)
     participations = sorted(event.participations, key=lambda item: str(item.event_participation_id))
+    entity_ids = {
+        event.event_id,
+        *(item.person_id for item in participations),
+        *(item.event_participation_id for item in participations),
+        *(item.session_id for item in event.sessions),
+        *(item.presentation_id for item in presentations),
+    }
+    external_identifiers = session.scalars(
+        select(ExternalIdentifier)
+        .where(
+            or_(
+                ExternalIdentifier.event_id == event.event_id,
+                ExternalIdentifier.entity_id.in_(entity_ids),
+            )
+        )
+        .order_by(ExternalIdentifier.external_identifier_id)
+    ).all()
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
         event_id=event.event_id,
         site_id=deployment.site_id,
         event_name=event.name,
+        event_description=event.description,
         starts_at=event.starts_at,
         ends_at=event.ends_at,
+        timezone=event.timezone,
         people=[
             PersonProfile(
                 person_id=item.person.person_id,
                 display_name=item.person.display_name,
+                given_name=item.person.given_name,
+                family_name=item.person.family_name,
                 primary_email=item.person.primary_email,
                 organization=item.person.organization,
                 central_revision=item.person.revision,
@@ -153,6 +173,11 @@ def build_snapshot(
                 event_participation_id=item.event_participation_id,
                 person_id=item.person_id,
                 role=item.role,
+                display_name=item.display_name,
+                professional_title=item.professional_title,
+                organization=item.organization,
+                participant_status=item.participant_status,
+                is_presenter=item.is_presenter,
                 central_revision=item.revision,
             )
             for item in participations
@@ -161,14 +186,23 @@ def build_snapshot(
             SessionSnapshot(
                 session_id=item.session_id,
                 title=item.title,
+                subtitle=item.subtitle,
+                description=item.description,
+                session_code=item.session_code,
+                session_type=item.session_type,
                 starts_at=item.starts_at,
                 ends_at=item.ends_at,
+                location_name=item.location_name,
+                status=item.status,
+                sort_order=item.sort_order,
                 central_revision=item.revision,
                 participants=[
                     SessionParticipantSnapshot(
                         session_participant_id=participant.session_participant_id,
                         event_participation_id=participant.event_participation_id,
                         role=participant.role,
+                        presenter_order=participant.presenter_order,
+                        primary_presenter=participant.primary_presenter,
                         central_revision=participant.revision,
                     )
                     for participant in sorted(
@@ -183,13 +217,52 @@ def build_snapshot(
                 presentation_id=item.presentation_id,
                 session_id=item.session_id,
                 title=item.title,
+                description=item.description,
+                presentation_code=item.presentation_code,
+                workflow_status=item.workflow_status,
+                processing_status=item.processing_status,
+                scheduled_at=item.scheduled_at,
                 central_revision=item.revision,
                 version_numbers=sorted(version.version_number for version in item.versions),
-                presenter_session_participant_ids=sorted(
-                    presenter_ids.get(item.presentation_id, []), key=str
-                ),
+                sessions=[
+                    PresentationSessionSnapshot(
+                        presentation_session_id=link.presentation_session_id,
+                        session_id=link.session_id,
+                        association_type=link.association_type,
+                        sort_order=link.sort_order,
+                        primary_session=link.primary_session,
+                        central_revision=link.revision,
+                    )
+                    for link in sorted(
+                        item.session_links, key=lambda row: str(row.presentation_session_id)
+                    )
+                ],
+                presenters=[
+                    PresentationPresenterSnapshot(
+                        presentation_presenter_id=link.presentation_presenter_id,
+                        event_participation_id=link.event_participation_id,
+                        role=link.role,
+                        presenter_order=link.presenter_order,
+                        primary_presenter=link.primary_presenter,
+                        central_revision=link.revision,
+                    )
+                    for link in sorted(
+                        item.presenter_links, key=lambda row: str(row.presentation_presenter_id)
+                    )
+                ],
             )
             for item in presentations
+        ],
+        external_identifiers=[
+            ExternalIdentifierSnapshot(
+                external_identifier_id=item.external_identifier_id,
+                entity_type=item.entity_type,
+                entity_id=item.entity_id,
+                namespace=item.namespace,
+                external_id=item.external_id,
+                central_revision=item.revision,
+            )
+            for item in external_identifiers
         ],
     )
 

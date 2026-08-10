@@ -32,11 +32,13 @@ The service rejects transitions outside the declared transition map. Initial dep
 revision 1. Every push after deployable Central data changes creates the next monotonic revision for
 that Event + Site. Revisions for different Sites are independent.
 
-Snapshot schema v1 contains stable UUID references and the currently implemented Event, permanent
-person profile, event participation, session, session-participant, presentation, and presentation
-version metadata. Configuration sections for organization, timezone, rooms, signage, branding,
-workflow, and future extensions are defined but remain empty until their authoritative domains are
-implemented. Presentation binaries are never embedded.
+Snapshot schema v1 contains stable UUID references and the implemented Event timezone/metadata,
+event-scoped permanent-person profiles, event participation, session and ordered presenter
+associations, logical presentations, explicit presentation-session/presenter associations,
+presentation workflow/processing state, presentation-version metadata, and relevant external
+identifiers. Configuration sections for organization, rooms, signage, branding, workflow, and
+future extensions remain defined for their authoritative domains. Presentation binaries are never
+embedded and unrelated Central identity history is never sent to a Site.
 
 Snapshots are complete authoritative deployment contracts. Therefore a Site that applied revision
 1 may safely apply revision 4 without first receiving revisions 2 and 3. Equal revisions are
@@ -48,6 +50,10 @@ while the transport receipt advances so one poison event cannot permanently bloc
 Revocation is a state change, not deletion. The Site retains its event projection, media references,
 deployment snapshots, audit/history, and operational records until a future explicit retention
 workflow removes eligible data.
+
+Within the Site relational projection, rows omitted by a newer complete snapshot are deactivated
+before present rows are upserted/reactivated. This converges operational program state without
+deleting Site-owned media or historical/operational records.
 
 ## Consequences
 
