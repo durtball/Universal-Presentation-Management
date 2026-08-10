@@ -20,17 +20,39 @@ from upm_central.persistence.base import CentralBase
 from upm_central.persistence.models import EventDeployment as CentralDeployment
 from upm_central.persistence.models import OutboxEvent as CentralOutboxEvent
 from upm_central.persistence.models import Site as CentralSite
-from upm_shared.contracts.deployments import EventDeploymentSnapshot
+from upm_shared.contracts.deployments import (
+    EventDeploymentSnapshot,
+    ParticipationSnapshot,
+    PersonProfile,
+    PresentationPresenterSnapshot,
+    PresentationSessionSnapshot,
+    PresentationSnapshot,
+    SessionParticipantSnapshot,
+    SessionSnapshot,
+)
 from upm_shared.contracts.sync import SyncEventEnvelope
 from upm_shared.enums import (
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
     JobStatus,
+    ParticipantStatus,
+    PresentationProcessingStatus,
+    PresentationWorkflowStatus,
+    SessionStatus,
 )
+from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
 from upm_site.persistence.base import SiteBase
-from upm_site.persistence.models import CentralRegistration, EventDeploymentProjection
+from upm_site.persistence.models import (
+    CentralRegistration,
+    EventDeploymentProjection,
+    EventParticipation,
+    Presentation,
+    PresentationPresenter,
+    PresentationSession,
+    SessionParticipant,
+)
 from upm_site.persistence.models import Event as SiteEvent
 from upm_site.sync import apply_central_event, bootstrap_identity, decrypt_secret
 from upm_site.sync_transport import synchronize_once
@@ -350,3 +372,121 @@ def test_site_revision_order_schema_failure_and_identity_security(
     with site_factory() as session:
         assert session.get(EventDeploymentProjection, deployment_id).applied_revision == 2
         assert session.get(SiteEvent, event_id).name == "Revision 2"
+
+
+def test_complete_program_projection_replaces_removed_relationships(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+    deployment_id, event_id = new_uuid7(), new_uuid7()
+    person_id, participant_id = new_uuid7(), new_uuid7()
+    session_id, session_participant_id = new_uuid7(), new_uuid7()
+    presentation_id = new_uuid7()
+    presentation_session_id, presentation_presenter_id = new_uuid7(), new_uuid7()
+
+    def envelope(revision: int, include_links: bool) -> SyncEventEnvelope:
+        snapshot = EventDeploymentSnapshot(
+            deployment_id=deployment_id,
+            deployment_revision=revision,
+            event_id=event_id,
+            site_id=site_id,
+            event_name="Program projection",
+            timezone="America/Chicago",
+            people=[
+                PersonProfile(person_id=person_id, display_name="Presenter One", central_revision=1)
+            ],
+            participations=[
+                ParticipationSnapshot(
+                    event_participation_id=participant_id,
+                    person_id=person_id,
+                    participant_status=ParticipantStatus.ACTIVE,
+                    is_presenter=True,
+                    central_revision=1,
+                )
+            ],
+            sessions=[
+                SessionSnapshot(
+                    session_id=session_id,
+                    title="Session One",
+                    status=SessionStatus.SCHEDULED,
+                    central_revision=1,
+                    participants=[
+                        SessionParticipantSnapshot(
+                            session_participant_id=session_participant_id,
+                            event_participation_id=participant_id,
+                            role="presenter",
+                            presenter_order=0,
+                            primary_presenter=True,
+                            central_revision=1,
+                        )
+                    ]
+                    if include_links
+                    else [],
+                )
+            ],
+            presentations=[
+                PresentationSnapshot(
+                    presentation_id=presentation_id,
+                    session_id=session_id,
+                    title="Presentation One",
+                    workflow_status=PresentationWorkflowStatus.READY,
+                    processing_status=PresentationProcessingStatus.SUCCEEDED,
+                    central_revision=1,
+                    sessions=[
+                        PresentationSessionSnapshot(
+                            presentation_session_id=presentation_session_id,
+                            session_id=session_id,
+                            primary_session=True,
+                            central_revision=1,
+                        )
+                    ]
+                    if include_links
+                    else [],
+                    presenters=[
+                        PresentationPresenterSnapshot(
+                            presentation_presenter_id=presentation_presenter_id,
+                            event_participation_id=participant_id,
+                            primary_presenter=True,
+                            central_revision=1,
+                        )
+                    ]
+                    if include_links
+                    else [],
+                )
+            ],
+        )
+        return SyncEventEnvelope(
+            event_id=new_uuid7(),
+            event_type="central.event_deployment.updated",
+            protocol_version=1,
+            source="central",
+            source_sequence=revision,
+            authority=AuthorityScope.CENTRAL,
+            entity_type="event_deployment",
+            entity_id=deployment_id,
+            occurred_at=datetime.now(UTC),
+            payload=snapshot.model_dump(mode="json"),
+        )
+
+    with site_factory.begin() as session:
+        assert apply_central_event(session, envelope(1, True)).accepted
+    with site_factory() as session:
+        assert session.get(SiteEvent, event_id).timezone == "America/Chicago"
+        assert session.get(EventParticipation, participant_id).active
+        assert session.get(SessionParticipant, session_participant_id).active
+        assert session.get(Presentation, presentation_id).active
+        assert session.get(PresentationSession, presentation_session_id).active
+        assert session.get(PresentationPresenter, presentation_presenter_id).active
+    with site_factory.begin() as session:
+        assert apply_central_event(session, envelope(2, False)).accepted
+    with site_factory() as session:
+        assert not session.get(SessionParticipant, session_participant_id).active
+        assert not session.get(PresentationSession, presentation_session_id).active
+        assert not session.get(PresentationPresenter, presentation_presenter_id).active

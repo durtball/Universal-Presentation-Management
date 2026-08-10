@@ -35,6 +35,14 @@ type TransferJobId = UUID7
 type ProcessingJobId = UUID7
 type SyncEventId = UUID7
 type AuditRecordId = UUID7
+type ExternalIdentifierId = UUID7
+type PresentationSessionId = UUID7
+type PresentationPresenterId = UUID7
+type ImportSourceId = UUID7
+type ImportBatchId = UUID7
+type ImportRowId = UUID7
+type ImportValidationIssueId = UUID7
+type ReconciliationDecisionId = UUID7
 
 
 def new_uuid7() -> UUID:

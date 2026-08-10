@@ -52,6 +52,7 @@ from upm_site.persistence.models import (
     SyncCursor,
     utc_now,
 )
+from upm_site.program_api import register_program_routes
 from upm_site.sync import (
     apply_central_event,
     bootstrap_identity,
@@ -497,11 +498,13 @@ document.querySelector('#o').textContent=JSON.stringify(await r.json(),null,2)}l
         return """<!doctype html>
 <html><head><title>UPM Site Event Deployments</title></head><body>
 <nav><a href="/admin/central-registration">Central registration</a> |
-<a href="/admin/event-deployments">Event deployments</a></nav>
+<a href="/admin/event-deployments">Event deployments</a> |
+<a href="/admin/program">Program</a></nav>
 <h1>Site event deployments</h1><button onclick="load()">Refresh</button><div id="o"></div>
 <script>async function load(){const r=await fetch('/api/v1/event-deployments');
 const rows=await r.json(),out=document.querySelector('#o');out.replaceChildren();
 for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
+    register_program_routes(app, get_session)
     return app

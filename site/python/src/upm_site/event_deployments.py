@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import (
@@ -21,11 +21,13 @@ from upm_site.persistence.models import (
     EventDeploymentProjection,
     EventDeploymentRevisionProjection,
     EventParticipation,
+    ExternalIdentifierProjection,
     LocalSiteIdentity,
     OutboxEvent,
     PersonProjection,
     Presentation,
     PresentationPresenter,
+    PresentationSession,
     PresentationVersion,
     SessionParticipant,
     utc_now,
@@ -102,6 +104,8 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             event_id=snapshot.event_id,
             site_id=snapshot.site_id,
             name=snapshot.event_name,
+            description=snapshot.event_description,
+            timezone=snapshot.timezone or "UTC",
             starts_at=snapshot.starts_at,
             ends_at=snapshot.ends_at,
             sync_state=SyncState.SYNCHRONIZED,
@@ -111,6 +115,8 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         if event.site_id != snapshot.site_id:
             raise ValueError("event belongs to another Site")
         event.name = snapshot.event_name
+        event.description = snapshot.event_description
+        event.timezone = snapshot.timezone or "UTC"
         event.starts_at = snapshot.starts_at
         event.ends_at = snapshot.ends_at
         event.sync_state = SyncState.SYNCHRONIZED
@@ -121,6 +127,8 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             person = PersonProjection(
                 person_id=profile.person_id,
                 display_name=profile.display_name,
+                given_name=profile.given_name,
+                family_name=profile.family_name,
                 primary_email=profile.primary_email,
                 organization=profile.organization,
                 central_revision=profile.central_revision,
@@ -129,11 +137,60 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             session.add(person)
         elif profile.central_revision >= person.central_revision:
             person.display_name = profile.display_name
+            person.given_name = profile.given_name
+            person.family_name = profile.family_name
             person.primary_email = profile.primary_email
             person.organization = profile.organization
             person.central_revision = profile.central_revision
             person.sync_state = SyncState.SYNCHRONIZED
     session.flush()
+    session.execute(
+        update(EventParticipation)
+        .where(EventParticipation.event_id == snapshot.event_id)
+        .values(active=False)
+    )
+    session.execute(
+        update(SiteSession).where(SiteSession.event_id == snapshot.event_id).values(active=False)
+    )
+    session.execute(
+        update(Presentation).where(Presentation.event_id == snapshot.event_id).values(active=False)
+    )
+    session.execute(
+        update(SessionParticipant)
+        .where(
+            SessionParticipant.session_id.in_(
+                select(SiteSession.session_id).where(SiteSession.event_id == snapshot.event_id)
+            )
+        )
+        .values(active=False)
+    )
+    session.execute(
+        update(PresentationSession)
+        .where(
+            PresentationSession.presentation_id.in_(
+                select(Presentation.presentation_id).where(
+                    Presentation.event_id == snapshot.event_id
+                )
+            )
+        )
+        .values(active=False)
+    )
+    session.execute(
+        update(PresentationPresenter)
+        .where(
+            PresentationPresenter.presentation_id.in_(
+                select(Presentation.presentation_id).where(
+                    Presentation.event_id == snapshot.event_id
+                )
+            )
+        )
+        .values(active=False)
+    )
+    session.execute(
+        update(ExternalIdentifierProjection)
+        .where(ExternalIdentifierProjection.event_id == snapshot.event_id)
+        .values(active=False)
+    )
     for item in snapshot.participations:
         participation = session.get(EventParticipation, item.event_participation_id)
         if participation is None:
@@ -142,12 +199,24 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 event_id=snapshot.event_id,
                 person_id=item.person_id,
                 role=item.role,
+                display_name=item.display_name,
+                professional_title=item.professional_title,
+                organization=item.organization,
+                participant_status=item.participant_status,
+                is_presenter=item.is_presenter,
+                active=True,
                 revision=item.central_revision,
                 sync_state=SyncState.SYNCHRONIZED,
             )
             session.add(participation)
         else:
             participation.role = item.role
+            participation.display_name = item.display_name
+            participation.professional_title = item.professional_title
+            participation.organization = item.organization
+            participation.participant_status = item.participant_status
+            participation.is_presenter = item.is_presenter
+            participation.active = True
             participation.revision = max(participation.revision, item.central_revision)
             participation.sync_state = SyncState.SYNCHRONIZED
     for item in snapshot.sessions:
@@ -157,16 +226,32 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 session_id=item.session_id,
                 event_id=snapshot.event_id,
                 title=item.title,
+                subtitle=item.subtitle,
+                description=item.description,
+                session_code=item.session_code,
+                session_type=item.session_type,
                 starts_at=item.starts_at,
                 ends_at=item.ends_at,
+                location_name=item.location_name,
+                status=item.status,
+                sort_order=item.sort_order,
+                active=True,
                 revision=item.central_revision,
                 sync_state=SyncState.SYNCHRONIZED,
             )
             session.add(local)
         else:
             local.title = item.title
+            local.subtitle = item.subtitle
+            local.description = item.description
+            local.session_code = item.session_code
+            local.session_type = item.session_type
             local.starts_at = item.starts_at
             local.ends_at = item.ends_at
+            local.location_name = item.location_name
+            local.status = item.status
+            local.sort_order = item.sort_order
+            local.active = True
             local.revision = max(local.revision, item.central_revision)
             local.sync_state = SyncState.SYNCHRONIZED
     session.flush()
@@ -180,12 +265,18 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                         session_id=item.session_id,
                         event_participation_id=participant.event_participation_id,
                         role=participant.role,
+                        presenter_order=participant.presenter_order,
+                        primary_presenter=participant.primary_presenter,
+                        active=True,
                         revision=participant.central_revision,
                         sync_state=SyncState.SYNCHRONIZED,
                     )
                 )
             else:
                 local.role = participant.role
+                local.presenter_order = participant.presenter_order
+                local.primary_presenter = participant.primary_presenter
+                local.active = True
                 local.revision = max(local.revision, participant.central_revision)
                 local.sync_state = SyncState.SYNCHRONIZED
     for item in snapshot.presentations:
@@ -196,6 +287,12 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 event_id=snapshot.event_id,
                 session_id=item.session_id,
                 title=item.title,
+                description=item.description,
+                presentation_code=item.presentation_code,
+                workflow_status=item.workflow_status,
+                processing_status=item.processing_status,
+                scheduled_at=item.scheduled_at,
+                active=True,
                 revision=item.central_revision,
                 sync_state=SyncState.SYNCHRONIZED,
             )
@@ -203,6 +300,12 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         else:
             presentation.session_id = item.session_id
             presentation.title = item.title
+            presentation.description = item.description
+            presentation.presentation_code = item.presentation_code
+            presentation.workflow_status = item.workflow_status
+            presentation.processing_status = item.processing_status
+            presentation.scheduled_at = item.scheduled_at
+            presentation.active = True
             presentation.revision = max(presentation.revision, item.central_revision)
             presentation.sync_state = SyncState.SYNCHRONIZED
     session.flush()
@@ -223,19 +326,79 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                         sync_state=SyncState.SYNCHRONIZED,
                     )
                 )
-        for participant_id in item.presenter_session_participant_ids:
-            key = (item.presentation_id, participant_id)
-            if session.get(PresentationPresenter, key) is None:
-                session.add(
-                    PresentationPresenter(
-                        presentation_id=item.presentation_id,
-                        session_participant_id=participant_id,
-                    )
+        for link in item.sessions:
+            local = session.get(PresentationSession, link.presentation_session_id)
+            if local is None:
+                local = PresentationSession(
+                    presentation_session_id=link.presentation_session_id,
+                    presentation_id=item.presentation_id,
+                    session_id=link.session_id,
+                    association_type=link.association_type,
+                    sort_order=link.sort_order,
+                    primary_session=link.primary_session,
+                    active=True,
+                    revision=link.central_revision,
                 )
+                session.add(local)
+            else:
+                local.session_id = link.session_id
+                local.association_type = link.association_type
+                local.sort_order = link.sort_order
+                local.primary_session = link.primary_session
+                local.active = True
+                local.revision = max(local.revision, link.central_revision)
+        for link in item.presenters:
+            local = session.get(PresentationPresenter, link.presentation_presenter_id)
+            if local is None:
+                local = PresentationPresenter(
+                    presentation_presenter_id=link.presentation_presenter_id,
+                    presentation_id=item.presentation_id,
+                    event_participation_id=link.event_participation_id,
+                    role=link.role,
+                    presenter_order=link.presenter_order,
+                    primary_presenter=link.primary_presenter,
+                    active=True,
+                    revision=link.central_revision,
+                )
+                session.add(local)
+            else:
+                local.event_participation_id = link.event_participation_id
+                local.role = link.role
+                local.presenter_order = link.presenter_order
+                local.primary_presenter = link.primary_presenter
+                local.active = True
+                local.revision = max(local.revision, link.central_revision)
+    for item in snapshot.external_identifiers:
+        local = session.get(ExternalIdentifierProjection, item.external_identifier_id)
+        if local is None:
+            local = ExternalIdentifierProjection(
+                external_identifier_id=item.external_identifier_id,
+                event_id=snapshot.event_id,
+                entity_type=item.entity_type,
+                entity_id=item.entity_id,
+                namespace=item.namespace,
+                external_id=item.external_id,
+                active=True,
+                revision=item.central_revision,
+            )
+            session.add(local)
+        else:
+            local.entity_type = item.entity_type
+            local.entity_id = item.entity_id
+            local.namespace = item.namespace
+            local.external_id = item.external_id
+            local.active = True
+            local.revision = max(local.revision, item.central_revision)
     return {
-        "presenters": len(snapshot.people),
+        "people": len(snapshot.people),
+        "participants": len(snapshot.participations),
+        "presenters": sum(item.is_presenter for item in snapshot.participations),
         "sessions": len(snapshot.sessions),
+        "session_presenters": sum(len(item.participants) for item in snapshot.sessions),
         "presentations": len(snapshot.presentations),
+        "presentation_sessions": sum(len(item.sessions) for item in snapshot.presentations),
+        "presentation_presenters": sum(len(item.presenters) for item in snapshot.presentations),
+        "external_identifiers": len(snapshot.external_identifiers),
         "rooms": 0,
     }
 

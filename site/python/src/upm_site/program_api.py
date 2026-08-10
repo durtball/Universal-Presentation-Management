@@ -1,0 +1,169 @@
+"""Read-only Site-local event program views for autonomous operation."""
+# ruff: noqa: E501
+
+from collections.abc import Callable, Iterator
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from upm_site.persistence.models import (
+    Event,
+    EventParticipation,
+    PersonProjection,
+    Presentation,
+    PresentationPresenter,
+    PresentationSession,
+    SessionParticipant,
+)
+from upm_site.persistence.models import Session as ProgramSession
+
+
+def register_program_routes(app: FastAPI, db: Callable[[], Iterator[Session]]) -> None:
+    DbSession = Annotated[Session, Depends(db)]
+
+    @app.get("/api/v1/events/{event_id}/program", tags=["program"])
+    def event_program(event_id: UUID, session: DbSession) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        participants = session.scalars(
+            select(EventParticipation)
+            .where(EventParticipation.event_id == event_id, EventParticipation.active.is_(True))
+            .order_by(EventParticipation.created_at)
+        ).all()
+        sessions = session.scalars(
+            select(ProgramSession)
+            .where(ProgramSession.event_id == event_id, ProgramSession.active.is_(True))
+            .order_by(ProgramSession.starts_at, ProgramSession.sort_order)
+        ).all()
+        presentations = session.scalars(
+            select(Presentation)
+            .where(Presentation.event_id == event_id, Presentation.active.is_(True))
+            .order_by(Presentation.title)
+        ).all()
+        people = {
+            item.person_id: item
+            for item in session.scalars(
+                select(PersonProjection).where(
+                    PersonProjection.person_id.in_([item.person_id for item in participants])
+                )
+            )
+        }
+        session_presenters: dict[UUID, list[SessionParticipant]] = {}
+        for link in session.scalars(
+            select(SessionParticipant).where(
+                SessionParticipant.session_id.in_([item.session_id for item in sessions]),
+                SessionParticipant.active.is_(True),
+            )
+        ):
+            session_presenters.setdefault(link.session_id, []).append(link)
+        presentation_sessions: dict[UUID, list[PresentationSession]] = {}
+        for link in session.scalars(
+            select(PresentationSession).where(
+                PresentationSession.presentation_id.in_(
+                    [item.presentation_id for item in presentations]
+                ),
+                PresentationSession.active.is_(True),
+            )
+        ):
+            presentation_sessions.setdefault(link.presentation_id, []).append(link)
+        presentation_presenters: dict[UUID, list[PresentationPresenter]] = {}
+        for link in session.scalars(
+            select(PresentationPresenter).where(
+                PresentationPresenter.presentation_id.in_(
+                    [item.presentation_id for item in presentations]
+                ),
+                PresentationPresenter.active.is_(True),
+            )
+        ):
+            presentation_presenters.setdefault(link.presentation_id, []).append(link)
+        return {
+            "event": {
+                "event_id": event.event_id,
+                "name": event.name,
+                "description": event.description,
+                "timezone": event.timezone,
+                "starts_at": event.starts_at,
+                "ends_at": event.ends_at,
+            },
+            "participants": [
+                {
+                    "event_participation_id": item.event_participation_id,
+                    "person_id": item.person_id,
+                    "person_display_name": people[item.person_id].display_name,
+                    "display_name": item.display_name,
+                    "professional_title": item.professional_title,
+                    "organization": item.organization,
+                    "participant_status": item.participant_status,
+                    "is_presenter": item.is_presenter,
+                }
+                for item in participants
+            ],
+            "sessions": [
+                {
+                    "session_id": item.session_id,
+                    "title": item.title,
+                    "subtitle": item.subtitle,
+                    "session_code": item.session_code,
+                    "starts_at": item.starts_at,
+                    "ends_at": item.ends_at,
+                    "location_name": item.location_name,
+                    "status": item.status,
+                    "presenters": [
+                        {
+                            "session_participant_id": link.session_participant_id,
+                            "event_participation_id": link.event_participation_id,
+                            "role": link.role,
+                            "presenter_order": link.presenter_order,
+                            "primary_presenter": link.primary_presenter,
+                        }
+                        for link in session_presenters.get(item.session_id, [])
+                    ],
+                }
+                for item in sessions
+            ],
+            "presentations": [
+                {
+                    "presentation_id": item.presentation_id,
+                    "title": item.title,
+                    "presentation_code": item.presentation_code,
+                    "workflow_status": item.workflow_status,
+                    "processing_status": item.processing_status,
+                    "sessions": [
+                        {
+                            "presentation_session_id": link.presentation_session_id,
+                            "session_id": link.session_id,
+                            "primary_session": link.primary_session,
+                        }
+                        for link in presentation_sessions.get(item.presentation_id, [])
+                    ],
+                    "presenters": [
+                        {
+                            "presentation_presenter_id": link.presentation_presenter_id,
+                            "event_participation_id": link.event_participation_id,
+                            "role": link.role,
+                            "presenter_order": link.presenter_order,
+                            "primary_presenter": link.primary_presenter,
+                        }
+                        for link in presentation_presenters.get(item.presentation_id, [])
+                    ],
+                }
+                for item in presentations
+            ],
+        }
+
+    @app.get("/admin/program", response_class=HTMLResponse, tags=["administration"])
+    def program_page() -> str:
+        return """<!doctype html><html><head><title>UPM Site Program</title></head><body>
+<nav><a href="/admin/central-registration">Central registration</a> |
+<a href="/admin/event-deployments">Deployments</a> | <a href="/admin/program">Program</a></nav>
+<h1>Site-local event program</h1><button onclick="load()">Refresh deployments</button>
+<div id="out"></div><script>async function load(){const ds=await(await fetch(
+'/api/v1/event-deployments')).json();out.replaceChildren();for(const d of ds){const b=document.createElement(
+'button');b.textContent=`Open ${d.event_id}`;b.onclick=async()=>{const p=await(await fetch(
+`/api/v1/events/${d.event_id}/program`)).json();out.innerHTML=`<pre>${JSON.stringify(p,null,2)}</pre>`};
+out.append(b)}}load()</script></body></html>"""

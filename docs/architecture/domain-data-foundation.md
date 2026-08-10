@@ -26,10 +26,11 @@ generation, so the small `uuid6` package supplies it. Names, labels, filenames,
 and imported row numbers are never primary identities.
 
 Central owns permanent `Person` records. A person survives event archival and
-can have many `EventParticipation` records. Normalized identity signals and
-administrator-confirmed historical links support future confident, possible,
-none, and ambiguous matching outcomes. Display-name equality is never enough to
-merge people, and automatic matching is deliberately deferred.
+can have many `EventParticipation` records. Structured names, normalized email/name fields,
+identity signals, scoped external identifiers, and administrator-confirmed historical links feed
+deterministic exact, strong-candidate, no-match, ambiguous, and conflict classifications.
+Display-name equality is never enough to merge people. The implemented staged-import workflow is
+documented in [event-program-domain.md](../development/event-program-domain.md).
 
 ## Entity relationships
 
@@ -37,9 +38,14 @@ The foundation models Person, Site, Event, EventParticipation, Session,
 SessionParticipant, Presentation, PresentationVersion, PresentationAsset,
 Room, RoomAssignment, Device, DeviceAssignment, StorageTarget, MediaObject,
 TransferJob, ProcessingJob, SyncEvent, and AuditRecord where ownership requires
-them. Join records permit many presenters and presentations; assignment records
+them. Stable UUID association records permit many presenters and presentations; assignment records
 retain room/device flexibility; version and asset records preserve originals
 and explicitly link derivatives to sources.
+
+Every Event persists an IANA timezone. Session instants use PostgreSQL `timestamptz`; event-local
+rendering uses the Event timezone. Presentation workflow and processing status are deliberately
+separate. Presentation/session and presentation/presenter relationships are explicit rather than
+inferred from one nullable foreign key or the full session roster.
 
 Person and event relationships use restrictive deletion. Event archival is a
 state change, not a cascade into permanent identity. Selected synchronized

@@ -6,6 +6,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from upm_shared.enums import (
+    ExternalEntityType,
+    ParticipantStatus,
+    PresentationProcessingStatus,
+    PresentationWorkflowStatus,
+    SessionStatus,
+)
+
 EVENT_DEPLOYMENT_SCHEMA_VERSION = 1
 
 
@@ -16,6 +24,8 @@ class DeploymentModel(BaseModel):
 class PersonProfile(DeploymentModel):
     person_id: UUID
     display_name: Annotated[str, Field(min_length=1, max_length=255)]
+    given_name: Annotated[str | None, Field(max_length=255)] = None
+    family_name: Annotated[str | None, Field(max_length=255)] = None
     primary_email: Annotated[str | None, Field(max_length=320)] = None
     organization: Annotated[str | None, Field(max_length=255)] = None
     central_revision: Annotated[int, Field(ge=1)]
@@ -25,6 +35,11 @@ class ParticipationSnapshot(DeploymentModel):
     event_participation_id: UUID
     person_id: UUID
     role: Annotated[str | None, Field(max_length=100)] = None
+    display_name: Annotated[str | None, Field(max_length=255)] = None
+    professional_title: Annotated[str | None, Field(max_length=255)] = None
+    organization: Annotated[str | None, Field(max_length=255)] = None
+    participant_status: ParticipantStatus = ParticipantStatus.ACTIVE
+    is_presenter: bool = False
     central_revision: Annotated[int, Field(ge=1)]
 
 
@@ -32,25 +47,67 @@ class SessionParticipantSnapshot(DeploymentModel):
     session_participant_id: UUID
     event_participation_id: UUID
     role: Annotated[str, Field(min_length=1, max_length=64)]
+    presenter_order: int = 0
+    primary_presenter: bool = False
     central_revision: Annotated[int, Field(ge=1)]
 
 
 class SessionSnapshot(DeploymentModel):
     session_id: UUID
     title: Annotated[str, Field(min_length=1, max_length=255)]
+    subtitle: Annotated[str | None, Field(max_length=255)] = None
+    description: str | None = None
+    session_code: Annotated[str | None, Field(max_length=255)] = None
+    session_type: Annotated[str | None, Field(max_length=100)] = None
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    location_name: Annotated[str | None, Field(max_length=255)] = None
+    status: SessionStatus = SessionStatus.DRAFT
+    sort_order: int = 0
     central_revision: Annotated[int, Field(ge=1)]
     participants: list[SessionParticipantSnapshot] = Field(default_factory=list)
+
+
+class PresentationSessionSnapshot(DeploymentModel):
+    presentation_session_id: UUID
+    session_id: UUID
+    association_type: Annotated[str, Field(min_length=1, max_length=64)] = "scheduled"
+    sort_order: int = 0
+    primary_session: bool = False
+    central_revision: Annotated[int, Field(ge=1)]
+
+
+class PresentationPresenterSnapshot(DeploymentModel):
+    presentation_presenter_id: UUID
+    event_participation_id: UUID
+    role: Annotated[str, Field(min_length=1, max_length=64)] = "presenter"
+    presenter_order: int = 0
+    primary_presenter: bool = False
+    central_revision: Annotated[int, Field(ge=1)]
+
+
+class ExternalIdentifierSnapshot(DeploymentModel):
+    external_identifier_id: UUID
+    entity_type: ExternalEntityType
+    entity_id: UUID
+    namespace: Annotated[str, Field(min_length=1, max_length=255)]
+    external_id: Annotated[str, Field(min_length=1, max_length=512)]
+    central_revision: Annotated[int, Field(ge=1)]
 
 
 class PresentationSnapshot(DeploymentModel):
     presentation_id: UUID
     session_id: UUID | None = None
     title: Annotated[str, Field(min_length=1, max_length=255)]
+    description: str | None = None
+    presentation_code: Annotated[str | None, Field(max_length=255)] = None
+    workflow_status: PresentationWorkflowStatus = PresentationWorkflowStatus.EXPECTED
+    processing_status: PresentationProcessingStatus = PresentationProcessingStatus.NOT_STARTED
+    scheduled_at: datetime | None = None
     central_revision: Annotated[int, Field(ge=1)]
     version_numbers: list[Annotated[int, Field(ge=1)]] = Field(default_factory=list)
-    presenter_session_participant_ids: list[UUID] = Field(default_factory=list)
+    sessions: list[PresentationSessionSnapshot] = Field(default_factory=list)
+    presenters: list[PresentationPresenterSnapshot] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -64,12 +121,14 @@ class EventDeploymentSnapshot(DeploymentModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     timezone: Annotated[str | None, Field(max_length=100)] = None
+    event_description: str | None = None
     organization_reference: dict[str, object] | None = None
     event_configuration: dict[str, object] = Field(default_factory=dict)
     people: list[PersonProfile] = Field(default_factory=list)
     participations: list[ParticipationSnapshot] = Field(default_factory=list)
     sessions: list[SessionSnapshot] = Field(default_factory=list)
     presentations: list[PresentationSnapshot] = Field(default_factory=list)
+    external_identifiers: list[ExternalIdentifierSnapshot] = Field(default_factory=list)
     room_configuration: dict[str, object] = Field(default_factory=dict)
     signage_configuration: dict[str, object] = Field(default_factory=dict)
     branding_configuration: dict[str, object] = Field(default_factory=dict)
@@ -94,6 +153,16 @@ class EventDeploymentSnapshot(DeploymentModel):
             for item in self.presentations
         ):
             raise ValueError("presentation references an undeployed session")
+        if any(
+            link.session_id not in sessions for item in self.presentations for link in item.sessions
+        ):
+            raise ValueError("presentation-session link references an undeployed session")
+        if any(
+            link.event_participation_id not in participations
+            for item in self.presentations
+            for link in item.presenters
+        ):
+            raise ValueError("presentation presenter references an undeployed participation")
         return self
 
 

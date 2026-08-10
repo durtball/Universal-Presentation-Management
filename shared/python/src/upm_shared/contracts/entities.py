@@ -16,6 +16,10 @@ from upm_shared.enums import (
     JobStatus,
     MediaAvailability,
     MediaCategory,
+    ParticipantStatus,
+    PresentationProcessingStatus,
+    PresentationWorkflowStatus,
+    SessionStatus,
     StorageHealth,
     StorageType,
 )
@@ -30,6 +34,8 @@ from upm_shared.identifiers import (
     PersonId,
     PresentationAssetId,
     PresentationId,
+    PresentationPresenterId,
+    PresentationSessionId,
     PresentationVersionId,
     ProcessingJobId,
     RoomAssignmentId,
@@ -48,6 +54,8 @@ NonEmptyText = Annotated[str, Field(min_length=1, max_length=255)]
 class PersonContract(ContractModel):
     person_id: PersonId
     display_name: NonEmptyText
+    given_name: str | None = Field(default=None, max_length=255)
+    family_name: str | None = Field(default=None, max_length=255)
     primary_email: str | None = None
     organization: str | None = Field(default=None, max_length=255)
     metadata: SyncMetadata
@@ -71,6 +79,7 @@ class SiteContract(ContractModel):
 class EventContract(ContractModel):
     event_id: EventId
     name: NonEmptyText
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
     owning_site_id: SiteId | None = None
     starts_at: datetime | None = None
     ends_at: datetime | None = None
@@ -82,6 +91,8 @@ class EventParticipationContract(ContractModel):
     event_id: EventId
     person_id: PersonId
     role: str | None = Field(default=None, max_length=100)
+    participant_status: ParticipantStatus = ParticipantStatus.ACTIVE
+    is_presenter: bool = False
     metadata: SyncMetadata
 
 
@@ -89,8 +100,10 @@ class SessionContract(ContractModel):
     session_id: SessionId
     event_id: EventId
     title: NonEmptyText
+    session_code: str | None = Field(default=None, max_length=255)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    status: SessionStatus = SessionStatus.DRAFT
     metadata: SyncMetadata
 
 
@@ -107,6 +120,29 @@ class PresentationContract(ContractModel):
     event_id: EventId
     session_id: SessionId | None = None
     title: NonEmptyText
+    presentation_code: str | None = Field(default=None, max_length=255)
+    workflow_status: PresentationWorkflowStatus = PresentationWorkflowStatus.EXPECTED
+    processing_status: PresentationProcessingStatus = PresentationProcessingStatus.NOT_STARTED
+    metadata: SyncMetadata
+
+
+class PresentationSessionContract(ContractModel):
+    presentation_session_id: PresentationSessionId
+    presentation_id: PresentationId
+    session_id: SessionId
+    association_type: str = Field(default="scheduled", min_length=1, max_length=64)
+    sort_order: int = 0
+    primary_session: bool = False
+    metadata: SyncMetadata
+
+
+class PresentationPresenterContract(ContractModel):
+    presentation_presenter_id: PresentationPresenterId
+    presentation_id: PresentationId
+    event_participation_id: EventParticipationId
+    role: AssignmentRole = AssignmentRole.PRESENTER
+    presenter_order: int = 0
+    primary_presenter: bool = False
     metadata: SyncMetadata
 
 
