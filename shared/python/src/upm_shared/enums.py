@@ -20,12 +20,21 @@ class SyncState(StrEnum):
 
 
 class JobStatus(StrEnum):
-    QUEUED = "queued"
+    PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    RETRYING = "retrying"
+    RETRY_WAIT = "retry_wait"
     CANCELLED = "cancelled"
+    EXHAUSTED = "exhausted"
+
+
+class JobPriority(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    NORMAL = "normal"
+    LOW = "low"
+    OPTIONAL = "optional"
 
 
 class StorageHealth(StrEnum):

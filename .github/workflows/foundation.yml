@@ -41,6 +41,11 @@ jobs:
       - name: Build Site API image
         run: docker compose --env-file .env.example -f docker-compose.site.yml build site-api
 
+      - name: Build worker and sync images
+        run: |
+          docker compose --env-file .env.example -f docker-compose.central.yml build central-worker central-sync
+          docker compose --env-file .env.example -f docker-compose.site.yml build site-worker site-sync
+
       - name: Check whitespace errors
         shell: bash
         run: |
@@ -103,3 +108,10 @@ jobs:
 
       - name: Test domain foundation
         run: uv run pytest
+
+      - name: Smoke test runnable worker processes
+        run: |
+          uv run python -m upm_central.worker --once
+          uv run python -m upm_central.worker --sync --once
+          uv run python -m upm_site.worker --once
+          uv run python -m upm_site.worker --sync --once

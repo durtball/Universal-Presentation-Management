@@ -27,6 +27,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from upm_shared.enums import (
     AssetKind,
     DeviceRole,
+    JobPriority,
     JobStatus,
     MediaCategory,
     SourceSystem,
@@ -35,6 +36,7 @@ from upm_shared.enums import (
     SyncState,
 )
 from upm_shared.identifiers import new_uuid7
+from upm_shared.jobs import PRIORITY_VALUES
 from upm_site.persistence.base import SiteBase
 
 
@@ -444,8 +446,10 @@ class TransferJob(SiteRecordMixin, SiteBase):
     __tablename__ = "transfer_jobs"
     __table_args__ = (
         CheckConstraint("progress >= 0 AND progress <= 100", name="progress_range"),
-        CheckConstraint("retry_count >= 0", name="retry_count_nonnegative"),
-        CheckConstraint("max_retries >= 0", name="max_retries_nonnegative"),
+        UniqueConstraint("transfer_type", "idempotency_key"),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+        CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
+        Index("ix_site_transfer_claim", "status", "next_attempt_at", "priority"),
     )
 
     transfer_job_id: Mapped[UUID] = mapped_column(
@@ -457,14 +461,29 @@ class TransferJob(SiteRecordMixin, SiteBase):
     media_object_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
     )
+    transfer_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    payload_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[JobStatus] = mapped_column(
-        upm_enum(JobStatus, length=16), default=JobStatus.QUEUED, nullable=False
+        upm_enum(JobStatus, length=16), default=JobStatus.PENDING, nullable=False
     )
+    priority: Mapped[int] = mapped_column(
+        Integer, default=PRIORITY_VALUES[JobPriority.NORMAL], nullable=False
+    )
+    required_capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"), nullable=False)
-    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
-    worker_id: Mapped[str | None] = mapped_column(String(255))
-    error_detail: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    error_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -473,8 +492,10 @@ class ProcessingJob(SiteRecordMixin, SiteBase):
     __tablename__ = "processing_jobs"
     __table_args__ = (
         CheckConstraint("progress >= 0 AND progress <= 100", name="progress_range"),
-        CheckConstraint("retry_count >= 0", name="retry_count_nonnegative"),
-        CheckConstraint("max_retries >= 0", name="max_retries_nonnegative"),
+        UniqueConstraint("job_type", "idempotency_key"),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+        CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
+        Index("ix_site_processing_claim", "status", "next_attempt_at", "priority"),
     )
 
     processing_job_id: Mapped[UUID] = mapped_column(
@@ -487,15 +508,28 @@ class ProcessingJob(SiteRecordMixin, SiteBase):
         ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
     )
     job_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    payload_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[JobStatus] = mapped_column(
-        upm_enum(JobStatus, length=16), default=JobStatus.QUEUED, nullable=False
+        upm_enum(JobStatus, length=16), default=JobStatus.PENDING, nullable=False
     )
+    priority: Mapped[int] = mapped_column(
+        Integer, default=PRIORITY_VALUES[JobPriority.NORMAL], nullable=False
+    )
+    required_capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"), nullable=False)
-    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
-    worker_id: Mapped[str | None] = mapped_column(String(255))
-    required_capability: Mapped[str | None] = mapped_column(String(100))
-    error_detail: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    error_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -532,6 +566,68 @@ class SyncEvent(SiteRecordMixin, SiteBase):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class OutboxEvent(SiteBase):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint("source_system", "idempotency_key"),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+        CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
+        Index("ix_site_outbox_claim", "status", "available_at", "priority"),
+    )
+
+    outbox_event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    aggregate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    source_system: Mapped[SourceSystem] = mapped_column(
+        upm_enum(SourceSystem, length=16), nullable=False
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    payload_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        upm_enum(JobStatus, length=16), default=JobStatus.PENDING, nullable=False
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, default=PRIORITY_VALUES[JobPriority.NORMAL], nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    error_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class WorkerIdentity(SiteBase):
+    __tablename__ = "worker_identities"
+
+    worker_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    worker_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    service_role: Mapped[str] = mapped_column(String(100), nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AuditRecord(SiteBase):

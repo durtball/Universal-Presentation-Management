@@ -618,6 +618,8 @@ Jobs must have:
 - Worker identity
 - Operator-visible status
 
+Central and Site use their own PostgreSQL-backed durable job tables and transactional outboxes. Workers claim eligible work transactionally with non-blocking row locks, leases, heartbeats, retry scheduling, idempotency metadata, priority, and capability matching. Central and Site queues remain isolated with their respective databases. Detailed decisions are recorded in [ADR-0003](decisions/ADR-0003-postgresql-durable-jobs-and-outbox.md).
+
 ---
 
 ## 20. Transfer Architecture
