@@ -136,13 +136,13 @@ def upgrade() -> None:
         ),
     )
     op.create_check_constraint(
-        "ck_central_sessions_schedule_order",
+        "schedule_order",
         "sessions",
         "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at",
     )
     op.create_index("ix_central_sessions_event_schedule", "sessions", ["event_id", "starts_at"])
     op.create_unique_constraint(
-        "uq_central_sessions_event_code", "sessions", ["event_id", "session_code"]
+        "uq_central_sessions_event_id", "sessions", ["event_id", "session_code"]
     )
 
     op.add_column(
@@ -187,7 +187,7 @@ def upgrade() -> None:
         ),
     )
     op.create_unique_constraint(
-        "uq_central_presentations_event_code",
+        "uq_central_presentations_event_id",
         "presentations",
         ["event_id", "presentation_code"],
     )
@@ -327,7 +327,7 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
     op.create_unique_constraint(
-        "uq_central_presentation_presenters_assignment",
+        "uq_central_presentation_presenters_presentation_id",
         "presentation_presenters",
         ["presentation_id", "event_participation_id", "role"],
     )
@@ -580,7 +580,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_central_sessions_schedule_order", "sessions", type_="check")
+    op.drop_constraint("schedule_order", "sessions", type_="check")
     op.drop_index("ix_central_persons_normalized_email", table_name="persons")
     op.drop_table("reconciliation_decisions")
     op.drop_index("ix_central_import_issues_row_severity", table_name="import_validation_issues")

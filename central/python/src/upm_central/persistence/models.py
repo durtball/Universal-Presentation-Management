@@ -62,6 +62,26 @@ def enum_values(enum_class: type[PythonEnum]) -> list[str]:
     return [str(member.value) for member in enum_class]
 
 
+def domain_enum(enum_class: type[PythonEnum], *, length: int) -> Enum:
+    """Use VARCHAR storage while declaring the domain check explicitly on the table."""
+    return Enum(
+        enum_class,
+        native_enum=False,
+        create_constraint=False,
+        values_callable=enum_values,
+        length=length,
+    )
+
+
+def enum_check(column_name: str, enum_class: type[PythonEnum]) -> CheckConstraint:
+    """Build an Alembic-visible CHECK with the same name as the stored enum domain."""
+    values = ", ".join("'" + value.replace("'", "''") + "'" for value in enum_values(enum_class))
+    return CheckConstraint(
+        f"{column_name} IN ({values})",
+        name=enum_class.__name__.lower(),
+    )
+
+
 class CentralRecordMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -160,6 +180,8 @@ class PersonIdentityLink(CentralBase):
 class ExternalIdentifier(CentralRecordMixin, CentralBase):
     __tablename__ = "external_identifiers"
     __table_args__ = (
+        enum_check("entity_type", ExternalEntityType),
+        enum_check("scope", ExternalIdentifierScope),
         UniqueConstraint("namespace", "normalized_external_id", "scope_key"),
         UniqueConstraint("entity_type", "entity_id", "namespace", "scope_key"),
         Index("ix_central_external_identifier_entity", "entity_type", "entity_id"),
@@ -169,13 +191,7 @@ class ExternalIdentifier(CentralRecordMixin, CentralBase):
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
     )
     entity_type: Mapped[ExternalEntityType] = mapped_column(
-        Enum(
-            ExternalEntityType,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=32,
-        ),
+        domain_enum(ExternalEntityType, length=32),
         nullable=False,
     )
     entity_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
@@ -183,13 +199,7 @@ class ExternalIdentifier(CentralRecordMixin, CentralBase):
     external_id: Mapped[str] = mapped_column(String(512), nullable=False)
     normalized_external_id: Mapped[str] = mapped_column(String(512), nullable=False)
     scope: Mapped[ExternalIdentifierScope] = mapped_column(
-        Enum(
-            ExternalIdentifierScope,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(ExternalIdentifierScope, length=16),
         nullable=False,
     )
     scope_key: Mapped[str] = mapped_column(String(64), nullable=False, default="global")
@@ -405,7 +415,10 @@ class EventDeploymentRevision(CentralBase):
 
 class EventParticipation(CentralRecordMixin, CentralBase):
     __tablename__ = "event_participations"
-    __table_args__ = (UniqueConstraint("event_id", "person_id"),)
+    __table_args__ = (
+        enum_check("participant_status", ParticipantStatus),
+        UniqueConstraint("event_id", "person_id"),
+    )
 
     event_participation_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -422,13 +435,7 @@ class EventParticipation(CentralRecordMixin, CentralBase):
     organization: Mapped[str | None] = mapped_column(String(255))
     registration_status: Mapped[str | None] = mapped_column(String(100))
     participant_status: Mapped[ParticipantStatus] = mapped_column(
-        Enum(
-            ParticipantStatus,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(ParticipantStatus, length=16),
         default=ParticipantStatus.ACTIVE,
         nullable=False,
     )
@@ -447,6 +454,7 @@ class EventParticipation(CentralRecordMixin, CentralBase):
 class Session(CentralRecordMixin, CentralBase):
     __tablename__ = "sessions"
     __table_args__ = (
+        enum_check("status", SessionStatus),
         CheckConstraint(
             "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at", name="schedule_order"
         ),
@@ -472,13 +480,7 @@ class Session(CentralRecordMixin, CentralBase):
         JSONB, default=dict, nullable=False
     )
     status: Mapped[SessionStatus] = mapped_column(
-        Enum(
-            SessionStatus,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(SessionStatus, length=16),
         default=SessionStatus.DRAFT,
         nullable=False,
     )
@@ -520,7 +522,11 @@ class SessionParticipant(CentralRecordMixin, CentralBase):
 
 class Presentation(CentralRecordMixin, CentralBase):
     __tablename__ = "presentations"
-    __table_args__ = (UniqueConstraint("event_id", "presentation_code"),)
+    __table_args__ = (
+        enum_check("workflow_status", PresentationWorkflowStatus),
+        enum_check("processing_status", PresentationProcessingStatus),
+        UniqueConstraint("event_id", "presentation_code"),
+    )
 
     presentation_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -535,24 +541,12 @@ class Presentation(CentralRecordMixin, CentralBase):
     description: Mapped[str | None] = mapped_column(Text)
     presentation_code: Mapped[str | None] = mapped_column(String(255))
     workflow_status: Mapped[PresentationWorkflowStatus] = mapped_column(
-        Enum(
-            PresentationWorkflowStatus,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=24,
-        ),
+        domain_enum(PresentationWorkflowStatus, length=24),
         default=PresentationWorkflowStatus.EXPECTED,
         nullable=False,
     )
     processing_status: Mapped[PresentationProcessingStatus] = mapped_column(
-        Enum(
-            PresentationProcessingStatus,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(PresentationProcessingStatus, length=16),
         default=PresentationProcessingStatus.NOT_STARTED,
         nullable=False,
     )
@@ -633,6 +627,7 @@ class PresentationVersion(CentralRecordMixin, CentralBase):
 
 class ImportSource(CentralBase):
     __tablename__ = "import_sources"
+    __table_args__ = (enum_check("source_type", ImportSourceType),)
 
     import_source_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -640,13 +635,7 @@ class ImportSource(CentralBase):
     filename: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     source_type: Mapped[ImportSourceType] = mapped_column(
-        Enum(
-            ImportSourceType,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=8,
-        ),
+        domain_enum(ImportSourceType, length=8),
         nullable=False,
     )
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -661,6 +650,7 @@ class ImportSource(CentralBase):
 class ImportBatch(CentralRecordMixin, CentralBase):
     __tablename__ = "import_batches"
     __table_args__ = (
+        enum_check("status", ImportStatus),
         UniqueConstraint("event_id", "source_sha256", "importer_type"),
         Index("ix_central_import_batches_event_status", "event_id", "status"),
     )
@@ -678,13 +668,7 @@ class ImportBatch(CentralRecordMixin, CentralBase):
     source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     importer_type: Mapped[str] = mapped_column(String(100), default="program", nullable=False)
     status: Mapped[ImportStatus] = mapped_column(
-        Enum(
-            ImportStatus,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(ImportStatus, length=16),
         default=ImportStatus.UPLOADED,
         nullable=False,
     )
@@ -705,6 +689,11 @@ class ImportBatch(CentralRecordMixin, CentralBase):
 class ImportRow(CentralRecordMixin, CentralBase):
     __tablename__ = "import_rows"
     __table_args__ = (
+        enum_check("entity_type", ImportEntityType),
+        enum_check("validation_state", ImportValidationState),
+        enum_check("match_outcome", IdentityMatchOutcome),
+        enum_check("proposed_action", ImportProposedAction),
+        enum_check("resolution_action", ReconciliationAction),
         UniqueConstraint("import_batch_id", "source_row_number"),
         Index("ix_central_import_rows_batch_state", "import_batch_id", "validation_state"),
     )
@@ -720,33 +709,15 @@ class ImportRow(CentralRecordMixin, CentralBase):
     normalized_values: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     corrected_values: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     entity_type: Mapped[ImportEntityType] = mapped_column(
-        Enum(
-            ImportEntityType,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(ImportEntityType, length=16),
         nullable=False,
     )
     validation_state: Mapped[ImportValidationState] = mapped_column(
-        Enum(
-            ImportValidationState,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=16,
-        ),
+        domain_enum(ImportValidationState, length=16),
         nullable=False,
     )
     match_outcome: Mapped[IdentityMatchOutcome | None] = mapped_column(
-        Enum(
-            IdentityMatchOutcome,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=24,
-        )
+        domain_enum(IdentityMatchOutcome, length=24)
     )
     proposed_person_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("persons.person_id", ondelete="RESTRICT")
@@ -755,23 +726,11 @@ class ImportRow(CentralRecordMixin, CentralBase):
     match_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     match_reason: Mapped[str | None] = mapped_column(Text)
     proposed_action: Mapped[ImportProposedAction | None] = mapped_column(
-        Enum(
-            ImportProposedAction,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=24,
-        )
+        domain_enum(ImportProposedAction, length=24)
     )
     conflict_state: Mapped[str | None] = mapped_column(String(64))
     resolution_action: Mapped[ReconciliationAction | None] = mapped_column(
-        Enum(
-            ReconciliationAction,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=24,
-        )
+        domain_enum(ReconciliationAction, length=24)
     )
     resolved_person_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("persons.person_id", ondelete="RESTRICT")
@@ -789,7 +748,10 @@ class ImportRow(CentralRecordMixin, CentralBase):
 
 class ImportValidationIssue(CentralBase):
     __tablename__ = "import_validation_issues"
-    __table_args__ = (Index("ix_central_import_issues_row_severity", "import_row_id", "severity"),)
+    __table_args__ = (
+        enum_check("severity", ValidationSeverity),
+        Index("ix_central_import_issues_row_severity", "import_row_id", "severity"),
+    )
 
     import_validation_issue_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -798,13 +760,7 @@ class ImportValidationIssue(CentralBase):
         ForeignKey("import_rows.import_row_id", ondelete="CASCADE"), nullable=False
     )
     severity: Mapped[ValidationSeverity] = mapped_column(
-        Enum(
-            ValidationSeverity,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=8,
-        ),
+        domain_enum(ValidationSeverity, length=8),
         nullable=False,
     )
     code: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -820,6 +776,7 @@ class ImportValidationIssue(CentralBase):
 
 class ReconciliationDecision(CentralBase):
     __tablename__ = "reconciliation_decisions"
+    __table_args__ = (enum_check("action", ReconciliationAction),)
 
     reconciliation_decision_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -828,13 +785,7 @@ class ReconciliationDecision(CentralBase):
         ForeignKey("import_rows.import_row_id", ondelete="RESTRICT"), nullable=False
     )
     action: Mapped[ReconciliationAction] = mapped_column(
-        Enum(
-            ReconciliationAction,
-            native_enum=False,
-            create_constraint=True,
-            values_callable=enum_values,
-            length=24,
-        ),
+        domain_enum(ReconciliationAction, length=24),
         nullable=False,
     )
     selected_person_id: Mapped[UUID | None] = mapped_column(

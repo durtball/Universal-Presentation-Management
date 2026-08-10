@@ -67,6 +67,26 @@ def upm_enum(enum_class: type[PythonEnum], *, length: int) -> Enum:
     )
 
 
+def domain_enum(enum_class: type[PythonEnum], *, length: int) -> Enum:
+    """Use VARCHAR storage while declaring the projection check explicitly."""
+    return Enum(
+        enum_class,
+        native_enum=False,
+        create_constraint=False,
+        values_callable=enum_values,
+        length=length,
+    )
+
+
+def enum_check(column_name: str, enum_class: type[PythonEnum]) -> CheckConstraint:
+    """Build an Alembic-visible CHECK with the same name as the stored enum domain."""
+    values = ", ".join("'" + value.replace("'", "''") + "'" for value in enum_values(enum_class))
+    return CheckConstraint(
+        f"{column_name} IN ({values})",
+        name=enum_class.__name__.lower(),
+    )
+
+
 class SiteRecordMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -257,7 +277,10 @@ class EventDeploymentRevisionProjection(SiteBase):
 
 class EventParticipation(SiteRecordMixin, SiteBase):
     __tablename__ = "event_participations"
-    __table_args__ = (UniqueConstraint("event_id", "person_id"),)
+    __table_args__ = (
+        enum_check("participant_status", ParticipantStatus),
+        UniqueConstraint("event_id", "person_id"),
+    )
 
     event_participation_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -273,7 +296,9 @@ class EventParticipation(SiteRecordMixin, SiteBase):
     professional_title: Mapped[str | None] = mapped_column(String(255))
     organization: Mapped[str | None] = mapped_column(String(255))
     participant_status: Mapped[ParticipantStatus] = mapped_column(
-        upm_enum(ParticipantStatus, length=16), default=ParticipantStatus.ACTIVE, nullable=False
+        domain_enum(ParticipantStatus, length=16),
+        default=ParticipantStatus.ACTIVE,
+        nullable=False,
     )
     is_presenter: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -289,7 +314,10 @@ class EventParticipation(SiteRecordMixin, SiteBase):
 
 class Session(SiteRecordMixin, SiteBase):
     __tablename__ = "sessions"
-    __table_args__ = (UniqueConstraint("event_id", "session_code"),)
+    __table_args__ = (
+        enum_check("status", SessionStatus),
+        UniqueConstraint("event_id", "session_code"),
+    )
 
     session_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -306,7 +334,7 @@ class Session(SiteRecordMixin, SiteBase):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     location_name: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[SessionStatus] = mapped_column(
-        upm_enum(SessionStatus, length=16), default=SessionStatus.DRAFT, nullable=False
+        domain_enum(SessionStatus, length=16), default=SessionStatus.DRAFT, nullable=False
     )
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -350,7 +378,11 @@ class SessionParticipant(SiteRecordMixin, SiteBase):
 
 class Presentation(SiteRecordMixin, SiteBase):
     __tablename__ = "presentations"
-    __table_args__ = (UniqueConstraint("event_id", "presentation_code"),)
+    __table_args__ = (
+        enum_check("workflow_status", PresentationWorkflowStatus),
+        enum_check("processing_status", PresentationProcessingStatus),
+        UniqueConstraint("event_id", "presentation_code"),
+    )
 
     presentation_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
@@ -365,12 +397,12 @@ class Presentation(SiteRecordMixin, SiteBase):
     description: Mapped[str | None] = mapped_column(Text)
     presentation_code: Mapped[str | None] = mapped_column(String(255))
     workflow_status: Mapped[PresentationWorkflowStatus] = mapped_column(
-        upm_enum(PresentationWorkflowStatus, length=24),
+        domain_enum(PresentationWorkflowStatus, length=24),
         default=PresentationWorkflowStatus.EXPECTED,
         nullable=False,
     )
     processing_status: Mapped[PresentationProcessingStatus] = mapped_column(
-        upm_enum(PresentationProcessingStatus, length=16),
+        domain_enum(PresentationProcessingStatus, length=16),
         default=PresentationProcessingStatus.NOT_STARTED,
         nullable=False,
     )
@@ -422,6 +454,7 @@ class PresentationPresenter(SiteRecordMixin, SiteBase):
 class ExternalIdentifierProjection(SiteRecordMixin, SiteBase):
     __tablename__ = "external_identifier_projections"
     __table_args__ = (
+        enum_check("entity_type", ExternalEntityType),
         UniqueConstraint("namespace", "external_id", "event_id"),
         Index("ix_site_external_identifier_entity", "entity_type", "entity_id"),
     )
@@ -431,7 +464,7 @@ class ExternalIdentifierProjection(SiteRecordMixin, SiteBase):
         ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
     )
     entity_type: Mapped[ExternalEntityType] = mapped_column(
-        upm_enum(ExternalEntityType, length=32), nullable=False
+        domain_enum(ExternalEntityType, length=32), nullable=False
     )
     entity_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     namespace: Mapped[str] = mapped_column(String(255), nullable=False)

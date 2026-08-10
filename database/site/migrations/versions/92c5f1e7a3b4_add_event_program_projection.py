@@ -94,7 +94,7 @@ def upgrade() -> None:
         ),
     )
     op.create_unique_constraint(
-        "uq_site_sessions_event_code", "sessions", ["event_id", "session_code"]
+        "uq_site_sessions_event_id", "sessions", ["event_id", "session_code"]
     )
     op.add_column(
         "sessions", sa.Column("sort_order", sa.Integer(), server_default="0", nullable=False)
@@ -145,7 +145,7 @@ def upgrade() -> None:
         ),
     )
     op.create_unique_constraint(
-        "uq_site_presentations_event_code",
+        "uq_site_presentations_event_id",
         "presentations",
         ["event_id", "presentation_code"],
     )
@@ -269,7 +269,7 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
     op.create_unique_constraint(
-        "uq_site_presentation_presenters_assignment",
+        "uq_site_presentation_presenters_presentation_id",
         "presentation_presenters",
         ["presentation_id", "event_participation_id", "role"],
     )
