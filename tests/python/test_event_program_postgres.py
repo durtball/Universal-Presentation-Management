@@ -21,8 +21,12 @@ from upm_central.persistence.models import (
     EventDeployment,
     EventParticipation,
     Person,
+    Presentation,
+    PresentationPresenter,
+    PresentationSession,
     Site,
 )
+from upm_central.persistence.models import Session as ProgramSession
 from upm_shared.enums import EnrollmentState
 
 CENTRAL_URL = os.getenv("UPM_CENTRAL_DATABASE_URL")
@@ -372,4 +376,137 @@ def test_people_program_import_and_revision_workflow(program_database: str) -> N
             )
             is not None
         )
+    engine.dispose()
+
+
+def test_wide_program_rows_create_deterministic_grouped_sessions(program_database: str) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    engine = create_engine(program_database)
+    site_id = uuid4()
+    with Session(engine) as session, session.begin():
+        session.add(
+            Site(
+                site_id=site_id,
+                display_name="Import Site",
+                enabled=True,
+                enrollment_state=EnrollmentState.ACTIVE,
+            )
+        )
+
+    columns = (
+        "Presenter Name,Presenter Email,Date,Room,Start Time,End Time,Track,"
+        "Session Format,Presentation ID,Presentation Title\n"
+    )
+    rows = (
+        "\n".join(
+            [
+                "Ada One,ada@example.com,2027-06-01,Venetian Ballroom F,09:00,10:00,Cloud,Panel,P-101,Cloud One",  # noqa: E501
+                "Ben Two,ben@example.com,2027-06-01,Venetian Ballroom F,09:00,10:00,Cloud,Panel,P-102,Cloud Two",  # noqa: E501
+                "Cara Three,cara@example.com,2027-06-01,Venetian Ballroom F,11:00,12:00,Cloud,Panel,P-201,Later Cloud",  # noqa: E501
+                "Dev Four,dev@example.com,2027-06-01,Venetian Ballroom G,09:00,10:00,Cloud,Panel,P-301,Next Door",  # noqa: E501
+                "Eve Five,eve@example.com,2027-06-02,Venetian Ballroom F,09:00,10:00,Cloud,Panel,P-401,Tomorrow",  # noqa: E501
+            ]
+        )
+        + "\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        event_id = client.post(
+            "/api/v1/admin/events",
+            headers=headers,
+            json={"name": "Wide Program", "timezone": "UTC"},
+        ).json()["event_id"]
+        upload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={"file": ("program.csv", (columns + rows).encode(), "text/csv")},
+            data={"importer_type": "program"},
+        )
+        assert upload.status_code == 201
+        review = upload.json()
+        assert review["preview_counts"]["people_or_presenters"] == 5
+        assert review["preview_counts"]["sessions"] == 4
+        assert review["preview_counts"]["presentations"] == 5
+        assert review["preview_counts"]["unresolved_room_mappings"] == 4
+        committed = client.post(
+            f"/api/v1/admin/imports/{review['import_batch_id']}/commit", headers=headers
+        )
+        assert committed.status_code == 200
+
+        sessions = client.get(f"/api/v1/admin/events/{event_id}/sessions", headers=headers).json()
+        presentations = client.get(
+            f"/api/v1/admin/events/{event_id}/presentations", headers=headers
+        ).json()
+        assert len(sessions) == 4
+        assert len(presentations) == 5
+        first = next(
+            item
+            for item in sessions
+            if item["starts_at"] == "2027-06-01T09:00:00Z"
+            and item["location_name"] == "Venetian Ballroom F"
+        )
+        assert {item["display_name"] for item in first["presenters"]} == {"Ada One", "Ben Two"}
+        assert {
+            item["presentation_code"]
+            for item in presentations
+            if item["preferred_session_id"] == first["session_id"]
+        } == {"P-101", "P-102"}
+        original_session_ids = {item["session_code"]: item["session_id"] for item in sessions}
+
+        reupload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={
+                "file": (
+                    "program-revised.csv",
+                    (
+                        columns + rows + "Finn Six,finn@example.com,2027-06-01,Venetian Ballroom F,"
+                        "09:00,10:00,Cloud,Panel,P-103,Cloud Three\n"
+                    ).encode(),
+                    "text/csv",
+                )
+            },
+            data={"importer_type": "program"},
+        )
+        assert (
+            client.post(
+                f"/api/v1/admin/imports/{reupload.json()['import_batch_id']}/commit",
+                headers=headers,
+            ).status_code
+            == 200
+        )
+        stable_sessions = client.get(
+            f"/api/v1/admin/events/{event_id}/sessions", headers=headers
+        ).json()
+        assert {
+            item["session_code"]: item["session_id"] for item in stable_sessions
+        } == original_session_ids
+
+        deployment = client.post(
+            f"/api/v1/admin/events/{event_id}/deployments",
+            headers=headers,
+            json={"site_id": str(site_id)},
+        )
+        assert deployment.status_code == 201
+
+    with Session(engine) as session:
+        assert session.query(ProgramSession).filter_by(event_id=UUID(event_id)).count() == 4
+        assert session.query(Presentation).filter_by(event_id=UUID(event_id)).count() == 6
+        assert session.query(PresentationSession).count() == 6
+        assert session.query(PresentationPresenter).count() == 6
+        snapshot = (
+            session.get(EventDeployment, UUID(deployment.json()["deployment_id"]))
+            .snapshots[-1]
+            .snapshot
+        )
+        assert len(snapshot["sessions"]) == 4
+        assert {item["location_name"] for item in snapshot["sessions"]} == {
+            "Venetian Ballroom F",
+            "Venetian Ballroom G",
+        }
     engine.dispose()

@@ -3,7 +3,7 @@
 import pytest
 from fastapi import HTTPException
 
-from upm_central.imports import _normalized, _parse_xlsx, detect_columns
+from upm_central.imports import _normalized, _parse_xlsx, _wide_row_session, detect_columns
 
 
 def test_invalid_xlsx_is_an_operator_visible_validation_error() -> None:
@@ -32,3 +32,50 @@ def test_wide_program_headers_map_to_existing_domain_fields() -> None:
         "Speaker Name": "display_name",
         "Room": "location_name",
     }
+
+
+def test_wide_program_session_composite_is_stable_and_discriminating() -> None:
+    shared = {
+        "Date": "2027-06-01",
+        "Start Time": "09:00",
+        "End Time": "10:00",
+        "Room": "Venetian Ballroom F",
+        "Track": "Cloud",
+        "Session Format": "Panel",
+        "Presentation Title": "First talk",
+    }
+    first = _wide_row_session(_normalized(shared))
+    another_presentation = _wide_row_session(
+        _normalized({**shared, "Presentation Title": "Second talk"})
+    )
+    later = _wide_row_session(_normalized({**shared, "Start Time": "11:00"}))
+    next_room = _wide_row_session(_normalized({**shared, "Room": "Venetian Ballroom G"}))
+    next_day = _wide_row_session(_normalized({**shared, "Date": "2027-06-02"}))
+
+    assert first["session_code"] == another_presentation["session_code"]
+    assert (
+        len(
+            {
+                first["session_code"],
+                later["session_code"],
+                next_room["session_code"],
+                next_day["session_code"],
+            }
+        )
+        == 4
+    )
+    assert first["session_title"] == "Cloud — 09:00 — Venetian Ballroom F"
+
+
+def test_explicit_source_session_identifier_takes_precedence() -> None:
+    values = _wide_row_session(
+        _normalized(
+            {
+                "Session ID": "SESSION-42",
+                "Presentation ID": "P-42",
+                "Presentation Title": "Explicit identity",
+            }
+        )
+    )
+    assert values["session_code"] == "SESSION-42"
+    assert values["presentation_code"] == "P-42"

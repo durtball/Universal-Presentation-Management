@@ -1060,6 +1060,21 @@ def register_program_routes(
         result["source_headers"] = headers
         result["detected_mapping"] = detect_columns(headers)
         result["sample_rows"] = [row.raw_values for row in rows[:5]]
+        session_keys = {
+            str(row.normalized_values.get("session_code") or row.import_row_id)
+            for row in rows
+            if row.entity_type == ImportEntityType.SESSION
+            or bool(row.normalized_values.get("session_title"))
+        }
+        located_session_keys = {
+            str(row.normalized_values.get("session_code") or row.import_row_id)
+            for row in rows
+            if (row.normalized_values.get("location_name") or row.normalized_values.get("room"))
+            and (
+                row.entity_type == ImportEntityType.SESSION
+                or bool(row.normalized_values.get("session_title"))
+            )
+        }
         result["preview_counts"] = {
             "source_rows": len(rows),
             "people_or_presenters": sum(
@@ -1069,11 +1084,7 @@ def register_program_routes(
                 or bool(row.normalized_values.get("email"))
                 for row in rows
             ),
-            "sessions": sum(
-                row.entity_type == ImportEntityType.SESSION
-                or bool(row.normalized_values.get("session_title"))
-                for row in rows
-            ),
+            "sessions": len(session_keys),
             "presentations": sum(row.entity_type == ImportEntityType.PRESENTATION for row in rows),
             "warnings": sum(
                 issue.severity == ValidationSeverity.WARNING for row in rows for issue in row.issues
@@ -1082,16 +1093,7 @@ def register_program_routes(
                 issue.severity == ValidationSeverity.ERROR for row in rows for issue in row.issues
             ),
             "identity_conflicts": sum(bool(row.conflict_state) for row in rows),
-            "unresolved_room_mappings": sum(
-                bool(
-                    row.normalized_values.get("location_name") or row.normalized_values.get("room")
-                )
-                and (
-                    row.entity_type == ImportEntityType.SESSION
-                    or bool(row.normalized_values.get("session_title"))
-                )
-                for row in rows
-            ),
+            "unresolved_room_mappings": len(located_session_keys),
         }
         return result
 

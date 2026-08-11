@@ -3,7 +3,7 @@
 import csv
 import hashlib
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 from zipfile import BadZipFile
@@ -67,7 +67,11 @@ COLUMN_ALIASES = {
     "company": "organization",
     "type": "entity_type",
     "session": "session_code",
+    "session_id": "session_code",
+    "session_identifier": "session_code",
     "presentation": "presentation_code",
+    "presentation_id": "presentation_code",
+    "presentation_identifier": "presentation_code",
     "start": "starts_at",
     "session_start": "starts_at",
     "end": "ends_at",
@@ -82,9 +86,20 @@ COLUMN_ALIASES = {
     "speaker_email": "presenter_email",
 }
 
+SESSION_COMPOSITE_FIELDS = (
+    "date",
+    "start_time",
+    "end_time",
+    "location_name",
+    "track",
+    "session_format",
+)
+
 
 def _cell(value: object) -> object:
     if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (date, time)):
         return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -185,8 +200,54 @@ def _entity(values: dict[str, object]) -> ImportEntityType:
     return ImportEntityType.UNKNOWN
 
 
+def _wide_row_session(values: dict[str, object]) -> dict[str, object]:
+    """Add a stable session reference to presentation-oriented program rows.
+
+    Source session identifiers are authoritative when supplied. A session title is useful
+    grouping evidence, but is qualified by available schedule/location/track/format values so
+    repeated titles at a conference do not collapse. Without either, the complete composite is
+    required; deliberately incomplete rows remain unassociated instead of being guessed together.
+    """
+    result = dict(values)
+    if result.get("session_code"):
+        return result
+    title = str(result.get("session_title") or "").strip()
+    evidence = [
+        normalize_text(str(result.get(field) or "")) or "" for field in SESSION_COMPOSITE_FIELDS
+    ]
+    if not title and not all(evidence[:4]):
+        return result
+    identity = [normalize_text(title) or "", *evidence]
+    digest = hashlib.sha256("\x1f".join(identity).encode()).hexdigest()[:24]
+    result["session_code"] = f"import-composite:{digest}"
+    if not title:
+        start = str(result.get("start_time") or "").strip()
+        track = str(result.get("track") or "").strip()
+        room = str(result.get("location_name") or "").strip()
+        result["session_title"] = " — ".join(part for part in (track, start, room) if part)
+    result["_session_identity_strategy"] = (
+        "title-qualified-composite" if title else "schedule-room-composite"
+    )
+    return result
+
+
+def _combine_date_and_time(
+    values: dict[str, object], date_field: str, time_field: str
+) -> str | None:
+    raw_date, raw_time = values.get(date_field), values.get(time_field)
+    if not raw_date or not raw_time:
+        return None
+    date_text = str(raw_date).split("T", 1)[0].strip()
+    time_text = str(raw_time).strip()
+    if "T" in time_text:
+        time_text = time_text.split("T", 1)[1]
+    return f"{date_text}T{time_text}"
+
+
 def _schedule(values: dict[str, object], event: Event) -> tuple[dict[str, object], list[str]]:
     result = dict(values)
+    result.setdefault("starts_at", _combine_date_and_time(values, "date", "start_time"))
+    result.setdefault("ends_at", _combine_date_and_time(values, "date", "end_time"))
     errors: list[str] = []
     parsed: dict[str, datetime] = {}
     for field in ("starts_at", "ends_at", "scheduled_at"):
@@ -375,7 +436,7 @@ def create_batch(
     seen_session_codes: set[str] = set()
     seen_presentation_codes: set[str] = set()
     seen_external_ids: set[tuple[str, str]] = set()
-    normalized_rows = [_normalized(raw) for raw in parsed]
+    normalized_rows = [_wide_row_session(_normalized(raw)) for raw in parsed]
     imported_emails = {
         email
         for values in normalized_rows
