@@ -64,8 +64,10 @@ where tombstones may be needed; these fields are not indiscriminately applied.
 | Sync coordination and audit context | Local database for its responsibility | Explicit events/contracts, never shared ORM/database |
 
 `SyncEvent` provides durable identifiers, source, aggregate, idempotency key,
-sequence, retry metadata, and payload. It is a persistence foundation, not a
-completed synchronization engine.
+sequence, retry metadata, and payload. The record remains persistence/domain
+history rather than a wire protocol; the implemented synchronization engine is
+documented separately in
+[central-site-synchronization.md](../development/central-site-synchronization.md).
 
 ## Migrations
 

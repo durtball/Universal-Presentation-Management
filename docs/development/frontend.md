@@ -4,7 +4,7 @@
 
 `web/` is the shared React/TypeScript application source. A compile-time deployment discriminator selects Central or Site routes, while both builds use the same shell, design tokens, feedback surfaces, tables, forms, preferences, and API primitives. It is not a combined backend: Central and Site web images are built, deployed, health-checked, and restarted independently.
 
-Central pages are Dashboard, Sites, Events and event detail, People, Sessions, Presenters, Presentations, and Imports. Site pages are Overview, local Program, and Storage. Site views depend only on Site-local endpoints and remain usable when Central/WAN connectivity is unavailable.
+Central pages are Login, Dashboard, Sites, Events and event detail, People, Sessions, Presenters, Presentations, Imports, and Room Mapping. Site pages are Overview, local Program, Rooms, and Storage. Site views depend only on Site-local endpoints and remain usable when Central/WAN connectivity is unavailable.
 
 ## Design System
 
@@ -23,7 +23,9 @@ Status labels and tones are centralized in `StatusBadge`. Each status includes t
 
 `ApiClient` provides base URL handling, injected headers, JSON parsing, typed structured errors, status classification, timeouts, AbortSignal cancellation, safe GET-only retry, query serialization, and stale-response protection through `useApi`. `centralApi` and `siteApi` expose ownership-specific operations.
 
-Production authentication/RBAC is intentionally deferred. The current Central administrative API requires its existing token. Operators enter it in Settings; it is held only in tab-scoped `sessionStorage` and is never built into an asset or persisted to disk. `SessionProvider`, `user`, roles, `can()`, unauthorized surfaces, and injected client headers are the replacement boundary for a later server-issued session. Site endpoints used here require no browser secret.
+Central browser authentication uses the implemented server-issued administrator session. Login credentials are exchanged for an opaque `HttpOnly`, `SameSite=Lax` cookie; unsafe requests include the session's CSRF token. Route guards recover the session from `/api/v1/auth/session`, and logout revokes it in PostgreSQL. The legacy `UPM_CENTRAL_ADMIN_TOKEN` remains a non-browser compatibility credential for automation and integration clients; the React application neither requests nor stores it.
+
+The current authorization slice provides an Administrator role only. `SessionProvider`, `user`, roles, `can()`, unauthorized surfaces, and injected client behavior remain the extension boundary for Operator/restricted roles. Site human authentication is not implemented, and Site endpoints used by this frontend currently require no browser session.
 
 ## Route Ownership
 
@@ -66,4 +68,4 @@ Compose builds the appropriate web image and waits for its independent health ch
 
 After startup, verify each Caddy port, deep-link navigation, local API data, Glass/Classic runtime switching and persistence, all motion choices, refresh/recreation recovery, and Site pages while Central is stopped or unreachable. HTTP checks do not replace the rendered browser smoke test.
 
-Current limitations: import parsing remains synchronous; full authentication/RBAC, worker-specific health endpoints, write forms beyond existing safe actions/import upload, and advanced diagnostics remain later milestones.
+Current limitations: import parsing remains synchronous; multi-role RBAC and Site authentication, worker-specific health endpoints, broad program-editing forms, media file management, and advanced diagnostics remain later milestones.

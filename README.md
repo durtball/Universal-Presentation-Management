@@ -2,7 +2,7 @@
 
 Universal Presentation Management (UPM) is a clean rebuild of the earlier SpeakerReady system. It is intended for reliable presentation operations across conferences, hotels, events, meeting rooms, and speaker-ready environments, including periods of degraded or unavailable WAN connectivity.
 
-The repository contains the Central/Site persistence, durable jobs, synchronization, media-ingestion and event-program foundations plus production browser administration frontends.
+The repository contains Central/Site persistence, durable jobs, synchronization, Site media ingestion, event/program import and projection, Central administrator authentication, and production browser administration foundations. This is an incremental implementation of a larger fixed target architecture; see the status documents below before assuming a capability is complete.
 
 ## System responsibilities
 
@@ -28,11 +28,22 @@ docs/                    Architecture, API, deployment, and development document
 .github/workflows/       Foundation-level continuous integration
 ```
 
-The authoritative specification is [docs/architecture/UPM_MASTER_ARCHITECTURE.md](docs/architecture/UPM_MASTER_ARCHITECTURE.md). Read it before substantial implementation work.
+Start with the root [AGENTS.md](AGENTS.md). The authoritative specification is [docs/architecture/UPM_MASTER_ARCHITECTURE.md](docs/architecture/UPM_MASTER_ARCHITECTURE.md); read both before substantial implementation work.
 
 Detailed backend decisions and the implemented domain ownership model are in
 [docs/architecture/decisions](docs/architecture/decisions) and
 [docs/architecture/domain-data-foundation.md](docs/architecture/domain-data-foundation.md).
+
+Project knowledge is organized here:
+
+- [Product Requirements](docs/product/PRODUCT_REQUIREMENTS.md)
+- [SpeakerReady Lessons](docs/product/SPEAKERREADY_LESSONS.md)
+- [Feature Matrix](docs/product/FEATURE_MATRIX.md)
+- [Development Rules](docs/development/DEVELOPMENT_RULES.md)
+- [Implementation Status and known gaps](docs/development/IMPLEMENTATION_STATUS.md)
+- [Development and setup guide](docs/development/README.md)
+
+The Master Architecture and Product Requirements describe the target. The Feature Matrix and Implementation Status describe repository evidence at a point in time.
 
 ## Development and test topology
 

@@ -8,6 +8,25 @@
 
 ---
 
+## Document navigation and interpretation
+
+This document defines the **target architecture**. It does not claim every described capability is implemented. Current evidence-based status is maintained in the [Feature Matrix](../product/FEATURE_MATRIX.md) and [Implementation Status](../development/IMPLEMENTATION_STATUS.md); product intent is organized in [Product Requirements](../product/PRODUCT_REQUIREMENTS.md).
+
+Accepted implementation decisions refine this specification without replacing it:
+
+- [ADR-0001: Backend and persistence stack](decisions/ADR-0001-backend-persistence-stack.md)
+- [ADR-0002: Site-authoritative configurable media storage](decisions/ADR-0002-site-media-storage.md)
+- [ADR-0003: PostgreSQL durable jobs and transactional outbox](decisions/ADR-0003-postgresql-durable-jobs-and-outbox.md)
+- [ADR-0004: Site media ingestion and filesystem finalization](decisions/ADR-0004-site-media-ingestion-finalization.md)
+- [ADR-0005: Container migration gates](decisions/ADR-0005-container-migration-gates.md)
+- [ADR-0006: Central/Site registration and synchronization](decisions/ADR-0006-central-site-registration-and-sync.md)
+- [ADR-0007: Versioned event deployment snapshots](decisions/ADR-0007-event-deployment-snapshots.md)
+- [ADR-0008: Shared React admin frontends](decisions/ADR-0008-shared-react-admin-frontends.md)
+
+Historical ADRs must not be rewritten to make later decisions retroactive. A significant change requires a new or superseding ADR.
+
+---
+
 ## 1. Purpose
 
 Universal Presentation Management (UPM) is a new product and a complete rebuild of the previous SpeakerReady system.
@@ -534,7 +553,24 @@ A page-specific setting overrides Global only when a local value is explicitly c
 
 ## 16. UPM Signage
 
-UPM Signage supports timed and operational event signage.
+UPM Signage supports timed and operational event signage. It is an independently deployable Docker service stack, separate from UPM Central and the core UPM Site application.
+
+Signage may run alongside a Site, on separate Linux hardware, or on redundant Signage nodes without changing the service and authority boundaries. It must use Site-local PostgreSQL-backed state and locally available signage media, and it must continue operating if Central or the main Site API is temporarily unavailable. Signage must never connect directly to Central PostgreSQL.
+
+Its data model remains distinct from presentation-operation tables and includes, as appropriate:
+
+- Displays and display assignments
+- Templates
+- Playlists
+- Schedules
+- Content and assets
+- Temporary/manual overrides
+- Devices and status
+- Render state
+
+Central owns global and multi-site signage configuration, templates, content, playlists, schedules, deployments, visibility, and aggregate health. Site owns local display assignments, execution state, temporary overrides, and local health. A temporary local override may supersede a deployed schedule and then expire back to normal scheduling.
+
+A signage display may be assigned to a room, but it does not become the room. Rooms and displays use separate UUID identities even when their labels are similar.
 
 Signage content should support automatic display based on:
 
@@ -782,6 +818,17 @@ A future Windows-based Central interface may exist, but it must only be a client
 
 It must not contain required Central logic.
 
+### Themes and motion
+
+Central and Site browser interfaces provide two interchangeable presentation layers over the same markup and functionality:
+
+- **UPM Glass:** the premium/default dark, translucent, restrained-neon, softly glowing, rounded, Windows 11-inspired presentation.
+- **UPM Classic:** a technician-oriented Windows 95/98-inspired presentation with flat gray panels, square controls, classic title bars/icons, high contrast, high information density, and minimal decoration.
+
+These are CSS/theme layers, not separate applications.
+
+Motion settings are **Full**, **Reduced**, and **Off**. The interface honors `prefers-reduced-motion`; animation is event-driven and must not use constant decorative motion that wastes resources or distracts operators.
+
 ---
 
 ## 26. Container Architecture
@@ -847,6 +894,14 @@ site/
   media/
   device-management/
 
+signage/
+  api/
+  web/
+  workers/
+  scheduler/
+  renderer/
+  sync/
+
 clients/
   agent/
   kiosk/
@@ -864,10 +919,13 @@ database/
     migrations/
   site/
     migrations/
+  signage/
+    migrations/
 
 infrastructure/
   central/
   site/
+  signage/
   caddy/
   docker/
 

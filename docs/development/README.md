@@ -1,5 +1,7 @@
 # Development Documentation
 
+- [Development rules](DEVELOPMENT_RULES.md)
+- [Current implementation status and known gaps](IMPLEMENTATION_STATUS.md)
 - [Central Admin authentication and functional program import](admin-functional-program-import.md)
 
 See [UPM Admin frontend](frontend.md) for browser architecture, design tokens, local development, production builds, tests, routing, and smoke testing.
