@@ -7,9 +7,16 @@ const semantics: Record<string, { tone: string; label: string }> = {
   current: { tone: "success", label: "Current" },
   succeeded: { tone: "success", label: "Succeeded" },
   available: { tone: "success", label: "Available" },
+  ready: { tone: "success", label: "Ready" },
+  committed: { tone: "success", label: "Committed" },
   warning: { tone: "warning", label: "Warning" },
   degraded: { tone: "warning", label: "Degraded" },
   pending: { tone: "warning", label: "Pending" },
+  uploaded: { tone: "info", label: "Uploaded" },
+  parsing: { tone: "info", label: "Parsing" },
+  staged: { tone: "info", label: "Staged" },
+  review: { tone: "warning", label: "Review" },
+  committing: { tone: "info", label: "Committing" },
   running: { tone: "info", label: "Running" },
   retrying: { tone: "warning", label: "Retrying" },
   retry_wait: { tone: "warning", label: "Retry waiting" },
@@ -23,6 +30,7 @@ const semantics: Record<string, { tone: string; label: string }> = {
   unavailable: { tone: "danger", label: "Unavailable" },
   revoked: { tone: "danger", label: "Revoked" },
   disabled: { tone: "neutral", label: "Disabled" },
+  cancelled: { tone: "neutral", label: "Cancelled" },
 };
 
 export function statusInfo(value: unknown) {
