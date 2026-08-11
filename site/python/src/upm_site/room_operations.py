@@ -43,6 +43,90 @@ def normalize_program_location(value: str) -> str:
     return " ".join(value.strip().casefold().split())
 
 
+def materialize_program_room_mappings(
+    session: Session,
+    event_id: UUID,
+    *,
+    excluded_labels: set[str] | None = None,
+) -> dict[str, int]:
+    """Create default Site rooms/mappings for newly deployed program locations.
+
+    Existing event mappings, including deliberate operator unmaps, are authoritative and
+    are never replaced here. An existing Site room is reused only when its exact label or
+    normalized label identifies one room deterministically.
+    """
+    event = session.get(Event, event_id)
+    if event is None:
+        raise ValueError("event not found")
+    excluded = excluded_labels or set()
+    existing_mapping_labels = set(
+        session.scalars(
+            select(ProgramRoomMapping.normalized_imported_label).where(
+                ProgramRoomMapping.event_id == event_id
+            )
+        )
+    )
+    rooms = session.scalars(select(Room).where(Room.site_id == event.site_id)).all()
+    rooms_by_exact_label = {room.label: room for room in rooms}
+    rooms_by_normalized_label: dict[str, list[Room]] = defaultdict(list)
+    for room in rooms:
+        rooms_by_normalized_label[normalize_program_location(room.label)].append(room)
+
+    labels: dict[str, str] = {}
+    for imported_label in session.scalars(
+        select(ProgramSession.location_name)
+        .where(
+            ProgramSession.event_id == event_id,
+            ProgramSession.active.is_(True),
+            ProgramSession.location_name.is_not(None),
+        )
+        .order_by(ProgramSession.session_id)
+    ):
+        if imported_label:
+            normalized = normalize_program_location(imported_label)
+            labels.setdefault(normalized, imported_label.strip())
+
+    created_rooms = reused_rooms = created_mappings = ambiguous_labels = 0
+    for normalized, imported_label in labels.items():
+        if normalized in existing_mapping_labels or normalized in excluded:
+            continue
+        room = rooms_by_exact_label.get(imported_label)
+        candidates = rooms_by_normalized_label.get(normalized, [])
+        if room is None and len(candidates) == 1:
+            room = candidates[0]
+        elif room is None and len(candidates) > 1:
+            ambiguous_labels += 1
+            continue
+        if room is None:
+            room = Room(site_id=event.site_id, event_id=event_id, label=imported_label)
+            session.add(room)
+            session.flush()
+            rooms_by_exact_label[room.label] = room
+            rooms_by_normalized_label[normalized].append(room)
+            created_rooms += 1
+        else:
+            reused_rooms += 1
+        session.add(
+            ProgramRoomMapping(
+                site_id=event.site_id,
+                event_id=event_id,
+                imported_label=imported_label,
+                normalized_imported_label=normalized,
+                room_id=room.room_id,
+                confirmed_by="deployment-auto-materialization",
+            )
+        )
+        existing_mapping_labels.add(normalized)
+        created_mappings += 1
+    session.flush()
+    return {
+        "created_rooms": created_rooms,
+        "reused_rooms": reused_rooms,
+        "created_mappings": created_mappings,
+        "ambiguous_labels": ambiguous_labels,
+    }
+
+
 def reconcile_program_room_assignments(session: Session, event_id: UUID) -> dict[str, int]:
     """Materialize Site-authored location mappings into authoritative session assignments."""
     event = session.get(Event, event_id)
