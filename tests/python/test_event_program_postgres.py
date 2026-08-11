@@ -428,14 +428,15 @@ def test_wide_program_rows_create_deterministic_grouped_sessions(program_databas
             data={"importer_type": "program"},
         )
         assert upload.status_code == 201
-        review = upload.json()
+        batch_id = upload.json()["import_batch_id"]
+        review_response = client.get(f"/api/v1/admin/imports/{batch_id}", headers=headers)
+        assert review_response.status_code == 200
+        review = review_response.json()
         assert review["preview_counts"]["people_or_presenters"] == 5
         assert review["preview_counts"]["sessions"] == 4
         assert review["preview_counts"]["presentations"] == 5
         assert review["preview_counts"]["unresolved_room_mappings"] == 4
-        committed = client.post(
-            f"/api/v1/admin/imports/{review['import_batch_id']}/commit", headers=headers
-        )
+        committed = client.post(f"/api/v1/admin/imports/{batch_id}/commit", headers=headers)
         assert committed.status_code == 200
 
         sessions = client.get(f"/api/v1/admin/events/{event_id}/sessions", headers=headers).json()
