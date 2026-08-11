@@ -3,7 +3,7 @@
 import csv
 import hashlib
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 from zipfile import BadZipFile
@@ -67,7 +67,11 @@ COLUMN_ALIASES = {
     "company": "organization",
     "type": "entity_type",
     "session": "session_code",
+    "session_id": "session_code",
+    "session_identifier": "session_code",
     "presentation": "presentation_code",
+    "presentation_id": "presentation_code",
+    "presentation_identifier": "presentation_code",
     "start": "starts_at",
     "session_start": "starts_at",
     "end": "ends_at",
@@ -82,9 +86,20 @@ COLUMN_ALIASES = {
     "speaker_email": "presenter_email",
 }
 
+SESSION_COMPOSITE_FIELDS = (
+    "date",
+    "start_time",
+    "end_time",
+    "location_name",
+    "track",
+    "session_format",
+)
+
 
 def _cell(value: object) -> object:
     if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (date, time)):
         return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -141,6 +156,9 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
         if isinstance(value, str):
             value = " ".join(value.strip().split())
         result[normalized_key] = value
+    for identity_field in ("session_code", "presentation_code"):
+        if result.get(identity_field) is not None:
+            result[identity_field] = str(result[identity_field]).strip()
     if result.get("presenter_email") and not result.get("email"):
         result["email"] = result["presenter_email"]
     if result.get("email"):
@@ -185,12 +203,58 @@ def _entity(values: dict[str, object]) -> ImportEntityType:
     return ImportEntityType.UNKNOWN
 
 
+def _wide_row_session(values: dict[str, object]) -> dict[str, object]:
+    """Add a stable session reference to presentation-oriented program rows.
+
+    Source session identifiers are authoritative when supplied. A session title is useful
+    grouping evidence, but is qualified by available schedule/location/track/format values so
+    repeated titles at a conference do not collapse. Without either, the complete composite is
+    required; deliberately incomplete rows remain unassociated instead of being guessed together.
+    """
+    result = dict(values)
+    if result.get("session_code"):
+        return result
+    title = str(result.get("session_title") or "").strip()
+    evidence = [
+        normalize_text(str(result.get(field) or "")) or "" for field in SESSION_COMPOSITE_FIELDS
+    ]
+    if not title and not all(evidence[:4]):
+        return result
+    identity = [normalize_text(title) or "", *evidence]
+    digest = hashlib.sha256("\x1f".join(identity).encode()).hexdigest()[:24]
+    result["session_code"] = f"import-composite:{digest}"
+    if not title:
+        start = str(result.get("start_time") or "").strip()
+        track = str(result.get("track") or "").strip()
+        room = str(result.get("location_name") or "").strip()
+        result["session_title"] = " — ".join(part for part in (track, start, room) if part)
+    result["_session_identity_strategy"] = (
+        "title-qualified-composite" if title else "schedule-room-composite"
+    )
+    return result
+
+
+def _combine_date_and_time(
+    values: dict[str, object], date_field: str, time_field: str
+) -> str | None:
+    raw_date, raw_time = values.get(date_field), values.get(time_field)
+    if not raw_date or not raw_time:
+        return None
+    date_text = str(raw_date).split("T", 1)[0].strip()
+    time_text = str(raw_time).strip()
+    if "T" in time_text:
+        time_text = time_text.split("T", 1)[1]
+    return f"{date_text}T{time_text}"
+
+
 def _schedule(values: dict[str, object], event: Event) -> tuple[dict[str, object], list[str]]:
     result = dict(values)
+    result.setdefault("starts_at", _combine_date_and_time(values, "date", "start_time"))
+    result.setdefault("ends_at", _combine_date_and_time(values, "date", "end_time"))
     errors: list[str] = []
     parsed: dict[str, datetime] = {}
     for field in ("starts_at", "ends_at", "scheduled_at"):
-        raw = values.get(field)
+        raw = result.get(field)
         if not raw:
             continue
         try:
@@ -213,6 +277,12 @@ def _schedule(values: dict[str, object], event: Event) -> tuple[dict[str, object
         if parsed["ends_at"] <= parsed["starts_at"]:
             errors.append("ends_at must follow starts_at")
     return result, errors
+
+
+def _prepare_row(raw: dict[str, object], event: Event) -> tuple[dict[str, object], list[str]]:
+    """Run one row through the same ordered normalization and grouping pipeline."""
+    scheduled, errors = _schedule(_normalized(raw), event)
+    return _wide_row_session(scheduled), errors
 
 
 def _issue(
@@ -373,9 +443,10 @@ def create_batch(
     session.add(batch)
     session.flush()
     seen_session_codes: set[str] = set()
-    seen_presentation_codes: set[str] = set()
+    seen_presentation_codes: dict[str, tuple[str, str]] = {}
     seen_external_ids: set[tuple[str, str]] = set()
-    normalized_rows = [_normalized(raw) for raw in parsed]
+    prepared_rows = [_prepare_row(raw, event) for raw in parsed]
+    normalized_rows = [values for values, _ in prepared_rows]
     imported_emails = {
         email
         for values in normalized_rows
@@ -404,8 +475,8 @@ def create_batch(
             )
         )
     )
-    for number, (raw, values) in enumerate(zip(parsed, normalized_rows, strict=True), start=2):
-        values, schedule_errors = _schedule(values, event)
+    for number, (raw, prepared) in enumerate(zip(parsed, prepared_rows, strict=True), start=2):
+        values, schedule_errors = prepared
         row = ImportRow(
             import_batch_id=batch.import_batch_id,
             source_row_number=number,
@@ -429,9 +500,25 @@ def create_batch(
         if row.entity_type == ImportEntityType.SESSION:
             code_sets.append(("session_code", seen_session_codes, "duplicate_session_code"))
         if row.entity_type == ImportEntityType.PRESENTATION:
-            code_sets.append(
-                ("presentation_code", seen_presentation_codes, "duplicate_presentation_code")
+            presentation_code = normalize_text(str(values.get("presentation_code") or ""))
+            signature = (
+                normalize_text(str(values.get("presentation_title") or values.get("title") or ""))
+                or "",
+                normalize_text(str(values.get("session_code") or "")) or "",
             )
+            previous = seen_presentation_codes.get(presentation_code)
+            if presentation_code and previous is not None and previous != signature:
+                row.issues.append(
+                    _issue(
+                        row,
+                        ValidationSeverity.ERROR,
+                        "conflicting_presentation_code",
+                        "Presentation code identifies conflicting title or session data",
+                        "presentation_code",
+                    )
+                )
+            elif presentation_code:
+                seen_presentation_codes[presentation_code] = signature
         for field, seen, issue_code in code_sets:
             value = normalize_text(str(values.get(field) or ""))
             if value and value in seen:

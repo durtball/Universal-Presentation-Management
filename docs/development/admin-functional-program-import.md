@@ -22,6 +22,29 @@ The audit found no reason to create a second importer or synchronization protoco
 foundation remains available for a future large-import handoff; synchronous imports remain capped at
 25 MiB.
 
+### Wide program spreadsheet session grouping
+
+Presentation-oriented CSV/XLSX exports commonly repeat session columns on every presentation row
+rather than providing separate session rows. The existing importer normalizes these rows into the
+same `Session`, `PresentationSession`, `SessionParticipant`, and `PresentationPresenter` domain
+records. `Session ID`/`Session Identifier` is preferred as the stable source session code. When it is
+absent, a supplied session title is qualified by the available date, start/end time, imported room
+label, track, and session format. If neither identifier nor title exists, all of date, start time,
+end time, and room are required and track/format further qualify the group. Incomplete evidence is
+left unassociated rather than guessed.
+
+The fallback key is a deterministic SHA-256-derived importer code over normalized grouping evidence,
+not a room identity and not a database UUID. This makes repeated imports converge on the same
+UUID-backed Central Session while preventing sessions in different time slots, rooms, dates, tracks,
+or formats from being merged. The imported room remains `Session.location_name`; ADR-0009 performs
+Site-owned UUID Room materialization only after deployment.
+
+Normalization prepares native Excel date/time cells into event-timezone-aware `starts_at` and
+`ends_at` values before applying the grouping strategy. Repeated rows with the same presentation ID,
+title, and generated session identity are treated as additional presenter rows for one logical
+presentation; conflicting title or session evidence for the same presentation ID remains a blocking
+validation error.
+
 ## Administrator authentication
 
 On first Central API use after migration, Central creates one administrator only when the
