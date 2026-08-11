@@ -6,10 +6,12 @@ import io
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
+from zipfile import BadZipFile
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -57,6 +59,29 @@ from upm_shared.enums import (
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
+COLUMN_ALIASES = {
+    "first_name": "given_name",
+    "firstname": "given_name",
+    "last_name": "family_name",
+    "lastname": "family_name",
+    "company": "organization",
+    "type": "entity_type",
+    "session": "session_code",
+    "presentation": "presentation_code",
+    "start": "starts_at",
+    "session_start": "starts_at",
+    "end": "ends_at",
+    "session_end": "ends_at",
+    "room": "location_name",
+    "room_name": "location_name",
+    "location": "location_name",
+    "speaker": "display_name",
+    "speaker_name": "display_name",
+    "presenter": "display_name",
+    "presenter_name": "display_name",
+    "speaker_email": "presenter_email",
+}
+
 
 def _cell(value: object) -> object:
     if isinstance(value, datetime):
@@ -93,35 +118,31 @@ def _parse_xlsx(content: bytes) -> list[dict[str, object]]:
         ]
         workbook.close()
         return rows
-    except (OSError, ValueError, StopIteration) as exc:
+    except (
+        BadZipFile,
+        InvalidFileException,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        StopIteration,
+    ) as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid XLSX workbook"
         ) from exc
 
 
 def _normalized(raw: dict[str, object]) -> dict[str, object]:
-    aliases = {
-        "first_name": "given_name",
-        "firstname": "given_name",
-        "last_name": "family_name",
-        "lastname": "family_name",
-        "company": "organization",
-        "type": "entity_type",
-        "session": "session_code",
-        "presentation": "presentation_code",
-        "start": "starts_at",
-        "session_start": "starts_at",
-        "end": "ends_at",
-        "session_end": "ends_at",
-    }
     result: dict[str, object] = {}
     for key, value in raw.items():
-        normalized_key = aliases.get(
+        normalized_key = COLUMN_ALIASES.get(
             key.strip().casefold().replace(" ", "_"), key.strip().casefold().replace(" ", "_")
         )
         if isinstance(value, str):
             value = " ".join(value.strip().split())
         result[normalized_key] = value
+    if result.get("presenter_email") and not result.get("email"):
+        result["email"] = result["presenter_email"]
     if result.get("email"):
         result["normalized_email"] = normalize_text(str(result["email"]))
     display = (
@@ -131,6 +152,15 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
     if display:
         result["display_name"] = display
         result["normalized_name"] = normalize_text(str(display))
+    return result
+
+
+def detect_columns(headers: list[str]) -> dict[str, str]:
+    """Return the importer field selected by the existing normalization rules."""
+    result = {}
+    for header in headers:
+        normalized = header.strip().casefold().replace(" ", "_")
+        result[header] = COLUMN_ALIASES.get(normalized, normalized)
     return result
 
 
@@ -494,6 +524,21 @@ def create_batch(
                 )
             )
         if row.entity_type in {ImportEntityType.SESSION, ImportEntityType.PRESENTATION}:
+            if _presenter_emails(values) and values.get("display_name"):
+                _match_person(session, row, values)
+                if row.match_outcome in {
+                    IdentityMatchOutcome.AMBIGUOUS,
+                    IdentityMatchOutcome.STRONG_CANDIDATE,
+                    IdentityMatchOutcome.CONFLICT,
+                }:
+                    row.issues.append(
+                        _issue(
+                            row,
+                            ValidationSeverity.ERROR,
+                            "identity_review",
+                            row.match_reason or "Presenter identity requires review",
+                        )
+                    )
             for email in _presenter_emails(values):
                 if email not in imported_emails and email not in known_event_emails:
                     row.issues.append(
@@ -507,7 +552,11 @@ def create_batch(
                     )
         if row.entity_type == ImportEntityType.PRESENTATION and values.get("session_code"):
             code = str(values["session_code"])
-            if code not in imported_session_codes and code not in known_session_codes:
+            if (
+                code not in imported_session_codes
+                and code not in known_session_codes
+                and not values.get("session_title")
+            ):
                 row.issues.append(
                     _issue(
                         row,
@@ -651,7 +700,9 @@ def _person_for_row(
 
 
 def _presenter_emails(values: dict[str, object]) -> list[str]:
-    supplied = values.get("presenter_emails") or values.get("presenter_email")
+    supplied = (
+        values.get("presenter_emails") or values.get("presenter_email") or values.get("email")
+    )
     if not supplied:
         return []
     return [
@@ -672,6 +723,67 @@ def _participant_by_email(
             Person.normalized_email == email,
         )
     )
+
+
+def _ensure_wide_row_participant(
+    session: Session,
+    event: Event,
+    row: ImportRow,
+    values: dict[str, object],
+    email: str,
+    actor: str,
+) -> EventParticipation:
+    participant = _participant_by_email(session, event.event_id, email)
+    if participant is not None:
+        participant.is_presenter = True
+        return participant
+    person_id = row.resolved_person_id or row.proposed_person_id
+    person = session.get(Person, person_id) if person_id else None
+    if person is None:
+        people = session.scalars(
+            select(Person).where(Person.normalized_email == email, Person.deleted_at.is_(None))
+        ).all()
+        if len(people) > 1:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"presenter email {email} is ambiguous; reconcile before commit",
+            )
+        person = people[0] if people else None
+    if person is None:
+        display_name = str(values.get("display_name") or email).strip()
+        person = Person(
+            given_name=values.get("given_name") or None,
+            family_name=values.get("family_name") or None,
+            display_name=display_name,
+            normalized_name=normalize_text(display_name) or "",
+            primary_email=email,
+            normalized_email=email,
+            organization=values.get("organization") or None,
+            professional_title=values.get("professional_title") or None,
+        )
+        session.add(person)
+        session.flush()
+        audit(
+            session,
+            action="central.person.created",
+            target_type="person",
+            target_id=person.person_id,
+            after={"display_name": display_name},
+            actor=actor,
+        )
+    participant = EventParticipation(
+        event_id=event.event_id,
+        person_id=person.person_id,
+        professional_title=values.get("professional_title") or None,
+        organization=values.get("organization") or None,
+        participant_status=ParticipantStatus.ACTIVE,
+        is_presenter=True,
+        source="import",
+        source_metadata={"import_batch_id": str(row.import_batch_id)},
+    )
+    session.add(participant)
+    session.flush()
+    return participant
 
 
 def commit_batch(
@@ -825,12 +937,26 @@ def commit_batch(
                     if values.get("ends_at")
                     else None
                 )
+                imported_room = str(values.get("location_name") or "").strip() or None
+                item.location_name = imported_room
+                item.location_metadata = {
+                    **(item.location_metadata or {}),
+                    "imported_label": imported_room,
+                    "normalized_imported_label": normalize_text(imported_room),
+                    "mapping_state": "unmapped" if imported_room else "unassigned",
+                    "import_batch_id": str(batch.import_batch_id),
+                }
                 session.flush()
+                participant_ids: list[str] = []
+                person_ids: list[str] = []
                 for order, email in enumerate(_presenter_emails(values)):
-                    participant = _participant_by_email(session, event.event_id, email)
+                    participant = _ensure_wide_row_participant(
+                        session, event, row, values, email, actor
+                    )
+                    participant_ids.append(str(participant.event_participation_id))
+                    person_ids.append(str(participant.person_id))
                     if (
-                        participant
-                        and session.scalar(
+                        session.scalar(
                             select(SessionParticipant).where(
                                 SessionParticipant.session_id == item.session_id,
                                 SessionParticipant.event_participation_id
@@ -850,7 +976,11 @@ def commit_batch(
                                 source="import",
                             )
                         )
-                row.committed_entity_ids = {"session_id": str(item.session_id)}
+                row.committed_entity_ids = {
+                    "session_id": str(item.session_id),
+                    "person_ids": person_ids,
+                    "event_participation_ids": participant_ids,
+                }
                 audit(
                     session,
                     action=f"central.session.{'created' if created else 'updated'}",
@@ -895,6 +1025,7 @@ def commit_batch(
                 )
                 session.flush()
                 session_code = values.get("session_code")
+                target_session = None
                 if session_code:
                     target_session = session.scalar(
                         select(ProgramSession).where(
@@ -902,6 +1033,38 @@ def commit_batch(
                             ProgramSession.session_code == session_code,
                         )
                     )
+                    if target_session is None and values.get("session_title"):
+                        target_session = ProgramSession(
+                            event_id=event.event_id,
+                            title=str(values["session_title"]),
+                            session_code=session_code,
+                            starts_at=(
+                                datetime.fromisoformat(str(values["starts_at"]))
+                                if values.get("starts_at")
+                                else None
+                            ),
+                            ends_at=(
+                                datetime.fromisoformat(str(values["ends_at"]))
+                                if values.get("ends_at")
+                                else None
+                            ),
+                            location_name=str(values.get("location_name") or "").strip() or None,
+                            location_metadata={
+                                "imported_label": values.get("location_name") or None,
+                                "normalized_imported_label": normalize_text(
+                                    str(values.get("location_name") or "")
+                                ),
+                                "mapping_state": (
+                                    "unmapped" if values.get("location_name") else "unassigned"
+                                ),
+                                "import_batch_id": str(batch.import_batch_id),
+                            },
+                            status=SessionStatus.SCHEDULED,
+                            source="import",
+                            source_metadata={"import_batch_id": str(batch.import_batch_id)},
+                        )
+                        session.add(target_session)
+                        session.flush()
                     if target_session is None:
                         raise HTTPException(
                             status.HTTP_409_CONFLICT,
@@ -926,11 +1089,35 @@ def commit_batch(
                                 source="import",
                             )
                         )
+                participant_ids = []
+                person_ids = []
                 for order, email in enumerate(_presenter_emails(values)):
-                    participant = _participant_by_email(session, event.event_id, email)
-                    if participant is None:
-                        raise HTTPException(
-                            status.HTTP_409_CONFLICT, detail=f"unresolved presenter email {email}"
+                    participant = _ensure_wide_row_participant(
+                        session, event, row, values, email, actor
+                    )
+                    participant_ids.append(str(participant.event_participation_id))
+                    person_ids.append(str(participant.person_id))
+                    if (
+                        target_session
+                        and session.scalar(
+                            select(SessionParticipant).where(
+                                SessionParticipant.session_id == target_session.session_id,
+                                SessionParticipant.event_participation_id
+                                == participant.event_participation_id,
+                                SessionParticipant.role == "presenter",
+                            )
+                        )
+                        is None
+                    ):
+                        session.add(
+                            SessionParticipant(
+                                session_id=target_session.session_id,
+                                event_participation_id=participant.event_participation_id,
+                                role="presenter",
+                                presenter_order=order,
+                                primary_presenter=order == 0,
+                                source="import",
+                            )
                         )
                     if (
                         session.scalar(
@@ -953,7 +1140,12 @@ def commit_batch(
                                 source="import",
                             )
                         )
-                row.committed_entity_ids = {"presentation_id": str(item.presentation_id)}
+                row.committed_entity_ids = {
+                    "presentation_id": str(item.presentation_id),
+                    "session_id": str(target_session.session_id) if target_session else None,
+                    "person_ids": person_ids,
+                    "event_participation_ids": participant_ids,
+                }
                 audit(
                     session,
                     action=f"central.presentation.{'created' if created else 'updated'}",

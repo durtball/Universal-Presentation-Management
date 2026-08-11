@@ -154,10 +154,17 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="invalid_authority"
         )
-    if session.scalar(select(SyncReceipt).where(SyncReceipt.event_id == event.event_id)):
-        return EventAcknowledgement(event_id=event.event_id, accepted=True, duplicate=True)
     cursor = session.get(SyncCursor, "central_to_site")
-    last = cursor.last_sequence if cursor else 0
+    durable_sequence = (
+        session.scalar(select(func.max(SyncReceipt.source_sequence))) or 0
+        if cursor is None
+        else cursor.last_sequence
+    )
+    if session.scalar(select(SyncReceipt).where(SyncReceipt.event_id == event.event_id)):
+        if cursor is None:
+            session.add(SyncCursor(direction="central_to_site", last_sequence=durable_sequence))
+        return EventAcknowledgement(event_id=event.event_id, accepted=True, duplicate=True)
+    last = durable_sequence
     if event.source_sequence != last + 1:
         return EventAcknowledgement(
             event_id=event.event_id,

@@ -58,8 +58,8 @@ const columns: Column<SiteRecord>[] = [
   },
 ];
 export function Sites() {
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi((signal) => api.sites(signal), [api]);
   const [busy, setBusy] = useState<string>();
   return (

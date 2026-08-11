@@ -15,22 +15,21 @@ function renderApp(deployment: "central" | "site", path = "/admin") {
     </MemoryRouter>,
   );
 }
-test("renders the Central shell and protected page boundary", () => {
+test("redirects an unauthenticated Central administrator to login", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = new URL(String(input), "http://test").pathname;
+    if (path === "/health") return Response.json({ service: "upm-central", status: "foundation-ready" });
+    return Response.json({ detail: "not authenticated" }, { status: 401 });
+  });
   renderApp("central");
-  expect(
-    screen.getByText("Universal Presentation Management"),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole("heading", { name: "Operational overview" }),
-  ).toBeInTheDocument();
-  expect(screen.getByRole("alert")).toHaveTextContent(
-    "Administrator session required",
-  );
+  expect(await screen.findByRole("heading", { name: "Administrator login" })).toBeInTheDocument();
 });
-test("routes to all core Central initial pages", () => {
+test("protects direct navigation to a Central program page", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ detail: "not authenticated" }, { status: 401 }),
+  );
   renderApp("central", "/admin/people");
-  expect(screen.getByRole("heading", { name: "People", level: 2 })).toBeInTheDocument();
-  expect(screen.getByText(/durable Central identity/i)).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Administrator login" })).toBeInTheDocument();
 });
 test("renders Site operational data and offline-local autonomy", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

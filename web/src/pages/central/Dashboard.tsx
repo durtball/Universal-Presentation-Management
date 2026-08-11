@@ -8,8 +8,8 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { AdminBoundary, when } from "./Shared";
 
 export function Dashboard() {
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi(
     async (signal) => {
       const [health, sites, events, people] = await Promise.all([

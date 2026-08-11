@@ -16,6 +16,10 @@ class CentralDatabaseSettings(BaseSettings):
     worker_capabilities: str = "cpu,pdf-conversion,transfer"
     worker_ready_file: str = "/tmp/upm-central-worker-ready"
     admin_token: Annotated[str, Field(min_length=32)]
+    bootstrap_admin_username: Annotated[str, Field(min_length=1, max_length=255)] = "admin"
+    bootstrap_admin_password: Annotated[str, Field(min_length=1, max_length=1024)] = "admin"
+    admin_session_hours: Annotated[int, Field(ge=1, le=168)] = 12
+    admin_cookie_secure: bool = False
     credential_issuer_key: Annotated[str, Field(min_length=32)]
     public_url: str = "http://upm-central:8080"
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50

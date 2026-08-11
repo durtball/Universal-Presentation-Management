@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ImportBatch } from "../api/types";
 import { Imports } from "../pages/central/Imports";
 import { SessionProvider } from "../state/session";
+import { MemoryRouter } from "react-router-dom";
 
 const eventId = "01900000-0000-7000-8000-000000000010";
 
@@ -28,6 +29,14 @@ function mockImportRequests(created: ImportBatch) {
   let importListRequests = 0;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const path = new URL(String(input), "http://test").pathname;
+    if (path === "/api/v1/auth/session") {
+      return Response.json({
+        authenticated: true,
+        csrf_token: "test-csrf",
+        expires_at: "2026-08-11T18:00:00Z",
+        user: { user_id: "01900000-0000-7000-8000-000000000001", username: "admin", display_name: "Admin", roles: ["administrator"] },
+      });
+    }
     if (path === "/api/v1/admin/events") {
       return Response.json([
         {
@@ -45,18 +54,18 @@ function mockImportRequests(created: ImportBatch) {
       importListRequests += 1;
       return Response.json(importListRequests === 1 ? [] : [created]);
     }
+    if (path === `/api/v1/admin/imports/${created.import_batch_id}`) {
+      return Response.json({ ...created, rows: [], source_headers: [], detected_mapping: {}, sample_rows: [], preview_counts: {} });
+    }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${path}`);
   });
 }
 
 async function stageImport(created: ImportBatch) {
-  sessionStorage.setItem("upm.central.admin-token", "test-admin-token");
   const fetchMock = mockImportRequests(created);
   const user = userEvent.setup();
   render(
-    <SessionProvider>
-      <Imports />
-    </SessionProvider>,
+    <MemoryRouter><SessionProvider><Imports /></SessionProvider></MemoryRouter>,
   );
   const input = await screen.findByLabelText("CSV or XLSX file");
   await user.upload(

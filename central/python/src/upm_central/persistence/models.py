@@ -92,6 +92,62 @@ class CentralRecordMixin:
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
+class AdminUser(CentralRecordMixin, CentralBase):
+    """Human administrator identity; roles stay data-driven for future RBAC."""
+
+    __tablename__ = "admin_users"
+    __table_args__ = (UniqueConstraint("normalized_username"),)
+
+    admin_user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    sessions: Mapped[list["AdminSession"]] = relationship(back_populates="user")
+
+
+class AdminSession(CentralBase):
+    """Opaque, revocable server-side browser session."""
+
+    __tablename__ = "admin_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash"),
+        Index("ix_admin_sessions_expiry", "expires_at"),
+    )
+
+    admin_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    admin_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("admin_users.admin_user_id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    remote_address: Mapped[str | None] = mapped_column(String(255))
+    user_agent: Mapped[str | None] = mapped_column(String(512))
+
+    user: Mapped[AdminUser] = relationship(back_populates="sessions")
+
+
 class Person(CentralRecordMixin, CentralBase):
     __tablename__ = "persons"
     __table_args__ = (CheckConstraint("revision >= 1", name="revision_positive"),)
@@ -320,6 +376,26 @@ class SiteManagedSetting(CentralRecordMixin, CentralBase):
     )
     setting_key: Mapped[str] = mapped_column(String(100), nullable=False)
     value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+
+
+class SiteRoomMapping(CentralRecordMixin, CentralBase):
+    """Operator-confirmed mapping from imported logical labels to Site-owned rooms."""
+
+    __tablename__ = "site_room_mappings"
+    __table_args__ = (UniqueConstraint("site_id", "normalized_imported_label"),)
+
+    site_room_mapping_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), nullable=False
+    )
+    imported_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_imported_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_room_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    target_room_label: Mapped[str | None] = mapped_column(String(255))
+    mapping_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unmapped")
+    confirmed_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class Event(CentralRecordMixin, CentralBase):
@@ -604,6 +680,7 @@ class PresentationPresenter(CentralRecordMixin, CentralBase):
     source: Mapped[str | None] = mapped_column(String(255))
 
     presentation: Mapped[Presentation] = relationship(back_populates="presenter_links")
+    event_participation: Mapped[EventParticipation] = relationship()
 
 
 class PresentationVersion(CentralRecordMixin, CentralBase):

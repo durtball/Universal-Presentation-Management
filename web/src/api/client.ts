@@ -86,12 +86,14 @@ export class ApiClient {
     let detail = response.statusText || "Request failed";
     try {
       const body = (await response.json()) as {
-        detail?: string | Array<{ msg: string }>;
+        detail?: string | Array<{ msg: string }> | { message?: string };
       };
       detail =
         typeof body.detail === "string"
           ? body.detail
-          : body.detail?.map((item) => item.msg).join("; ") || detail;
+          : Array.isArray(body.detail)
+            ? body.detail.map((item) => item.msg).join("; ")
+            : body.detail?.message || detail;
     } catch {
       /* non-JSON response */
     }
@@ -114,10 +116,10 @@ export class ApiClient {
   }
 }
 
-export function createCentralClient(adminToken: string | null) {
+export function createCentralClient(csrfToken: string | null = null) {
   return new ApiClient(
     "",
-    (): HeadersInit => (adminToken ? { "X-UPM-Admin-Token": adminToken } : {}),
+    (): HeadersInit => (csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
   );
 }
 

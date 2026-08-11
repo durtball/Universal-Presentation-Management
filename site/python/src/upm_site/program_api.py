@@ -17,6 +17,8 @@ from upm_site.persistence.models import (
     Presentation,
     PresentationPresenter,
     PresentationSession,
+    Room,
+    RoomAssignment,
     SessionParticipant,
 )
 from upm_site.persistence.models import Session as ProgramSession
@@ -81,6 +83,17 @@ def register_program_routes(app: FastAPI, db: Callable[[], Iterator[Session]]) -
             )
         ):
             presentation_presenters.setdefault(link.presentation_id, []).append(link)
+        room_assignments = {
+            assignment.session_id: (assignment, room)
+            for assignment, room in session.execute(
+                select(RoomAssignment, Room)
+                .join(Room, Room.room_id == RoomAssignment.room_id)
+                .where(
+                    RoomAssignment.session_id.in_([item.session_id for item in sessions]),
+                    RoomAssignment.active.is_(True),
+                )
+            )
+        }
         return {
             "event": {
                 "event_id": event.event_id,
@@ -112,6 +125,21 @@ def register_program_routes(app: FastAPI, db: Callable[[], Iterator[Session]]) -
                     "starts_at": item.starts_at,
                     "ends_at": item.ends_at,
                     "location_name": item.location_name,
+                    "room_mapping_status": (
+                        "mapped"
+                        if item.session_id in room_assignments
+                        else "unmapped"
+                        if item.location_name
+                        else "unassigned"
+                    ),
+                    "assigned_room": (
+                        {
+                            "room_id": room_assignments[item.session_id][1].room_id,
+                            "label": room_assignments[item.session_id][1].label,
+                        }
+                        if item.session_id in room_assignments
+                        else None
+                    ),
                     "status": item.status,
                     "presenters": [
                         {

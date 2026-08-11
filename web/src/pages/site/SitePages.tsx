@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { ApiError } from "../../api/client";
-import type { Row, SiteDeployment, StorageTarget } from "../../api/types";
+import type { Row, SiteDeployment, SiteRoom, StorageTarget } from "../../api/types";
 import { siteApi } from "../../api/site";
 import { DataTable, type Column } from "../../components/DataTable";
 import {
@@ -201,8 +201,17 @@ function ProgramTables({ program }: { program: Row }) {
             },
             {
               key: "room",
-              label: "Location",
-              value: (row) => row.location_name,
+              label: "Room",
+              value: (row) => {
+                const assigned = row.assigned_room as Row | undefined;
+                return assigned?.label || row.location_name || "Unassigned";
+              },
+            },
+            {
+              key: "room-status",
+              label: "Room mapping",
+              value: (row) => row.room_mapping_status,
+              render: (row) => <StatusBadge value={row.room_mapping_status} />,
             },
             {
               key: "status",
@@ -263,6 +272,54 @@ function ProgramTables({ program }: { program: Row }) {
         />
       </Panel>
     </div>
+  );
+}
+
+const roomColumns: Column<SiteRoom>[] = [
+  { key: "label", label: "Physical room", value: (row) => row.label },
+  { key: "id", label: "Room UUID", value: (row) => row.room_id },
+  { key: "event", label: "Event scope", value: (row) => row.event_id || "All events" },
+];
+
+export function SiteRooms() {
+  const rooms = useApi((signal) => siteApi.rooms(signal), []);
+  const [label, setLabel] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(undefined);
+    try {
+      await siteApi.createRoom(label);
+      setLabel("");
+      rooms.refresh();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Page eyebrow="Site resources" title="Rooms"
+      description="Create and inspect physical Site rooms used by Central room reconciliation.">
+      <Panel title="Create a Site room" description="Spreadsheet labels do not create physical rooms automatically.">
+        <form className="inline-form" onSubmit={submit}>
+          <label className="field">Room label<input className="input" required value={label}
+            onChange={(event) => setLabel(event.target.value)} /></label>
+          <button className="button button--primary" disabled={saving || !label.trim()}>
+            {saving ? "Creating…" : "Create room"}
+          </button>
+        </form>
+        {error != null ? <ErrorSurface error={error} /> : null}
+      </Panel>
+      {rooms.loading ? <Loading /> : rooms.error ? (
+        <ErrorSurface error={rooms.error} onRetry={rooms.refresh} />
+      ) : rooms.data?.length ? (
+        <DataTable rows={rooms.data} columns={roomColumns} rowKey={(row) => row.room_id}
+          label="Site rooms" />
+      ) : <Empty title="No physical rooms configured" />}
+    </Page>
   );
 }
 

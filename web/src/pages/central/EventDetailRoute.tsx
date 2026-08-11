@@ -9,8 +9,8 @@ import { AdminBoundary } from "./Shared";
 
 export function EventDetailRoute() {
   const { eventId = "" } = useParams();
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi(
     async (signal) =>
       (await api.events(signal)).find((event) => event.event_id === eventId),

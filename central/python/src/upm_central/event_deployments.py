@@ -15,6 +15,7 @@ from upm_central.persistence.models import (
     ExternalIdentifier,
     Presentation,
     Site,
+    SiteRoomMapping,
     utc_now,
 )
 from upm_central.persistence.models import (
@@ -146,6 +147,9 @@ def build_snapshot(
         )
         .order_by(ExternalIdentifier.external_identifier_id)
     ).all()
+    room_mappings = session.scalars(
+        select(SiteRoomMapping).where(SiteRoomMapping.site_id == deployment.site_id)
+    ).all()
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
@@ -156,6 +160,18 @@ def build_snapshot(
         starts_at=event.starts_at,
         ends_at=event.ends_at,
         timezone=event.timezone,
+        room_configuration={
+            "mappings": [
+                {
+                    "imported_label": item.imported_label,
+                    "normalized_imported_label": item.normalized_imported_label,
+                    "mapping_status": item.mapping_status,
+                    "target_room_id": str(item.target_room_id) if item.target_room_id else None,
+                    "target_room_label": item.target_room_label,
+                }
+                for item in room_mappings
+            ]
+        },
         people=[
             PersonProfile(
                 person_id=item.person.person_id,

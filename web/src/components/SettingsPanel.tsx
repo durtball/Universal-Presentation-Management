@@ -8,7 +8,6 @@ export function SettingsPanel({ central }: { central: boolean }) {
     usePreferences();
   const session = useSession();
   const [open, setOpen] = useState(false);
-  const [token, setToken] = useState("");
   return (
     <>
       <button
@@ -83,46 +82,26 @@ export function SettingsPanel({ central }: { central: boolean }) {
                 </small>
               </fieldset>
               {central && (
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    session.setAdminToken(token);
-                    setToken("");
-                  }}
-                >
-                  <fieldset>
-                    <legend>Temporary administrator session</legend>
-                    <p className="muted">
-                      Until full authentication is implemented, enter the
-                      existing Central admin token. It is kept only for this
-                      browser tab.
-                    </p>
-                    <label className="field">
-                      Admin token
-                      <input
-                        className="input"
-                        type="password"
-                        autoComplete="off"
-                        value={token}
-                        onChange={(event) => setToken(event.target.value)}
-                      />
-                    </label>
-                    <div className="button-row">
-                      <button className="button button--primary" type="submit">
-                        Start session
-                      </button>
-                      {session.adminToken && (
-                        <button
-                          className="button"
-                          type="button"
-                          onClick={() => session.setAdminToken(null)}
-                        >
-                          End session
-                        </button>
-                      )}
-                    </div>
-                  </fieldset>
-                </form>
+                <fieldset>
+                  <legend>Administrator session</legend>
+                  <p className="muted">
+                    {session.user
+                      ? `Signed in as ${session.user.display_name} (${session.user.username}).`
+                      : "Not signed in."}
+                  </p>
+                  {session.user && (
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={async () => {
+                        await session.logout();
+                        setOpen(false);
+                      }}
+                    >
+                      Log out
+                    </button>
+                  )}
+                </fieldset>
               )}
               <footer>
                 <button

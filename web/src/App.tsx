@@ -11,9 +11,11 @@ import { EventDetailRoute } from "./pages/central/EventDetailRoute";
 import { Events } from "./pages/central/Events";
 import { EventScoped } from "./pages/central/EventScoped";
 import { Imports } from "./pages/central/Imports";
+import { Login } from "./pages/central/Login";
 import { People } from "./pages/central/People";
 import { Sites } from "./pages/central/Sites";
-import { SiteOverview, SiteProgram, SiteStorage } from "./pages/site/SitePages";
+import { RoomMappings } from "./pages/central/RoomMappings";
+import { SiteOverview, SiteProgram, SiteRooms, SiteStorage } from "./pages/site/SitePages";
 
 export function App({ deployment }: { deployment: Deployment }) {
   return (
@@ -32,8 +34,11 @@ function CentralApp() {
     }
   }, []);
   return (
-    <Shell deployment="central" context={health.data}>
-      <Routes>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="*" element={
+        <Shell deployment="central" context={health.data}>
+          <Routes>
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/admin" element={<Dashboard />} />
         <Route path="/admin/sites" element={<Sites />} />
@@ -53,9 +58,12 @@ function CentralApp() {
           element={<EventScoped type="presentations" />}
         />
         <Route path="/admin/imports" element={<Imports />} />
+        <Route path="/admin/room-mappings" element={<RoomMappings />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
-      </Routes>
-    </Shell>
+          </Routes>
+        </Shell>
+      } />
+    </Routes>
   );
 }
 function SiteApp() {
@@ -83,6 +91,7 @@ function SiteApp() {
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/admin" element={<SiteOverview />} />
         <Route path="/admin/program" element={<SiteProgram />} />
+        <Route path="/admin/rooms" element={<SiteRooms />} />
         <Route path="/admin/storage" element={<SiteStorage />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>

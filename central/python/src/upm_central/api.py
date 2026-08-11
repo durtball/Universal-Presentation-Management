@@ -4,16 +4,26 @@ import base64
 import hashlib
 import hmac
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from upm_central.auth import (
+    authenticate,
+    bootstrap_administrator,
+    create_browser_session,
+    csrf_matches,
+    hash_password,
+    resolve_browser_session,
+    rotate_csrf,
+    verify_password,
+)
 from upm_central.config import CentralDatabaseSettings
 from upm_central.event_deployments import (
     create_deployment,
@@ -23,6 +33,7 @@ from upm_central.event_deployments import (
 )
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import (
+    AdminSession,
     AuditRecord,
     Event,
     EventDeployment,
@@ -31,11 +42,18 @@ from upm_central.persistence.models import (
     SiteCredential,
     SiteEnrollmentClaim,
     SiteManagedSetting,
+    SiteRoomMapping,
     SyncCursor,
     SyncSequence,
     utc_now,
 )
-from upm_central.program import require_aware, validate_timezone
+from upm_central.persistence.models import Session as ProgramSession
+from upm_central.program import (
+    normalize_text,
+    require_aware,
+    touch_event_program,
+    validate_timezone,
+)
 from upm_central.program_api import register_program_routes
 from upm_central.sync import (
     apply_site_event,
@@ -93,6 +111,27 @@ class DeploymentCreate(BaseModel):
     site_id: UUID
 
 
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: Annotated[str, Field(min_length=1, max_length=255)]
+    password: Annotated[str, Field(min_length=1, max_length=1024)]
+
+
+class RoomMappingWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    site_id: UUID
+    imported_label: Annotated[str, Field(min_length=1, max_length=255)]
+    target_room_id: UUID | None = None
+    target_room_label: Annotated[str | None, Field(max_length=255)] = None
+    mapping_status: Literal["mapped", "unmapped", "conflict"] = "mapped"
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current_password: Annotated[str, Field(min_length=1, max_length=1024)]
+    new_password: Annotated[str, Field(min_length=12, max_length=1024)]
+
+
 def bearer_token(authorization: str | None) -> str | None:
     if not authorization or not authorization.startswith("Bearer "):
         return None
@@ -109,7 +148,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def limit_sync_requests(request: Request, call_next):
-        if request.method in {"POST", "PUT"} and request.url.path.startswith("/api/v1/"):
+        if request.method in {"POST", "PUT"} and request.url.path.startswith("/api/v1/sync"):
             body = await request.body()
             if len(body) > get_settings().sync_max_payload_bytes:
                 return JSONResponse(status_code=413, content={"detail": "request_too_large"})
@@ -131,6 +170,14 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             cached = create_central_session_factory(engine)
             resources["engine"] = engine
             resources["factory"] = cached
+        if not resources.get("administrator_bootstrapped"):
+            with cached.begin() as bootstrap_session:
+                bootstrap_administrator(
+                    bootstrap_session,
+                    get_settings().bootstrap_admin_username,
+                    get_settings().bootstrap_admin_password,
+                )
+            resources["administrator_bootstrapped"] = True
         return cached
 
     def db() -> Iterator[Session]:
@@ -139,13 +186,111 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
 
     DbSession = Annotated[Session, Depends(db)]
 
-    def require_admin(x_upm_admin_token: Annotated[str | None, Header()] = None) -> None:
-        if not x_upm_admin_token or not hmac.compare_digest(
-            x_upm_admin_token, get_settings().admin_token
-        ):
+    def require_admin(
+        request: Request,
+        session: DbSession,
+        upm_admin_session: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+        x_upm_admin_token: Annotated[str | None, Header()] = None,
+    ) -> None:
+        # Retain the documented automation credential without exposing it to the browser UI.
+        if x_upm_admin_token and hmac.compare_digest(x_upm_admin_token, get_settings().admin_token):
+            request.state.admin_actor = "central-automation"
+            return
+        browser_session = resolve_browser_session(session, upm_admin_session)
+        if browser_session is None:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED, detail="administrator authentication required"
             )
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and not csrf_matches(
+            browser_session, x_csrf_token
+        ):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="invalid CSRF token")
+        request.state.admin_actor = str(browser_session.user.admin_user_id)
+
+    def session_view(item: AdminSession, csrf_token: str | None = None) -> dict[str, object]:
+        result: dict[str, object] = {
+            "authenticated": True,
+            "user": {
+                "user_id": item.user.admin_user_id,
+                "username": item.user.username,
+                "display_name": item.user.display_name,
+                "roles": item.user.roles,
+            },
+            "expires_at": item.expires_at,
+        }
+        if csrf_token:
+            result["csrf_token"] = csrf_token
+        return result
+
+    @app.post("/api/v1/auth/login", tags=["authentication"])
+    def login(payload: LoginRequest, request: Request, response: Response, session: DbSession):
+        user = authenticate(session, payload.username, payload.password)
+        if user is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid username or password")
+        item, token, csrf_token = create_browser_session(
+            session,
+            user,
+            lifetime=timedelta(hours=get_settings().admin_session_hours),
+            remote_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        response.set_cookie(
+            "upm_admin_session",
+            token,
+            httponly=True,
+            secure=get_settings().admin_cookie_secure,
+            samesite="lax",
+            max_age=get_settings().admin_session_hours * 3600,
+            path="/",
+        )
+        return session_view(item, csrf_token)
+
+    @app.get("/api/v1/auth/session", tags=["authentication"])
+    def current_session(
+        session: DbSession, upm_admin_session: Annotated[str | None, Cookie()] = None
+    ) -> dict[str, object]:
+        item = resolve_browser_session(session, upm_admin_session)
+        if item is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="not authenticated")
+        return session_view(item, rotate_csrf(item))
+
+    @app.post("/api/v1/auth/logout", tags=["authentication"])
+    def logout(
+        response: Response,
+        session: DbSession,
+        upm_admin_session: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        item = resolve_browser_session(session, upm_admin_session)
+        if item is not None:
+            if not csrf_matches(item, x_csrf_token):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, detail="invalid CSRF token")
+            item.revoked_at = utc_now()
+        response.delete_cookie("upm_admin_session", path="/")
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return response
+
+    @app.post(
+        "/api/v1/auth/password",
+        dependencies=[Depends(require_admin)],
+        tags=["authentication"],
+    )
+    def change_password(
+        payload: PasswordChange,
+        session: DbSession,
+        upm_admin_session: Annotated[str | None, Cookie()] = None,
+    ) -> dict[str, object]:
+        item = resolve_browser_session(session, upm_admin_session)
+        if item is None or not verify_password(payload.current_password, item.user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="current password is invalid")
+        item.user.password_hash = hash_password(payload.new_password)
+        item.user.password_changed_at = utc_now()
+        item.user.revision += 1
+        for other in item.user.sessions:
+            if other.admin_session_id != item.admin_session_id and other.revoked_at is None:
+                other.revoked_at = utc_now()
+        return {"password_changed": True}
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
@@ -520,6 +665,105 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                 .order_by(EventDeployment.created_at)
             )
         ]
+
+    @app.get(
+        "/api/v1/admin/events/{event_id}/room-mappings",
+        dependencies=[Depends(require_admin)],
+        tags=["program"],
+    )
+    def list_room_mappings(
+        event_id: UUID, site_id: UUID, session: DbSession
+    ) -> list[dict[str, object]]:
+        if session.get(Event, event_id) is None or session.get(Site, site_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event or site not found")
+        labels = list(
+            dict.fromkeys(
+                value
+                for value in session.scalars(
+                    select(ProgramSession.location_name)
+                    .where(
+                        ProgramSession.event_id == event_id,
+                        ProgramSession.location_name.is_not(None),
+                    )
+                    .order_by(ProgramSession.location_name)
+                )
+                if value
+            )
+        )
+        existing = {
+            item.normalized_imported_label: item
+            for item in session.scalars(
+                select(SiteRoomMapping).where(SiteRoomMapping.site_id == site_id)
+            )
+        }
+        result = []
+        for label in labels:
+            normalized = normalize_text(label) or ""
+            mapping = existing.get(normalized)
+            result.append(
+                {
+                    "imported_label": label,
+                    "normalized_imported_label": normalized,
+                    "mapping_status": mapping.mapping_status if mapping else "unmapped",
+                    "target_room_id": mapping.target_room_id if mapping else None,
+                    "target_room_label": mapping.target_room_label if mapping else None,
+                    "revision": mapping.revision if mapping else None,
+                }
+            )
+        return result
+
+    @app.put(
+        "/api/v1/admin/room-mappings",
+        dependencies=[Depends(require_admin)],
+        tags=["program"],
+    )
+    def save_room_mapping(payload: RoomMappingWrite, session: DbSession) -> dict[str, object]:
+        if session.get(Site, payload.site_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="site not found")
+        if payload.mapping_status == "mapped" and not (
+            payload.target_room_id and payload.target_room_label
+        ):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="mapped rooms require the Site room UUID and label",
+            )
+        normalized = normalize_text(payload.imported_label)
+        mapping = session.scalar(
+            select(SiteRoomMapping).where(
+                SiteRoomMapping.site_id == payload.site_id,
+                SiteRoomMapping.normalized_imported_label == normalized,
+            )
+        )
+        if mapping is None:
+            mapping = SiteRoomMapping(
+                site_id=payload.site_id,
+                imported_label=payload.imported_label,
+                normalized_imported_label=normalized,
+            )
+            session.add(mapping)
+        else:
+            mapping.revision += 1
+        mapping.target_room_id = payload.target_room_id
+        mapping.target_room_label = payload.target_room_label
+        mapping.mapping_status = payload.mapping_status
+        mapping.confirmed_by = "central-admin"
+        session.flush()
+        affected_events = session.scalars(
+            select(Event)
+            .join(ProgramSession, ProgramSession.event_id == Event.event_id)
+            .where(func.lower(ProgramSession.location_name) == normalized)
+            .distinct()
+        ).all()
+        for event in affected_events:
+            touch_event_program(session, event)
+        return {
+            "site_room_mapping_id": mapping.site_room_mapping_id,
+            "site_id": mapping.site_id,
+            "imported_label": mapping.imported_label,
+            "mapping_status": mapping.mapping_status,
+            "target_room_id": mapping.target_room_id,
+            "target_room_label": mapping.target_room_label,
+        }
 
     @app.post(
         "/api/v1/admin/events/{event_id}/deployments",

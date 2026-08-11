@@ -331,9 +331,12 @@ def test_enrollment_authentication_protocol_and_revocation_api() -> None:
         engine.dispose()
 
 
-def test_central_to_site_setting_is_persisted_and_duplicate_safe() -> None:
-    engine = create_engine(SITE_URL)
+def test_central_to_site_setting_is_persisted_and_duplicate_safe(
+    isolated_site_factory: sessionmaker[Session],
+) -> None:
+    engine = isolated_site_factory.kw["bind"]
     event_id = new_uuid7()
+    recovery_event_id = new_uuid7()
     envelope = SyncEventEnvelope(
         event_id=event_id,
         event_type="site.configuration.updated",
@@ -360,13 +363,34 @@ def test_central_to_site_setting_is_persisted_and_duplicate_safe() -> None:
             duplicate = apply_central_event(session, envelope)
             assert duplicate.accepted and duplicate.duplicate
             assert session.get(ManagedSetting, "sync-proof").value == {"enabled": True}
+            session.execute(
+                SyncCursor.__table__.delete().where(SyncCursor.direction == "central_to_site")
+            )
+        recovery = envelope.model_copy(
+            update={
+                "event_id": recovery_event_id,
+                "source_sequence": 2,
+                "payload": {
+                    "setting_key": "sync-proof",
+                    "value": {"enabled": False},
+                    "revision": 2,
+                },
+            }
+        )
+        with Session(engine) as session, session.begin():
+            assert apply_central_event(session, recovery).accepted
+            assert session.get(SyncCursor, "central_to_site").last_sequence == 2
+            assert session.get(ManagedSetting, "sync-proof").value == {"enabled": False}
     finally:
         with Session(engine) as session, session.begin():
             session.execute(
                 ManagedSetting.__table__.delete().where(ManagedSetting.setting_key == "sync-proof")
             )
-            session.execute(SyncReceipt.__table__.delete().where(SyncReceipt.event_id == event_id))
+            session.execute(
+                SyncReceipt.__table__.delete().where(
+                    SyncReceipt.event_id.in_([event_id, recovery_event_id])
+                )
+            )
             session.execute(
                 SyncCursor.__table__.delete().where(SyncCursor.direction == "central_to_site")
             )
-        engine.dispose()

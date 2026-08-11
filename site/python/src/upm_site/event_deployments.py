@@ -29,6 +29,8 @@ from upm_site.persistence.models import (
     PresentationPresenter,
     PresentationSession,
     PresentationVersion,
+    Room,
+    RoomAssignment,
     SessionParticipant,
     utc_now,
 )
@@ -255,6 +257,51 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             local.revision = max(local.revision, item.central_revision)
             local.sync_state = SyncState.SYNCHRONIZED
     session.flush()
+    room_mappings = {
+        str(mapping.get("normalized_imported_label") or ""): mapping
+        for mapping in snapshot.room_configuration.get("mappings", [])
+        if isinstance(mapping, dict)
+    }
+    mapped_rooms = 0
+    unresolved_rooms = 0
+    room_conflicts = 0
+    for item in snapshot.sessions:
+        if not item.location_name:
+            continue
+        normalized_label = " ".join(item.location_name.strip().casefold().split())
+        mapping = room_mappings.get(normalized_label)
+        if not mapping or mapping.get("mapping_status") != "mapped":
+            unresolved_rooms += 1
+            continue
+        try:
+            room_id = UUID(str(mapping.get("target_room_id")))
+        except (TypeError, ValueError):
+            unresolved_rooms += 1
+            continue
+        room = session.get(Room, room_id)
+        if room is None or room.site_id != snapshot.site_id:
+            unresolved_rooms += 1
+            continue
+        assignment = session.scalar(
+            select(RoomAssignment).where(
+                RoomAssignment.session_id == item.session_id,
+                RoomAssignment.active.is_(True),
+            )
+        )
+        if assignment and assignment.room_id != room_id:
+            room_conflicts += 1
+            continue
+        if assignment is None:
+            session.add(
+                RoomAssignment(
+                    room_id=room_id,
+                    session_id=item.session_id,
+                    starts_at=item.starts_at,
+                    ends_at=item.ends_at,
+                    active=True,
+                )
+            )
+        mapped_rooms += 1
     for item in snapshot.sessions:
         for participant in item.participants:
             local = session.get(SessionParticipant, participant.session_participant_id)
@@ -399,7 +446,9 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         "presentation_sessions": sum(len(item.sessions) for item in snapshot.presentations),
         "presentation_presenters": sum(len(item.presenters) for item in snapshot.presentations),
         "external_identifiers": len(snapshot.external_identifiers),
-        "rooms": 0,
+        "rooms": mapped_rooms,
+        "unresolved_rooms": unresolved_rooms,
+        "room_conflicts": room_conflicts,
     }
 
 
