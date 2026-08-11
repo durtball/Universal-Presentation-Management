@@ -31,6 +31,31 @@ export interface PersonRecord extends Row {
   organization?: string;
   professional_title?: string;
 }
+export type ImportStatus =
+  | "uploaded"
+  | "parsing"
+  | "staged"
+  | "review"
+  | "ready"
+  | "committing"
+  | "committed"
+  | "failed"
+  | "cancelled";
+export interface ImportBatch extends Row {
+  import_batch_id: string;
+  event_id: string;
+  filename: string;
+  status: ImportStatus;
+  row_count: number;
+  valid_count: number;
+  warning_count: number;
+  conflict_count: number;
+  committed_count: number;
+  rejected_count: number;
+  failure_summary?: string | null;
+  created_at: string;
+  committed_at?: string | null;
+}
 export interface SiteRegistration extends Row {
   site_id: string;
   display_name: string;

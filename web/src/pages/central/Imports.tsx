@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { centralApi } from "../../api/central";
-import type { Row } from "../../api/types";
+import type { ImportBatch } from "../../api/types";
 import { DataTable, type Column } from "../../components/DataTable";
 import { EventPicker } from "../../components/EventPicker";
 import { Empty, ErrorSurface, Loading } from "../../components/Feedback";
@@ -10,11 +10,26 @@ import { useApi } from "../../hooks/useApi";
 import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
 
-const columns: Column<Row>[] = [
+function reviewInformation(batch: ImportBatch) {
+  if (batch.failure_summary) return batch.failure_summary;
+  if (batch.status !== "review") return undefined;
+  const validationRows = Math.max(
+    0,
+    batch.row_count - batch.valid_count - batch.warning_count,
+  );
+  const details = [
+    validationRows ? `${validationRows} validation issue rows` : undefined,
+    batch.warning_count ? `${batch.warning_count} warnings` : undefined,
+    batch.conflict_count ? `${batch.conflict_count} conflicts` : undefined,
+  ].filter(Boolean);
+  return details.join(", ") || "Review required";
+}
+
+const columns: Column<ImportBatch>[] = [
   {
     key: "name",
     label: "Source file",
-    value: (row) => String(row.original_filename ?? row.filename ?? ""),
+    value: (row) => row.filename,
   },
   {
     key: "status",
@@ -25,8 +40,38 @@ const columns: Column<Row>[] = [
   {
     key: "rows",
     label: "Rows",
-    value: (row) => row.row_count ?? row.total_rows,
+    value: (row) => row.row_count,
     numeric: true,
+  },
+  {
+    key: "valid",
+    label: "Valid",
+    value: (row) => row.valid_count,
+    numeric: true,
+  },
+  {
+    key: "warnings",
+    label: "Warnings",
+    value: (row) => row.warning_count,
+    numeric: true,
+  },
+  {
+    key: "conflicts",
+    label: "Conflicts",
+    value: (row) => row.conflict_count,
+    numeric: true,
+  },
+  {
+    key: "rejected",
+    label: "Rejected",
+    value: (row) => row.rejected_count,
+    numeric: true,
+  },
+  {
+    key: "review",
+    label: "Review information",
+    value: reviewInformation,
+    sortable: false,
   },
   {
     key: "created",
@@ -49,21 +94,27 @@ export function Imports() {
   const [file, setFile] = useState<File>();
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<unknown>();
+  const [stagedBatch, setStagedBatch] = useState<ImportBatch>();
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!file || !selected) return;
+    const form = event.currentTarget as HTMLFormElement;
     setUploading(true);
     setUploadError(undefined);
+    setStagedBatch(undefined);
+    let batch: ImportBatch;
     try {
-      await api.uploadImport(selected, file);
-      setFile(undefined);
-      (event.currentTarget as HTMLFormElement).reset();
-      batches.refresh();
+      batch = await api.uploadImport(selected, file);
     } catch (error) {
       setUploadError(error);
-    } finally {
       setUploading(false);
+      return;
     }
+    setStagedBatch(batch);
+    setFile(undefined);
+    form.reset();
+    batches.refresh();
+    setUploading(false);
   };
   return (
     <Page
@@ -107,6 +158,13 @@ export function Imports() {
                   {uploading ? "Staging…" : "Upload and stage"}
                 </button>
               </form>
+              {stagedBatch ? (
+                <p className="success-message" role="status">
+                  <strong>Import staged successfully.</strong>{" "}
+                  {stagedBatch.filename} is {stagedBatch.status} with{" "}
+                  {stagedBatch.row_count} rows.
+                </p>
+              ) : null}
               {uploadError != null ? <ErrorSurface error={uploadError} /> : null}
             </Panel>
             {batches.loading ? (

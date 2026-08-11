@@ -2,6 +2,7 @@ import { createCentralClient } from "./client";
 import type {
   EventRecord,
   Health,
+  ImportBatch,
   PersonRecord,
   Row,
   SiteRecord,
@@ -26,13 +27,13 @@ export function centralApi(token: string | null) {
     presentations: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/presentations`, signal),
     imports: (eventId: string, signal?: AbortSignal) =>
-      get<Row[]>(`/api/v1/admin/events/${eventId}/imports`, signal),
+      get<ImportBatch[]>(`/api/v1/admin/events/${eventId}/imports`, signal),
     importDetail: (batchId: string, signal?: AbortSignal) =>
-      get<Row>(`/api/v1/admin/imports/${batchId}`, signal),
+      get<ImportBatch>(`/api/v1/admin/imports/${batchId}`, signal),
     uploadImport: (eventId: string, file: File) => {
       const form = new FormData();
       form.append("file", file);
-      return client.request<Row>(`/api/v1/admin/events/${eventId}/imports`, {
+      return client.request<ImportBatch>(`/api/v1/admin/events/${eventId}/imports`, {
         method: "POST",
         body: form,
         timeoutMs: 60_000,
