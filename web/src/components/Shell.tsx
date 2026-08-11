@@ -51,7 +51,11 @@ export function Shell({
     };
   }, []);
   const current =
-    nav.find(([path]) => path === location.pathname)?.[1] ?? "Administration";
+    nav.find(
+      ([path]) =>
+        path === location.pathname ||
+        (path !== "/admin" && location.pathname.startsWith(`${path}/`)),
+    )?.[1] ?? "Administration";
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">

@@ -38,6 +38,7 @@ from upm_site.persistence.models import (
     Session as SiteSession,
 )
 from upm_site.persistence.queue import SiteQueue
+from upm_site.room_operations import reconcile_program_room_assignments
 
 
 def _status_event(
@@ -302,6 +303,9 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 )
             )
         mapped_rooms += 1
+    local_mapping_counts = reconcile_program_room_assignments(session, snapshot.event_id)
+    mapped_rooms = local_mapping_counts["mapped_sessions"]
+    unresolved_rooms = local_mapping_counts["unmapped_sessions"]
     for item in snapshot.sessions:
         for participant in item.participants:
             local = session.get(SessionParticipant, participant.session_participant_id)

@@ -506,12 +506,38 @@ class Room(SiteRecordMixin, SiteBase):
         ForeignKey("events.event_id", ondelete="RESTRICT")
     )
     label: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sync_state: Mapped[SyncState] = mapped_column(
         upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
     )
 
     session_assignments: Mapped[list["RoomAssignment"]] = relationship(back_populates="room")
     device_assignments: Mapped[list["DeviceAssignment"]] = relationship(back_populates="room")
+
+
+class ProgramRoomMapping(SiteRecordMixin, SiteBase):
+    """Site-authoritative reconciliation of an imported location label to a physical room."""
+
+    __tablename__ = "program_room_mappings"
+    __table_args__ = (
+        UniqueConstraint("event_id", "normalized_imported_label"),
+        Index("ix_site_program_room_mappings_room", "room_id"),
+    )
+
+    program_room_mapping_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    imported_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_imported_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    room_id: Mapped[UUID | None] = mapped_column(ForeignKey("rooms.room_id", ondelete="RESTRICT"))
+    confirmed_by: Mapped[str] = mapped_column(String(255), default="site-operator", nullable=False)
 
 
 class RoomAssignment(SiteRecordMixin, SiteBase):
@@ -521,6 +547,13 @@ class RoomAssignment(SiteRecordMixin, SiteBase):
             "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at",
             name="valid_time_range",
         ),
+        Index(
+            "uq_site_room_assignments_active_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+        Index("ix_site_room_assignments_active_room", "room_id", "active"),
     )
 
     room_assignment_id: Mapped[UUID] = mapped_column(
@@ -531,6 +564,9 @@ class RoomAssignment(SiteRecordMixin, SiteBase):
     )
     session_id: Mapped[UUID] = mapped_column(
         ForeignKey("sessions.session_id", ondelete="RESTRICT"), nullable=False
+    )
+    program_room_mapping_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("program_room_mappings.program_room_mapping_id", ondelete="RESTRICT")
     )
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -562,6 +598,19 @@ class DeviceAssignment(SiteRecordMixin, SiteBase):
         CheckConstraint(
             "ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at",
             name="valid_time_range",
+        ),
+        Index(
+            "uq_site_device_assignments_active_room_role",
+            "room_id",
+            "role",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+        Index(
+            "uq_site_device_assignments_active_device",
+            "device_id",
+            unique=True,
+            postgresql_where=text("active"),
         ),
     )
 

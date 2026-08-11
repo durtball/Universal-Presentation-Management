@@ -86,3 +86,21 @@ def test_site_storage_constraints_are_present() -> None:
         assert "ck_site_storage_targets_threshold_order" in constraints
     finally:
         engine.dispose()
+
+
+def test_site_room_operations_migration_is_applied() -> None:
+    engine = create_engine(SITE_URL)
+    try:
+        inspector = inspect(engine)
+        assert "program_room_mappings" in inspector.get_table_names()
+        room_columns = {item["name"] for item in inspector.get_columns("rooms")}
+        assert {"enabled", "archived_at"} <= room_columns
+        assignment_columns = {item["name"] for item in inspector.get_columns("room_assignments")}
+        assert "program_room_mapping_id" in assignment_columns
+        room_indexes = {item["name"] for item in inspector.get_indexes("room_assignments")}
+        device_indexes = {item["name"] for item in inspector.get_indexes("device_assignments")}
+        assert "uq_site_room_assignments_active_session" in room_indexes
+        assert "uq_site_device_assignments_active_room_role" in device_indexes
+        assert "uq_site_device_assignments_active_device" in device_indexes
+    finally:
+        engine.dispose()

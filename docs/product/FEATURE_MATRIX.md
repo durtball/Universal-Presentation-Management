@@ -1,6 +1,6 @@
 # UPM Feature Matrix
 
-**Evidence snapshot:** `codex/project-knowledge-foundation`, based on implementation through commit `eb4f0e1` (2026-08-10). This table describes working repository behavior, not the full target in the [Master Architecture](../architecture/UPM_MASTER_ARCHITECTURE.md).
+**Evidence snapshot:** `codex/site-rooms-operational-workflow` on 2026-08-10. This table describes working repository behavior, not the full target in the [Master Architecture](../architecture/UPM_MASTER_ARCHITECTURE.md).
 
 Status meanings:
 
@@ -29,13 +29,14 @@ Status meanings:
 | Sync | Bidirectional protocol-v1 transport | Yes | Yes | N/A | No | Implemented | Durable sequences, outboxes, receipts, checkpoints, retry, auth, and duplicate handling exist. |
 | Sync | Event deployment snapshots | Yes | Yes | N/A | No | Implemented | Immutable complete revisions, skip-ahead, stale rejection, revocation, and status events are tested. |
 | Sync | WAN outage/reconnect behavior | Yes | Yes | N/A | No | Implemented | Integration tests cover interruption, queued delivery, duplicate application, and recovery. |
-| Rooms | Site room catalog | Visibility via mappings | API + UI | No | No | Partial | Site can create/list rooms; broader room operations and readiness do not exist. |
-| Rooms | Imported label to Site room reconciliation | API + UI | Snapshot apply | No | No | Implemented | Per-Site mappings preserve Site authority and expose unmapped/conflict states. |
-| Rooms | Device assignments and readiness | Model only | Model only | No | No | Foundation | Models exist; enrollment/control/status workflow is not implemented. |
+| Rooms | Site room catalog and operational workspace | Visibility via mappings | API + UI | No | No | Implemented | Site can create, edit, enable, archive, list, and open rooms by stable UUID; detail joins mappings, schedule, presentations, media state, and assigned endpoints. |
+| Rooms | Imported label to Site room reconciliation | API + UI | API + UI + snapshot apply | No | No | Implemented | Site-authoritative mappings resolve normalized imported labels to physical room UUIDs, preserve explicit unmapped state, reconcile projected sessions, and survive newer snapshots. |
+| Rooms | Primary/backup device assignments and readiness | Model only | API + UI | No | No | Partial | Site validates enrolled active devices and maintains authoritative assignment history. No Agent enrollment runtime, heartbeat telemetry, diagnostics, control, or failover exists, so endpoint status is explicitly unavailable. |
 | Media | Configurable Site storage targets | Replica model | API/model | No | No | Partial | Model, safe resolution, health API, thresholds, and read-only UI exist; target administration is absent. |
 | Media | Streaming Site ingestion/finalization | Metadata only | API/worker state | No | No | Implemented | Hashing, same-target staging, no-replace publication, recovery, cleanup, and tests exist. |
 | Media | Entry-linked vs open-file ingestion | Metadata only | API | No | No | Implemented | Distinct categories and optional presentation-version linking are tested. |
-| Media | Full server file browser | No | No | No | No | Planned | No browse/rename/move/copy/delete/search workflow or media listing UI. |
+| Media | Managed media catalog | Metadata only | API + UI | No | No | Partial | Site lists managed media with presentation/version links, type, size, availability, ingestion, processing, and checksum state; it is read-only. |
+| Media | Full server file browser | No | No | No | No | Planned | No filesystem browse/rename/move/copy/delete/search workflow or file actions. |
 | Media | Preview/download/print | No | No | No | No | Planned | Metadata/status APIs do not expose file delivery or previews. |
 | Conversion | Linked PDF derivative workflow | Models/jobs | Models/jobs | No | No | Foundation | Derivative model and durable job primitives exist; converter/status/UI/retry handler do not. |
 | Jobs | Durable processing/transfer/outbox queues | Yes | Yes | N/A | No | Implemented | Claim, lease, heartbeat, retry, priority, capability, idempotency, and isolation are tested. |
@@ -52,6 +53,6 @@ Status meanings:
 | Browser UI | Glass/Classic themes | Yes | Yes | N/A | No | Implemented | Shared semantic theme tokens, persistence, and UI tests exist. |
 | Browser UI | Full/Reduced/Off motion | Yes | Yes | N/A | No | Implemented | `prefers-reduced-motion` behavior and persistence are tested. |
 | Storage | Backup and restore workflow | No | No | No | No | Planned | Deployment guidance warns about backups; no tested end-to-end backup/restore tooling exists. |
-| Observability | Service/worker/queue/device/transfer console | Basic | Basic | No | No | Foundation | Health and some sync/storage state exist; comprehensive operational observability does not. |
+| Observability | Service/worker/queue/device/transfer console | Basic | Room-oriented partial | No | No | Partial | Site dashboard surfaces persisted room, missing/error presentation, failed processing/transfer job, and upcoming-session conditions. Comprehensive service, queue, transfer, and device telemetry remains absent. |
 | Deployment | Controlled Central Linux deployment | Yes | Compose only | N/A | No | Partial | Central deployment script exists; equivalent Site production update/backup runbook is incomplete. |
 | AI/LLM | Optional GPU-capable work | Queue capability | Queue capability | N/A | No | Foundation | Capability matching supports `gpu`; no AI/LLM or GPU handler is implemented. |

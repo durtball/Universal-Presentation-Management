@@ -133,5 +133,110 @@ export interface SiteRoom extends Row {
   site_id: string;
   event_id?: string;
   label: string;
-  revision?: number;
+  enabled: boolean;
+  archived: boolean;
+  archived_at?: string | null;
+  revision: number;
+  endpoints: Record<string, RoomEndpoint>;
+  summary: RoomSummary;
+}
+export interface RoomEndpoint extends Row {
+  device_id: string;
+  name: string;
+  role?: string;
+  status: string;
+  online?: boolean | null;
+  last_heartbeat?: string | null;
+  ip_address?: string | null;
+  interface?: string | null;
+  version?: string | null;
+  telemetry_available: boolean;
+}
+export interface RoomSummary extends Row {
+  health: string;
+  session_count: number;
+  presentation_count: number;
+  ready_count: number;
+  missing_count: number;
+  error_count: number;
+  processing_count: number;
+  transfer_pending_count: number;
+  next_session?: { session_id: string; title: string; starts_at: string } | null;
+}
+export interface RoomDetail extends SiteRoom {
+  program_mappings: ProgramLocation[];
+  sessions: RoomSession[];
+}
+export interface ProgramLocation extends Row {
+  event_id: string;
+  imported_label: string;
+  normalized_imported_label: string;
+  program_room_mapping_id?: string | null;
+  mapping_status: "mapped" | "unmapped" | "conflict";
+  mapping_source?: "site" | "deployment" | null;
+  session_count: number;
+  room?: { room_id: string; label: string; enabled: boolean; archived: boolean } | null;
+}
+export interface RoomPresentation extends Row {
+  presentation_id: string;
+  title: string;
+  presentation_code?: string;
+  scheduled_at?: string;
+  workflow_status: string;
+  processing_status: string;
+  operational_status: string;
+  media: SiteMedia[];
+}
+export interface RoomSession extends Row {
+  session_id: string;
+  event_id: string;
+  title: string;
+  starts_at?: string;
+  ends_at?: string;
+  location_name?: string;
+  status: string;
+  presenters: Array<{ name: string; role: string }>;
+  presentations: RoomPresentation[];
+}
+export interface SiteDevice extends RoomEndpoint {
+  site_id: string;
+  assignable: boolean;
+  assigned_room_id?: string | null;
+}
+export interface SiteMedia extends Row {
+  media_object_id: string;
+  file?: string;
+  filename?: string;
+  presentation?: { presentation_id: string; title: string } | null;
+  version_number?: number | null;
+  size_bytes?: number | null;
+  mime_type?: string | null;
+  category?: string;
+  availability: string;
+  processing_state?: string | null;
+  processing_error?: string | null;
+  ingested_at: string;
+  checksum?: string | null;
+  hash_algorithm?: string | null;
+  transfer_state?: string | null;
+}
+export interface OperationsDashboard extends Row {
+  rooms: SiteRoom[];
+  attention: Array<{
+    severity: string;
+    kind: string;
+    room_id?: string;
+    room_label?: string;
+    count?: number;
+    message: string;
+  }>;
+  upcoming_sessions: Array<{
+    session_id: string;
+    title: string;
+    starts_at: string;
+    room_id: string;
+    room_label: string;
+  }>;
+  failed_processing_jobs: number;
+  failed_transfer_jobs: number;
 }

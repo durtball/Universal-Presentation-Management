@@ -1,6 +1,17 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../../api/client";
-import type { Row, SiteDeployment, SiteRoom, StorageTarget } from "../../api/types";
+import type {
+  RoomDetail,
+  RoomEndpoint,
+  RoomPresentation,
+  Row,
+  SiteDeployment,
+  SiteDevice,
+  SiteMedia,
+  SiteRoom,
+  StorageTarget,
+} from "../../api/types";
 import { siteApi } from "../../api/site";
 import { DataTable, type Column } from "../../components/DataTable";
 import {
@@ -42,13 +53,13 @@ const deploymentColumns: Column<SiteDeployment>[] = [
 ];
 export function SiteOverview() {
   const result = useApi(async (signal) => {
-    const [health, registration, deployments, storage] = await Promise.all([
+    const [health, registration, deployments, operations] = await Promise.all([
       siteApi.health(signal),
       siteApi.registration(signal),
       siteApi.deployments(signal),
-      siteApi.storage(signal),
+      siteApi.operations(signal),
     ]);
-    return { health, registration, deployments, storage };
+    return { health, registration, deployments, operations };
   }, []);
   return (
     <Page
@@ -102,9 +113,9 @@ export function SiteOverview() {
                 detail={`${data.registration.pending_outbound} queued`}
               />
               <Metric
-                label="Storage targets"
-                value={data.storage.length}
-                detail={`${data.storage.filter((item) => item.available).length} available`}
+                label="Rooms requiring attention"
+                value={data.operations.attention.length}
+                detail={`${data.operations.rooms.length} configured rooms`}
               />
             </div>
             {data.registration.last_error && (
@@ -117,6 +128,62 @@ export function SiteOverview() {
                 rowKey={(row) => row.deployment_id}
                 label="Event deployments"
               />
+            </Panel>
+            <Panel
+              title="Operator attention"
+              description="Persisted room, media, processing, and transfer conditions that need action now."
+            >
+              {data.operations.attention.length ? (
+                <DataTable
+                  rows={data.operations.attention}
+                  columns={[
+                    {
+                      key: "severity",
+                      label: "Severity",
+                      value: (row) => row.severity,
+                      render: (row) => <StatusBadge value={row.severity} />,
+                    },
+                    {
+                      key: "room",
+                      label: "Room",
+                      value: (row) => row.room_label || "Site-wide",
+                    },
+                    { key: "condition", label: "Condition", value: (row) => row.message },
+                  ]}
+                  rowKey={(row) => `${row.kind}-${row.room_id || "site"}`}
+                  label="operational attention"
+                  actions={(row) =>
+                    row.room_id ? (
+                      <Link className="button button--small" to={`/admin/rooms/${row.room_id}`}>
+                        Open room
+                      </Link>
+                    ) : null
+                  }
+                />
+              ) : (
+                <Empty title="No room problems detected" />
+              )}
+            </Panel>
+            <Panel title="Upcoming room sessions">
+              {data.operations.upcoming_sessions.length ? (
+                <DataTable
+                  rows={data.operations.upcoming_sessions}
+                  columns={[
+                    { key: "room", label: "Room", value: (row) => row.room_label },
+                    { key: "session", label: "Session", value: (row) => row.title },
+                    {
+                      key: "start",
+                      label: "Starts",
+                      value: (row) => row.starts_at,
+                      render: (row) => when(row.starts_at),
+                    },
+                  ]}
+                  rowKey={(row) => row.session_id}
+                  label="upcoming room sessions"
+                />
+              ) : (
+                <Empty title="No upcoming mapped sessions" />
+              )}
             </Panel>
           </>
         )}
@@ -277,8 +344,54 @@ function ProgramTables({ program }: { program: Row }) {
 
 const roomColumns: Column<SiteRoom>[] = [
   { key: "label", label: "Physical room", value: (row) => row.label },
-  { key: "id", label: "Room UUID", value: (row) => row.room_id },
-  { key: "event", label: "Event scope", value: (row) => row.event_id || "All events" },
+  {
+    key: "health",
+    label: "Health",
+    value: (row) => row.summary.health,
+    render: (row) => <StatusBadge value={row.summary.health} />,
+  },
+  {
+    key: "primary",
+    label: "Primary",
+    value: (row) => row.endpoints.primary?.status || "unassigned",
+    render: (row) => <StatusBadge value={row.endpoints.primary?.status || "unassigned"} />,
+  },
+  {
+    key: "backup",
+    label: "Backup",
+    value: (row) => row.endpoints.backup?.status || "unassigned",
+    render: (row) => <StatusBadge value={row.endpoints.backup?.status || "unassigned"} />,
+  },
+  {
+    key: "presentations",
+    label: "Presentations",
+    value: (row) => row.summary.presentation_count,
+    numeric: true,
+  },
+  {
+    key: "ready",
+    label: "Ready",
+    value: (row) => row.summary.ready_count,
+    numeric: true,
+  },
+  {
+    key: "missing",
+    label: "Missing",
+    value: (row) => row.summary.missing_count,
+    numeric: true,
+  },
+  {
+    key: "errors",
+    label: "Errors",
+    value: (row) => row.summary.error_count,
+    numeric: true,
+  },
+  {
+    key: "next",
+    label: "Next session",
+    value: (row) => row.summary.next_session?.starts_at,
+    render: (row) => when(row.summary.next_session?.starts_at),
+  },
 ];
 
 export function SiteRooms() {
@@ -301,8 +414,8 @@ export function SiteRooms() {
     }
   };
   return (
-    <Page eyebrow="Site resources" title="Rooms"
-      description="Create and inspect physical Site rooms used by Central room reconciliation.">
+    <Page eyebrow="Site operations" title="Rooms"
+      description="Room-centered program, media, endpoint, and readiness state from this Site.">
       <Panel title="Create a Site room" description="Spreadsheet labels do not create physical rooms automatically.">
         <form className="inline-form" onSubmit={submit}>
           <label className="field">Room label<input className="input" required value={label}
@@ -317,11 +430,443 @@ export function SiteRooms() {
         <ErrorSurface error={rooms.error} onRetry={rooms.refresh} />
       ) : rooms.data?.length ? (
         <DataTable rows={rooms.data} columns={roomColumns} rowKey={(row) => row.room_id}
-          label="Site rooms" />
+          label="Site rooms" actions={(room) => (
+            <Link className="button button--small" to={`/admin/rooms/${room.room_id}`}>
+              Open
+            </Link>
+          )} />
       ) : <Empty title="No physical rooms configured" />}
     </Page>
   );
 }
+
+export function SiteRoomDetail() {
+  const { roomId = "" } = useParams();
+  const room = useApi((signal) => siteApi.room(roomId, signal), [roomId]);
+  const deployments = useApi((signal) => siteApi.deployments(signal), []);
+  const devices = useApi((signal) => siteApi.devices(signal), []);
+  const [eventId, setEventId] = useState("");
+  const selectedEvent = eventId || deployments.data?.[0]?.central_event_id || "";
+  const locations = useApi(
+    (signal) =>
+      selectedEvent
+        ? siteApi.programLocations(selectedEvent, signal)
+        : Promise.resolve([]),
+    [selectedEvent],
+  );
+  const [locationLabel, setLocationLabel] = useState("");
+  const [mapping, setMapping] = useState(false);
+  const [mappingError, setMappingError] = useState<unknown>();
+  useEffect(() => {
+    if (
+      locations.data?.length &&
+      !locations.data.some((item) => item.imported_label === locationLabel)
+    ) {
+      setLocationLabel(locations.data[0].imported_label);
+    }
+  }, [locations.data, locationLabel]);
+  const saveMapping = async (targetRoomId: string | null) => {
+    if (!selectedEvent || !locationLabel) return;
+    setMapping(true);
+    setMappingError(undefined);
+    try {
+      await siteApi.mapProgramLocation(selectedEvent, locationLabel, targetRoomId);
+      room.refresh();
+      locations.refresh();
+    } catch (caught) {
+      setMappingError(caught);
+    } finally {
+      setMapping(false);
+    }
+  };
+  return (
+    <PageState {...room} onRetry={room.refresh}>
+      {(detail) => (
+        <Page
+          eyebrow="Room operations"
+          title={detail.label}
+          description={`Stable room UUID ${detail.room_id}`}
+          actions={
+            <Link className="button" to="/admin/rooms">
+              Back to rooms
+            </Link>
+          }
+        >
+          <RoomMetrics room={detail} />
+          <RoomEditor room={detail} onSaved={room.refresh} />
+          <div className="panel-grid panel-grid--two">
+            <Panel
+              title="Program room mapping"
+              description="Imported location labels remain labels until this Site maps them to the physical room UUID."
+            >
+              {!deployments.data?.length ? (
+                <Empty title="No deployed program" />
+              ) : (
+                <div className="stack">
+                  <label className="field">
+                    Deployed event
+                    <select
+                      className="input"
+                      value={selectedEvent}
+                      onChange={(event) => {
+                        setEventId(event.target.value);
+                        setLocationLabel("");
+                      }}
+                    >
+                      {deployments.data.map((item) => (
+                        <option key={item.deployment_id} value={item.central_event_id}>
+                          {item.event_name || item.central_event_id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {locations.loading ? (
+                    <Loading />
+                  ) : locations.error ? (
+                    <ErrorSurface error={locations.error} onRetry={locations.refresh} />
+                  ) : locations.data?.length ? (
+                    <>
+                      <label className="field">
+                        Imported program location
+                        <select
+                          className="input"
+                          value={locationLabel}
+                          onChange={(event) => setLocationLabel(event.target.value)}
+                        >
+                          {locations.data.map((item) => (
+                            <option
+                              key={item.normalized_imported_label}
+                              value={item.imported_label}
+                            >
+                              {item.imported_label} — {item.mapping_status}
+                              {item.room ? ` to ${item.room.label}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="button-row">
+                        <button
+                          className="button button--primary"
+                          disabled={mapping || !locationLabel || detail.archived || !detail.enabled}
+                          onClick={() => saveMapping(detail.room_id)}
+                        >
+                          {mapping ? "Saving…" : `Map to ${detail.label}`}
+                        </button>
+                        <button
+                          className="button"
+                          disabled={mapping || !locationLabel}
+                          onClick={() => saveMapping(null)}
+                        >
+                          Mark unmapped
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <Empty title="No imported room locations in this program" />
+                  )}
+                  {mappingError != null ? <ErrorSurface error={mappingError} /> : null}
+                </div>
+              )}
+            </Panel>
+            <Panel
+              title="Presentation Agents"
+              description="Assignments are Site-server authoritative. Endpoint telemetry is shown only when reported."
+            >
+              <div className="stack">
+                <EndpointAssignment
+                  room={detail}
+                  role="primary"
+                  devices={devices.data || []}
+                  onSaved={() => {
+                    room.refresh();
+                    devices.refresh();
+                  }}
+                />
+                <EndpointAssignment
+                  room={detail}
+                  role="backup"
+                  devices={devices.data || []}
+                  onSaved={() => {
+                    room.refresh();
+                    devices.refresh();
+                  }}
+                />
+                {devices.error ? <ErrorSurface error={devices.error} onRetry={devices.refresh} /> : null}
+                {!devices.loading && !devices.error && !devices.data?.length ? (
+                  <p className="muted">
+                    No enrolled Agent endpoints exist yet. Agent enrollment and heartbeat reporting
+                    remain outside this milestone.
+                  </p>
+                ) : null}
+              </div>
+            </Panel>
+          </div>
+          <Panel
+            title="Room schedule"
+            description="Sessions and presentations are read from the retained Site-local deployment projection."
+          >
+            {detail.sessions.length ? (
+              <div className="schedule-list">
+                {detail.sessions.map((session) => (
+                  <section className="schedule-session" key={session.session_id}>
+                    <header>
+                      <div>
+                        <span className="eyebrow">
+                          {when(session.starts_at)} — {when(session.ends_at)}
+                        </span>
+                        <h4>{session.title}</h4>
+                        <p className="muted">
+                          {session.presenters.length
+                            ? session.presenters.map((item) => item.name).join(", ")
+                            : "No presenters supplied"}
+                        </p>
+                      </div>
+                      <StatusBadge value={session.status} />
+                    </header>
+                    {session.presentations.length ? (
+                      <DataTable
+                        rows={session.presentations}
+                        columns={presentationColumns}
+                        rowKey={(item) => item.presentation_id}
+                        label={`${session.title} presentations`}
+                      />
+                    ) : (
+                      <Empty title="No presentations associated with this session" />
+                    )}
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <Empty title="No sessions mapped to this room">
+                Map a deployed program location to this room to build its operational schedule.
+              </Empty>
+            )}
+          </Panel>
+        </Page>
+      )}
+    </PageState>
+  );
+}
+
+function RoomMetrics({ room }: { room: RoomDetail }) {
+  return (
+    <div className="metrics">
+      <Metric label="Room health" value={<StatusBadge value={room.summary.health} />} />
+      <Metric
+        label="Presentations"
+        value={room.summary.presentation_count}
+        detail={`${room.summary.ready_count} ready`}
+      />
+      <Metric
+        label="Problems"
+        value={room.summary.missing_count + room.summary.error_count}
+        detail={`${room.summary.missing_count} missing · ${room.summary.error_count} errors`}
+      />
+      <Metric
+        label="Next session"
+        value={room.summary.next_session ? when(room.summary.next_session.starts_at) : "None"}
+        detail={room.summary.next_session?.title}
+      />
+    </div>
+  );
+}
+
+function RoomEditor({ room, onSaved }: { room: RoomDetail; onSaved: () => void }) {
+  const [label, setLabel] = useState(room.label);
+  const [enabled, setEnabled] = useState(room.enabled);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<unknown>();
+  useEffect(() => {
+    setLabel(room.label);
+    setEnabled(room.enabled);
+  }, [room.label, room.enabled]);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(undefined);
+    try {
+      await siteApi.updateRoom(room.room_id, { label, enabled, revision: room.revision });
+      onSaved();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const archive = async () => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      await siteApi.updateRoom(room.room_id, {
+        archived: !room.archived,
+        revision: room.revision,
+      });
+      onSaved();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Panel title="Room identity and lifecycle">
+      <form className="inline-form" onSubmit={save}>
+        <label className="field">
+          Room label
+          <input
+            className="input"
+            required
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        </label>
+        <label className="check-field">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={room.archived}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          Enabled for operations
+        </label>
+        <button className="button button--primary" disabled={saving || !label.trim()}>
+          Save room
+        </button>
+        <button className="button" type="button" disabled={saving} onClick={archive}>
+          {room.archived ? "Restore room" : "Archive room"}
+        </button>
+      </form>
+      {error != null ? <ErrorSurface error={error} /> : null}
+    </Panel>
+  );
+}
+
+function EndpointAssignment({
+  room,
+  role,
+  devices,
+  onSaved,
+}: {
+  room: RoomDetail;
+  role: "primary" | "backup";
+  devices: SiteDevice[];
+  onSaved: () => void;
+}) {
+  const current = room.endpoints[role];
+  const candidates = devices.filter(
+    (device) => device.assignable || device.device_id === current?.device_id,
+  );
+  const [deviceId, setDeviceId] = useState(current?.device_id || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<unknown>();
+  useEffect(() => setDeviceId(current?.device_id || ""), [current?.device_id]);
+  const save = async (value: string | null) => {
+    setSaving(true);
+    setError(undefined);
+    try {
+      await siteApi.assignDevice(room.room_id, role, value);
+      onSaved();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <section className="endpoint-card">
+      <header>
+        <strong>{role === "primary" ? "Primary Presentation Agent" : "Backup Presentation Agent"}</strong>
+        <StatusBadge value={current?.status || "unassigned"} />
+      </header>
+      {current ? <EndpointFacts endpoint={current} /> : null}
+      <div className="inline-form">
+        <label className="field">
+          Endpoint
+          <select
+            className="input"
+            value={deviceId}
+            onChange={(event) => setDeviceId(event.target.value)}
+          >
+            <option value="">Select an enrolled endpoint</option>
+            {candidates.map((device) => (
+              <option key={device.device_id} value={device.device_id}>
+                {device.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="button button--primary"
+          disabled={saving || !deviceId || room.archived || !room.enabled}
+          onClick={() => save(deviceId)}
+        >
+          Assign
+        </button>
+        {current ? (
+          <button className="button" disabled={saving} onClick={() => save(null)}>
+            Clear
+          </button>
+        ) : null}
+      </div>
+      {error != null ? <ErrorSurface error={error} /> : null}
+    </section>
+  );
+}
+
+function EndpointFacts({ endpoint }: { endpoint: RoomEndpoint }) {
+  return (
+    <dl className="fact-grid">
+      <div><dt>Name</dt><dd>{endpoint.name}</dd></div>
+      <div><dt>UUID</dt><dd><code>{endpoint.device_id}</code></dd></div>
+      <div><dt>Last heartbeat</dt><dd>{endpoint.telemetry_available ? when(endpoint.last_heartbeat) : "Not reported"}</dd></div>
+      <div><dt>Network</dt><dd>{endpoint.ip_address || "Not reported"}</dd></div>
+      <div><dt>Interface</dt><dd>{endpoint.interface || "Not reported"}</dd></div>
+      <div><dt>Version</dt><dd>{endpoint.version || "Not reported"}</dd></div>
+    </dl>
+  );
+}
+
+const presentationColumns: Column<RoomPresentation>[] = [
+  { key: "title", label: "Presentation", value: (row) => row.title },
+  {
+    key: "scheduled",
+    label: "Scheduled",
+    value: (row) => row.scheduled_at,
+    render: (row) => when(row.scheduled_at),
+  },
+  {
+    key: "state",
+    label: "Operational media state",
+    value: (row) => row.operational_status,
+    render: (row) => <StatusBadge value={row.operational_status} />,
+  },
+  {
+    key: "file",
+    label: "Current file",
+    value: (row) => row.media[0]?.filename || "No linked media",
+  },
+  {
+    key: "version",
+    label: "Version",
+    value: (row) => row.media[0]?.version_number,
+    numeric: true,
+  },
+  {
+    key: "size",
+    label: "Size",
+    value: (row) => row.media[0]?.size_bytes,
+    render: (row) => bytes(row.media[0]?.size_bytes),
+    numeric: true,
+  },
+  {
+    key: "processing",
+    label: "Processing",
+    value: (row) => row.media[0]?.processing_state || row.processing_status,
+    render: (row) => (
+      <StatusBadge value={row.media[0]?.processing_state || row.processing_status} />
+    ),
+  },
+];
 
 const storageColumns: Column<StorageTarget>[] = [
   { key: "name", label: "Target", value: (row) => row.display_name },
@@ -355,26 +900,95 @@ const storageColumns: Column<StorageTarget>[] = [
   },
   { key: "detail", label: "Detail", value: (row) => row.detail },
 ];
+const mediaColumns: Column<SiteMedia>[] = [
+  { key: "file", label: "File", value: (row) => row.file },
+  {
+    key: "presentation",
+    label: "Linked presentation",
+    value: (row) => row.presentation?.title || "Open file",
+  },
+  {
+    key: "version",
+    label: "Version",
+    value: (row) => row.version_number,
+    numeric: true,
+  },
+  { key: "type", label: "Type", value: (row) => row.mime_type || row.category },
+  {
+    key: "size",
+    label: "Size",
+    value: (row) => row.size_bytes,
+    render: (row) => bytes(row.size_bytes),
+    numeric: true,
+  },
+  {
+    key: "state",
+    label: "Authoritative state",
+    value: (row) => row.availability,
+    render: (row) => <StatusBadge value={row.availability} />,
+  },
+  {
+    key: "processing",
+    label: "Processing",
+    value: (row) => row.processing_state,
+    render: (row) => <StatusBadge value={row.processing_state || "not_started"} />,
+  },
+  {
+    key: "ingested",
+    label: "Ingested",
+    value: (row) => row.ingested_at,
+    render: (row) => when(row.ingested_at),
+  },
+  { key: "checksum", label: "SHA-256", value: (row) => row.checksum },
+];
 export function SiteStorage() {
-  const result = useApi((signal) => siteApi.storage(signal), []);
+  const result = useApi(async (signal) => {
+    const [targets, media] = await Promise.all([
+      siteApi.storage(signal),
+      siteApi.media(signal),
+    ]);
+    return { targets, media };
+  }, []);
   return (
     <Page
       eyebrow="Media ingestion"
       title="Storage"
-      description="Capacity and write readiness for Site-authoritative media targets."
+      description="Managed Site media and capacity from authoritative storage records."
     >
       <PageState
         {...result}
-        empty={(rows) => !rows.length}
         onRetry={result.refresh}
       >
-        {(rows) => (
-          <DataTable
-            rows={rows}
-            columns={storageColumns}
-            rowKey={(row) => row.storage_target_id}
-            label="Storage targets"
-          />
+        {(data) => (
+          <div className="panel-grid">
+            <Panel title="Storage targets">
+              {data.targets.length ? (
+                <DataTable
+                  rows={data.targets}
+                  columns={storageColumns}
+                  rowKey={(row) => row.storage_target_id}
+                  label="Storage targets"
+                />
+              ) : (
+                <Empty title="No storage targets configured" />
+              )}
+            </Panel>
+            <Panel
+              title="Managed media"
+              description="This is the UPM media catalog, not an unrestricted host filesystem browser."
+            >
+              {data.media.length ? (
+                <DataTable
+                  rows={data.media}
+                  columns={mediaColumns}
+                  rowKey={(row) => row.media_object_id}
+                  label="managed media"
+                />
+              ) : (
+                <Empty title="No managed media ingested" />
+              )}
+            </Panel>
+          </div>
         )}
       </PageState>
     </Page>
