@@ -1,6 +1,6 @@
 # UPM Implementation Status
 
-**Evidence snapshot:** repository state through commit `eb4f0e1` on 2026-08-10, before this documentation update. This document reports current engineering evidence. It does not redefine the [target architecture](../architecture/UPM_MASTER_ARCHITECTURE.md).
+**Evidence snapshot:** `codex/site-rooms-operational-workflow` on 2026-08-10. This document reports current engineering evidence. It does not redefine the [target architecture](../architecture/UPM_MASTER_ARCHITECTURE.md).
 
 ## Completed foundations and working milestones
 
@@ -31,7 +31,7 @@
 - Upload streams into same-target staging while calculating SHA-256, validates size/capacity, publishes without replacement, and commits availability plus an inspection job.
 - Original metadata is preserved; equal filenames/hashes do not collapse identity; open-file and presentation-linked ingestion remain distinct.
 - Cleanup and reconciliation cover interrupted upload and publication/database failure windows. APIs expose metadata, status, and storage-target health.
-- The Site UI lists target capacity/health, but it does not list media or provide file-browser actions.
+- The Site UI lists target capacity/health and a read-only managed-media catalog with presentation/version links, size/type, availability, ingestion, processing, and checksum state. It does not expose filesystem-browser or mutation actions.
 
 ### Central/Site registration and synchronization
 
@@ -58,10 +58,11 @@
 
 ### Rooms
 
-- Site Room and RoomAssignment persistence exists. Site API/UI can create and list physical rooms.
+- Site Room and RoomAssignment persistence exists. Site API/UI can create, list, edit, enable, archive, and open physical rooms by stable UUID.
 - Central stores per-Site mappings from normalized imported room label to an existing Site room UUID/label.
-- Snapshot application records mapped, unmapped, missing-room, and conflict outcomes without allowing Central to invent a physical room or overwrite a deliberate Site assignment.
-- Complete room/device readiness and operational coordination are not implemented.
+- Site also owns explicit per-event imported-label mappings. Operators can map or deliberately unmap a deployed program location; reconciliation links projected sessions without treating labels as identity or allowing Central to overwrite Site authority.
+- A room workspace shows chronological sessions, presentations, current version/media metadata, processing state, and derived operational state. The dashboard surfaces persisted missing/error presentation, failed job, and upcoming-session conditions.
+- Site API/UI assigns enrolled active devices to primary and backup roles with server-authoritative history and duplicate-active-assignment constraints. Because no Agent runtime reports heartbeat/network/interface/version data, the UI truthfully marks telemetry as unavailable.
 
 ### Authentication and browser foundation
 
@@ -72,10 +73,10 @@
 
 ## Known Operational Gaps
 
-- **Room operations:** no complete `Room -> Sessions -> Presentations -> Media -> Endpoints -> Status` readiness workflow, device assignment UI, or room-operator console.
-- **Agent and room clients:** no Windows executable, secure device enrollment, assignment recovery, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
+- **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
+- **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
 - **Transfer execution:** TransferJob persistence exists, but no resumable/chunked protocol, bandwidth controller, sender/receiver handler, or progress UI exists.
-- **File management:** no full Site media list, file browser, rename/move/copy/guarded delete/search, preview, download, print, or entry-linking UI.
+- **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
 - **PDF conversion:** derivative data structures and job primitives exist, but no converter, retry handler, status surface, preview, or room delivery workflow exists.
 - **Storage administration:** health/capacity is visible, but browser create/edit/disable/primary-target configuration and media-placement policy are not implemented.
 - **Program editing:** backend CRUD is broader than the browser; Sessions, Presenters, Presentations, and People pages are primarily read views after import.
@@ -83,7 +84,7 @@
 - **Authentication/RBAC:** Site admin authentication, Operator/restricted roles, user management, recovery, rotation UI, and a complete authorization policy are absent.
 - **Kiosk:** no presenter check-in/upload/branding client or Site management workflow.
 - **Digital Signage:** architecture is documented, but no independent stack, PostgreSQL schema, sync/deployment path, scheduler, renderer, device, or administration workflow exists.
-- **Diagnostics/observability:** no integrated iperf/latency/throughput Agent diagnostics, comprehensive service/worker/queue dashboard, transfer telemetry, or device fleet view.
+- **Diagnostics/observability:** room-oriented persisted conditions are visible, but there is no integrated iperf/latency/throughput Agent diagnostics, comprehensive service/worker/queue dashboard, transfer telemetry, live endpoint status, or device fleet view.
 - **Backup/recovery:** backup expectations and migration cautions are documented, but independent tested Central/Site backup and restore automation/runbooks are incomplete.
 - **Deployment parity:** Central has a controlled Linux deployment script; the standalone production Site and Signage deployment/update procedures are not equivalent yet.
 - **Presentation runtime:** no high-fidelity PowerPoint/Google Slides/Canva/Figma Slides/Keynote/PDF runtime adapters or control plane.
@@ -105,6 +106,8 @@
 - Jobs: [`durable-jobs-and-outbox.md`](durable-jobs-and-outbox.md)
 - Frontend: [`frontend.md`](frontend.md)
 - Media: [`site/media/README.md`](../../site/media/README.md)
+- Site room operations: `site/python/src/upm_site/room_operations.py`, `site/python/src/upm_site/operations_api.py`, and `web/src/pages/site/SitePages.tsx`
+- Room-operations coverage: `tests/python/test_site_room_operations_postgres.py` and `web/src/test/siteRooms.test.tsx`
 - Tests: `tests/python/` and `web/src/test/`
 
 ## Decisions that should receive future ADRs

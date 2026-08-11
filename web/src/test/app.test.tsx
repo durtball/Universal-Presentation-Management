@@ -49,6 +49,14 @@ test("renders Site operational data and offline-local autonomy", async () => {
             }
           : path.includes("storage")
             ? []
+            : path.includes("operations/dashboard")
+              ? {
+                  rooms: [],
+                  attention: [],
+                  upcoming_sessions: [],
+                  failed_processing_jobs: 0,
+                  failed_transfer_jobs: 0,
+                }
             : [];
     return new Response(JSON.stringify(data), {
       status: 200,

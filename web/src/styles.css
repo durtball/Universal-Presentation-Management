@@ -351,6 +351,51 @@
     display: grid;
     gap: 18px;
   }
+  .panel-grid--two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .stack,
+  .schedule-list {
+    display: grid;
+    gap: 16px;
+  }
+  .schedule-session,
+  .endpoint-card {
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+    background: var(--surface-soft);
+  }
+  .schedule-session > header,
+  .endpoint-card > header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .schedule-session h4 {
+    margin: 4px 0;
+    font-size: 18px;
+  }
+  .fact-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin: 0 0 14px;
+  }
+  .fact-grid div {
+    min-width: 0;
+  }
+  .fact-grid dt {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  .fact-grid dd {
+    margin: 3px 0 0;
+    overflow-wrap: anywhere;
+  }
   .metrics {
     display: grid;
     grid-template-columns: repeat(4, minmax(170px, 1fr));
@@ -487,6 +532,13 @@
   }
   .field--inline {
     width: min(460px, 100%);
+  }
+  .check-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 0;
+    font-weight: 650;
   }
   .inline-form {
     display: flex;
@@ -728,6 +780,9 @@
   .metrics {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
   }
+  .panel-grid--two {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 760px) {
   .app-shell {
@@ -753,6 +808,9 @@
     padding: 18px 12px;
   }
   .metrics {
+    grid-template-columns: 1fr;
+  }
+  .fact-grid {
     grid-template-columns: 1fr;
   }
   .page-header,

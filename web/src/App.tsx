@@ -15,7 +15,13 @@ import { Login } from "./pages/central/Login";
 import { People } from "./pages/central/People";
 import { Sites } from "./pages/central/Sites";
 import { RoomMappings } from "./pages/central/RoomMappings";
-import { SiteOverview, SiteProgram, SiteRooms, SiteStorage } from "./pages/site/SitePages";
+import {
+  SiteOverview,
+  SiteProgram,
+  SiteRoomDetail,
+  SiteRooms,
+  SiteStorage,
+} from "./pages/site/SitePages";
 
 export function App({ deployment }: { deployment: Deployment }) {
   return (
@@ -92,6 +98,7 @@ function SiteApp() {
         <Route path="/admin" element={<SiteOverview />} />
         <Route path="/admin/program" element={<SiteProgram />} />
         <Route path="/admin/rooms" element={<SiteRooms />} />
+        <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
         <Route path="/admin/storage" element={<SiteStorage />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>
