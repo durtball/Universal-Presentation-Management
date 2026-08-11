@@ -30,15 +30,16 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.ForeignKeyConstraint(
-            ["site_id"], ["sites.site_id"],
-            name=op.f("fk_central_site_room_mappings_site_id_sites"), ondelete="CASCADE"
+            ["site_id"],
+            ["sites.site_id"],
+            name=op.f("fk_central_site_room_mappings_site_id_sites"),
+            ondelete="CASCADE",
         ),
-        sa.PrimaryKeyConstraint(
-            "site_room_mapping_id", name=op.f("pk_central_site_room_mappings")
-        ),
+        sa.PrimaryKeyConstraint("site_room_mapping_id", name=op.f("pk_central_site_room_mappings")),
         sa.UniqueConstraint(
-            "site_id", "normalized_imported_label",
-            name=op.f("uq_central_site_room_mappings_site_id")
+            "site_id",
+            "normalized_imported_label",
+            name=op.f("uq_central_site_room_mappings_site_id"),
         ),
     )
 

@@ -59,9 +59,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("admin_session_id", name=op.f("pk_central_admin_sessions")),
         sa.UniqueConstraint("token_hash", name=op.f("uq_central_admin_sessions_token_hash")),
     )
-    op.create_index(
-        "ix_admin_sessions_expiry", "admin_sessions", ["expires_at"], unique=False
-    )
+    op.create_index("ix_admin_sessions_expiry", "admin_sessions", ["expires_at"], unique=False)
 
 
 def downgrade() -> None:
