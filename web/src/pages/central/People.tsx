@@ -19,8 +19,8 @@ const columns: Column<PersonRecord>[] = [
   { key: "email", label: "Primary email", value: (row) => row.primary_email },
 ];
 export function People() {
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi((signal) => api.people(signal), [api]);
   return (
     <Page

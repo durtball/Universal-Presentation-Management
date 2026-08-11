@@ -4,6 +4,17 @@ export interface Health {
   service: string;
   status: string;
 }
+export interface AuthSession {
+  authenticated: true;
+  user: {
+    user_id: string;
+    username: string;
+    display_name: string;
+    roles: string[];
+  };
+  expires_at: string;
+  csrf_token?: string;
+}
 export interface EventRecord extends Row {
   event_id: string;
   name: string;
@@ -55,6 +66,27 @@ export interface ImportBatch extends Row {
   failure_summary?: string | null;
   created_at: string;
   committed_at?: string | null;
+  source_headers?: string[];
+  detected_mapping?: Record<string, string>;
+  sample_rows?: Row[];
+  preview_counts?: Record<string, number>;
+  rows?: ImportRow[];
+}
+export interface ImportRow extends Row {
+  import_row_id: string;
+  source_row_number: number;
+  raw_values: Row;
+  normalized_values: Row;
+  entity_type: string;
+  validation_state: string;
+  match_outcome?: string;
+  proposed_person_id?: string;
+  candidate_person_ids: string[];
+  match_reason?: string;
+  conflict_state?: string;
+  resolution_action?: string;
+  committed_entity_ids: Row;
+  issues: Array<{ severity: string; code: string; field_name?: string; message: string }>;
 }
 export interface SiteRegistration extends Row {
   site_id: string;
@@ -88,4 +120,18 @@ export interface SiteDeployment extends Row {
   central_connected: boolean;
   summary_counts?: Row;
   failure_reason?: string;
+}
+export interface RoomMapping extends Row {
+  imported_label: string;
+  normalized_imported_label: string;
+  mapping_status: "mapped" | "unmapped" | "conflict";
+  target_room_id?: string;
+  target_room_label?: string;
+}
+export interface SiteRoom extends Row {
+  room_id: string;
+  site_id: string;
+  event_id?: string;
+  label: string;
+  revision?: number;
 }

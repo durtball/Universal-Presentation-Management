@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { centralApi } from "../../api/central";
-import type { ImportBatch } from "../../api/types";
+import type { ImportBatch, ImportRow } from "../../api/types";
 import { DataTable, type Column } from "../../components/DataTable";
 import { EventPicker } from "../../components/EventPicker";
 import { Empty, ErrorSurface, Loading } from "../../components/Feedback";
@@ -81,8 +81,8 @@ const columns: Column<ImportBatch>[] = [
   },
 ];
 export function Imports() {
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const events = useApi((signal) => api.events(signal), [api]);
   const [eventId, setEventId] = useState("");
   const selected = eventId || events.data?.[0]?.event_id || "";
@@ -95,6 +95,16 @@ export function Imports() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<unknown>();
   const [stagedBatch, setStagedBatch] = useState<ImportBatch>();
+  const [selectedBatchId, setSelectedBatchId] = useState("");
+  const detail = useApi(
+    (signal) =>
+      selectedBatchId
+        ? api.importDetail(selectedBatchId, signal)
+        : Promise.resolve(undefined),
+    [api, selectedBatchId],
+  );
+  const [actionError, setActionError] = useState<unknown>();
+  const [committing, setCommitting] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!file || !selected) return;
@@ -111,6 +121,7 @@ export function Imports() {
       return;
     }
     setStagedBatch(batch);
+    setSelectedBatchId(String(batch.import_batch_id));
     setFile(undefined);
     form.reset();
     batches.refresh();
@@ -177,11 +188,119 @@ export function Imports() {
                 columns={columns}
                 rowKey={(row) => String(row.import_batch_id)}
                 label="Import batches"
+                actions={(row) => (
+                  <button
+                    className="button button--small"
+                    onClick={() => setSelectedBatchId(String(row.import_batch_id))}
+                  >
+                    Review
+                  </button>
+                )}
               />
             )}
+            {selectedBatchId ? (
+              <Panel title="Import review" description="Detected columns, source samples, validation, identity reconciliation, preview, and commit use the persisted staging record.">
+                {detail.loading ? <Loading /> : detail.error ? (
+                  <ErrorSurface error={detail.error} onRetry={detail.refresh} />
+                ) : detail.data ? (
+                  <ImportReview
+                    batch={detail.data}
+                    busy={committing}
+                    onResolve={async (row, action, personId) => {
+                      setActionError(undefined);
+                      try {
+                        await api.reconcileImportRow(row.import_row_id, action, personId);
+                        detail.refresh();
+                        batches.refresh();
+                      } catch (error) { setActionError(error); }
+                    }}
+                    onCommit={async () => {
+                      setCommitting(true);
+                      setActionError(undefined);
+                      try {
+                        await api.commitImport(selectedBatchId);
+                        detail.refresh();
+                        batches.refresh();
+                      } catch (error) { setActionError(error); }
+                      finally { setCommitting(false); }
+                    }}
+                  />
+                ) : null}
+                {actionError != null ? <ErrorSurface error={actionError} /> : null}
+              </Panel>
+            ) : null}
           </>
         )}
       </AdminBoundary>
     </Page>
+  );
+}
+
+function ImportReview({
+  batch,
+  busy,
+  onResolve,
+  onCommit,
+}: {
+  batch: ImportBatch;
+  busy: boolean;
+  onResolve: (row: ImportRow, action: string, personId?: string) => Promise<void>;
+  onCommit: () => Promise<void>;
+}) {
+  const counts = batch.preview_counts ?? {};
+  return (
+    <div className="review-stack">
+      <div className="metrics">
+        {Object.entries(counts).map(([key, value]) => (
+          <div className="metric" key={key}>
+            <span>{key.replaceAll("_", " ")}</span><strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div>
+        <h3>Detected column mapping</h3>
+        <div className="mapping-grid">
+          {Object.entries(batch.detected_mapping ?? {}).map(([source, target]) => (
+            <div key={source}><code>{source}</code><span>→</span><code>{target}</code></div>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h3>Source sample</h3>
+        <pre className="source-sample">{JSON.stringify(batch.sample_rows ?? [], null, 2)}</pre>
+      </div>
+      <DataTable
+        rows={batch.rows ?? []}
+        columns={[
+          { key: "row", label: "Source row", value: (row) => row.source_row_number, numeric: true },
+          { key: "entity", label: "Entity", value: (row) => row.entity_type },
+          { key: "state", label: "Validation", value: (row) => row.validation_state,
+            render: (row) => <StatusBadge value={row.validation_state} /> },
+          { key: "match", label: "Identity", value: (row) => row.match_outcome || "—" },
+          { key: "issues", label: "Warnings / errors", value: (row) => row.issues.map((issue) => issue.message).join("; ") || "—" },
+        ]}
+        rowKey={(row) => row.import_row_id}
+        label="Staged source rows"
+        actions={(row) => row.conflict_state ? (
+          <div className="button-row">
+            {row.candidate_person_ids?.map((personId) => (
+              <button className="button button--small" key={personId}
+                onClick={() => void onResolve(row, "choose_person", personId)}>
+                Match {personId.slice(0, 8)}…
+              </button>
+            ))}
+            <button className="button button--small" onClick={() => void onResolve(row, "create_person")}>Create new</button>
+            <button className="button button--small" onClick={() => void onResolve(row, "reject")}>Reject row</button>
+          </div>
+        ) : null}
+      />
+      <div className="button-row">
+        <button className="button button--primary" disabled={busy || batch.status === "committed" || batch.conflict_count > 0}
+          onClick={() => void onCommit()}>
+          {batch.status === "committed" ? "Import committed" : busy ? "Committing…" : "Commit import"}
+        </button>
+        <StatusBadge value={batch.status} />
+      </div>
+    </div>
   );
 }

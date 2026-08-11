@@ -48,6 +48,7 @@ from upm_site.persistence.models import (
     OutboxEvent,
     PresentationAsset,
     ProcessingJob,
+    Room,
     StorageTarget,
     SyncCursor,
     utc_now,
@@ -121,6 +122,12 @@ class StorageHealthResponse(BaseModel):
     warning_threshold_reached: bool
     critical_threshold_reached: bool
     detail: str | None
+
+
+class RoomWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: Annotated[str, Field(min_length=1, max_length=255)]
+    event_id: UUID | None = None
 
 
 def _media_response(session: Session, media: MediaObject) -> MediaResponse:
@@ -218,6 +225,40 @@ def create_app(
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.get("/api/v1/rooms", tags=["rooms"])
+    def list_rooms(session: Annotated[Session, Depends(get_session)]) -> list[dict[str, object]]:
+        return [
+            {
+                "room_id": item.room_id,
+                "site_id": item.site_id,
+                "event_id": item.event_id,
+                "label": item.label,
+                "revision": item.revision,
+            }
+            for item in session.scalars(select(Room).order_by(Room.label))
+        ]
+
+    @app.post("/api/v1/rooms", status_code=201, tags=["rooms"])
+    def create_room(
+        payload: RoomWrite, session: Annotated[Session, Depends(transaction)]
+    ) -> dict[str, object]:
+        identity = session.scalar(select(LocalSiteIdentity))
+        if identity is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Site identity is not configured")
+        duplicate = session.scalar(
+            select(Room).where(
+                Room.site_id == identity.site_id, Room.label == payload.label.strip()
+            )
+        )
+        if duplicate:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="room label already exists")
+        room = Room(
+            site_id=identity.site_id, label=payload.label.strip(), event_id=payload.event_id
+        )
+        session.add(room)
+        session.flush()
+        return {"room_id": room.room_id, "site_id": room.site_id, "label": room.label}
 
     @app.post(
         "/api/v1/media/ingestions",

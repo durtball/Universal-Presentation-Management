@@ -13,10 +13,12 @@ const centralNav = [
   ["/admin/presenters", "Presenters"],
   ["/admin/presentations", "Presentations"],
   ["/admin/imports", "Imports"],
+  ["/admin/room-mappings", "Room Mapping"],
 ];
 const siteNav = [
   ["/admin", "Overview"],
   ["/admin/program", "Program"],
+  ["/admin/rooms", "Rooms"],
   ["/admin/storage", "Storage"],
 ];
 

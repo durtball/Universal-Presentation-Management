@@ -764,3 +764,23 @@
     display: none;
   }
 }
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+}
+.login-card {
+  width: min(100%, 28rem);
+  padding: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.3);
+}
+.login-card form { display: grid; gap: 1rem; }
+.brand--login { margin-bottom: 2rem; }
+.review-stack { display: grid; gap: 1.5rem; }
+.mapping-grid { display: grid; gap: .45rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.mapping-grid > div { display: grid; grid-template-columns: 1fr auto 1fr; gap: .5rem; align-items: center; }
+.source-sample { max-height: 18rem; overflow: auto; padding: 1rem; background: var(--surface-soft); }

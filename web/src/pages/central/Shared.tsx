@@ -1,21 +1,14 @@
 import type { ReactNode } from "react";
+import { Navigate, useLocation } from "react-router-dom";
 import { useSession } from "../../state/session";
-import { ErrorSurface } from "../../components/Feedback";
-import { ApiError } from "../../api/client";
+import { Loading } from "../../components/Feedback";
 
 export function AdminBoundary({ children }: { children: ReactNode }) {
   const session = useSession();
-  if (!session.adminToken)
-    return (
-      <ErrorSurface
-        error={
-          new ApiError(
-            "unauthorized",
-            "Open Settings and enter the existing Central administrator token to access protected operational data.",
-          )
-        }
-      />
-    );
+  const location = useLocation();
+  if (session.status === "loading") return <Loading />;
+  if (session.status !== "authenticated")
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   return <>{children}</>;
 }
 export function when(value: unknown) {

@@ -71,8 +71,30 @@ def program_database() -> Iterator[str]:
 def _xlsx_bytes() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["entity_type", "session_title", "session_code"])
-    sheet.append(["session", "Imported XLSX Session", "XLSX-1"])
+    sheet.append(
+        [
+            "Speaker Name",
+            "Speaker Email",
+            "Company",
+            "Session Title",
+            "Session Code",
+            "Presentation Title",
+            "Presentation Code",
+            "Room",
+        ]
+    )
+    sheet.append(
+        [
+            "XLSX Presenter",
+            "xlsx.presenter@example.com",
+            "Example Org",
+            "Imported XLSX Session",
+            "XLSX-S1",
+            "Imported XLSX Presentation",
+            "XLSX-P1",
+            "Grand Ballroom",
+        ]
+    )
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -283,6 +305,23 @@ def test_people_program_import_and_revision_workflow(program_database: str) -> N
         )
         assert xlsx.status_code == 201
         assert xlsx.json()["row_count"] == 1
+        xlsx_batch_id = xlsx.json()["import_batch_id"]
+        xlsx_review = client.get(f"/api/v1/admin/imports/{xlsx_batch_id}", headers=headers).json()
+        assert xlsx_review["preview_counts"]["people_or_presenters"] == 1
+        assert xlsx_review["preview_counts"]["sessions"] == 1
+        assert xlsx_review["preview_counts"]["presentations"] == 1
+        assert xlsx_review["preview_counts"]["unresolved_room_mappings"] == 1
+        xlsx_commit = client.post(f"/api/v1/admin/imports/{xlsx_batch_id}/commit", headers=headers)
+        assert xlsx_commit.status_code == 200
+        xlsx_sessions = client.get(
+            f"/api/v1/admin/events/{second_event_id}/sessions", headers=headers
+        ).json()
+        xlsx_presentations = client.get(
+            f"/api/v1/admin/events/{second_event_id}/presentations", headers=headers
+        ).json()
+        assert xlsx_sessions[0]["location_name"] == "Grand Ballroom"
+        assert xlsx_sessions[0]["presenters"][0]["display_name"] == "XLSX Presenter"
+        assert xlsx_presentations[0]["presenters"][0]["display_name"] == "XLSX Presenter"
         invalid_schedule = client.post(
             f"/api/v1/admin/events/{second_event_id}/imports",
             headers=headers,

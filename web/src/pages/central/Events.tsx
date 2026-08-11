@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { centralApi } from "../../api/central";
 import type { EventRecord } from "../../api/types";
 import { DataTable, type Column } from "../../components/DataTable";
 import { PageState } from "../../components/Feedback";
-import { Page } from "../../components/Page";
+import { ErrorSurface } from "../../components/Feedback";
+import { Page, Panel } from "../../components/Page";
 import { useApi } from "../../hooks/useApi";
 import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
@@ -39,9 +40,17 @@ const columns: Column<EventRecord>[] = [
   },
 ];
 export function Events() {
-  const { adminToken } = useSession();
-  const api = useMemo(() => centralApi(adminToken), [adminToken]);
+  const { csrfToken } = useSession();
+  const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi((signal) => api.events(signal), [api]);
+  const [name, setName] = useState("");
+  const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const [error, setError] = useState<unknown>();
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); setError(undefined);
+    try { await api.createEvent(name, timezone); setName(""); result.refresh(); }
+    catch (caught) { setError(caught); }
+  };
   return (
     <Page
       eyebrow="Program"
@@ -49,6 +58,14 @@ export function Events() {
       description="Central-owned event programs and their Site deployments."
     >
       <AdminBoundary>
+        <Panel title="Create event">
+          <form className="inline-form" onSubmit={submit}>
+            <label className="field">Event name<input className="input" required value={name} onChange={(e) => setName(e.target.value)} /></label>
+            <label className="field">Timezone<input className="input" required value={timezone} onChange={(e) => setTimezone(e.target.value)} /></label>
+            <button className="button button--primary">Create event</button>
+          </form>
+          {error != null ? <ErrorSurface error={error} /> : null}
+        </Panel>
         <PageState
           {...result}
           empty={(rows) => !rows.length}

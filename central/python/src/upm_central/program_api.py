@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from upm_central.imports import commit_batch, create_batch, decide
+from upm_central.imports import commit_batch, create_batch, decide, detect_columns
 from upm_central.persistence.models import (
     Event,
     EventParticipation,
@@ -40,11 +40,13 @@ from upm_central.program import (
 )
 from upm_shared.enums import (
     ExternalEntityType,
+    ImportEntityType,
     ParticipantStatus,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     ReconciliationAction,
     SessionStatus,
+    ValidationSeverity,
 )
 
 
@@ -182,6 +184,7 @@ def _participant_view(item: EventParticipation) -> dict[str, object]:
         "event_id": item.event_id,
         "person_id": item.person_id,
         "person_display_name": item.person.display_name,
+        "primary_email": item.person.primary_email,
         "display_name": item.display_name,
         "professional_title": item.professional_title,
         "organization": item.organization,
@@ -189,6 +192,10 @@ def _participant_view(item: EventParticipation) -> dict[str, object]:
         "is_presenter": item.is_presenter,
         "notes": item.notes,
         "revision": item.revision,
+        "sessions": [
+            {"session_id": link.session_id, "title": link.session.title, "role": link.role}
+            for link in item.session_participations
+        ],
     }
 
 
@@ -214,6 +221,8 @@ def _session_view(item: ProgramSession) -> dict[str, object]:
                 "role": link.role,
                 "presenter_order": link.presenter_order,
                 "primary_presenter": link.primary_presenter,
+                "display_name": link.event_participation.display_name
+                or link.event_participation.person.display_name,
             }
             for link in item.participants
         ],
@@ -249,6 +258,8 @@ def _presentation_view(item: Presentation) -> dict[str, object]:
                 "role": link.role,
                 "presenter_order": link.presenter_order,
                 "primary_presenter": link.primary_presenter,
+                "display_name": link.event_participation.display_name
+                or link.event_participation.person.display_name,
             }
             for link in item.presenter_links
         ],
@@ -412,15 +423,31 @@ def register_program_routes(
 
     @app.get("/api/v1/admin/events/{event_id}/participants", dependencies=admin, tags=["program"])
     def list_participants(event_id: UUID, session: DbSession) -> list[dict[str, object]]:
-        return [
-            _participant_view(item)
-            for item in session.scalars(
-                select(EventParticipation)
-                .where(EventParticipation.event_id == event_id)
-                .options(selectinload(EventParticipation.person))
-                .order_by(EventParticipation.created_at)
+        items = session.scalars(
+            select(EventParticipation)
+            .where(EventParticipation.event_id == event_id)
+            .options(selectinload(EventParticipation.person))
+            .options(
+                selectinload(EventParticipation.session_participations).selectinload(
+                    SessionParticipant.session
+                )
             )
-        ]
+            .order_by(EventParticipation.created_at)
+        ).all()
+        result = []
+        for item in items:
+            view = _participant_view(item)
+            view["external_identifiers"] = [
+                {"namespace": identifier.namespace, "external_id": identifier.external_id}
+                for identifier in session.scalars(
+                    select(ExternalIdentifier).where(
+                        ExternalIdentifier.entity_type == ExternalEntityType.PERSON,
+                        ExternalIdentifier.entity_id == item.person_id,
+                    )
+                )
+            ]
+            result.append(view)
+        return result
 
     @app.post(
         "/api/v1/admin/events/{event_id}/participants",
@@ -534,7 +561,11 @@ def register_program_routes(
             for item in session.scalars(
                 select(ProgramSession)
                 .where(ProgramSession.event_id == event_id)
-                .options(selectinload(ProgramSession.participants))
+                .options(
+                    selectinload(ProgramSession.participants)
+                    .selectinload(SessionParticipant.event_participation)
+                    .selectinload(EventParticipation.person)
+                )
                 .order_by(ProgramSession.starts_at, ProgramSession.sort_order, ProgramSession.title)
             )
         ]
@@ -686,6 +717,9 @@ def register_program_routes(
                 .options(
                     selectinload(Presentation.session_links),
                     selectinload(Presentation.presenter_links),
+                    selectinload(Presentation.presenter_links)
+                    .selectinload(PresentationPresenter.event_participation)
+                    .selectinload(EventParticipation.person),
                 )
                 .order_by(Presentation.title)
             )
@@ -1022,6 +1056,43 @@ def register_program_routes(
             }
             for row in rows
         ]
+        headers = list(dict.fromkeys(key for row in rows for key in row.raw_values))
+        result["source_headers"] = headers
+        result["detected_mapping"] = detect_columns(headers)
+        result["sample_rows"] = [row.raw_values for row in rows[:5]]
+        result["preview_counts"] = {
+            "source_rows": len(rows),
+            "people_or_presenters": sum(
+                row.entity_type in {ImportEntityType.PERSON, ImportEntityType.PARTICIPANT}
+                or bool(row.normalized_values.get("presenter_email"))
+                or bool(row.normalized_values.get("presenter_emails"))
+                or bool(row.normalized_values.get("email"))
+                for row in rows
+            ),
+            "sessions": sum(
+                row.entity_type == ImportEntityType.SESSION
+                or bool(row.normalized_values.get("session_title"))
+                for row in rows
+            ),
+            "presentations": sum(row.entity_type == ImportEntityType.PRESENTATION for row in rows),
+            "warnings": sum(
+                issue.severity == ValidationSeverity.WARNING for row in rows for issue in row.issues
+            ),
+            "errors": sum(
+                issue.severity == ValidationSeverity.ERROR for row in rows for issue in row.issues
+            ),
+            "identity_conflicts": sum(bool(row.conflict_state) for row in rows),
+            "unresolved_room_mappings": sum(
+                bool(
+                    row.normalized_values.get("location_name") or row.normalized_values.get("room")
+                )
+                and (
+                    row.entity_type == ImportEntityType.SESSION
+                    or bool(row.normalized_values.get("session_title"))
+                )
+                for row in rows
+            ),
+        }
         return result
 
     @app.post("/api/v1/admin/import-rows/{row_id}/decision", dependencies=admin, tags=["imports"])
