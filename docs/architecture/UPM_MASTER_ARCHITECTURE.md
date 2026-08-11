@@ -22,6 +22,7 @@ Accepted implementation decisions refine this specification without replacing it
 - [ADR-0006: Central/Site registration and synchronization](decisions/ADR-0006-central-site-registration-and-sync.md)
 - [ADR-0007: Versioned event deployment snapshots](decisions/ADR-0007-event-deployment-snapshots.md)
 - [ADR-0008: Shared React admin frontends](decisions/ADR-0008-shared-react-admin-frontends.md)
+- [ADR-0009: Site room materialization from deployed program locations](decisions/ADR-0009-site-room-materialization.md)
 
 Historical ADRs must not be rewritten to make later decisions retroactive. A significant change requires a new or superseding ADR.
 
@@ -201,6 +202,10 @@ Use:
 - Clear sync status reporting
 
 Internal entity identifiers use PostgreSQL-native UUID columns. New identifiers are generated as UUIDv7 in the application/domain layer so Central, Sites, and disconnected clients can create globally unique IDs without sequential database coordination. Names, labels, titles, filenames, and imported row numbers are not identity keys.
+On program deployment, a Site may use an imported location label as deterministic match evidence or
+as the initial display label for a newly generated UUIDv7 Room. It must preserve existing UUIDs,
+leave ambiguous matches unresolved, and retain Site-owned manual mapping overrides as specified in
+[ADR-0009](decisions/ADR-0009-site-room-materialization.md).
 
 ### Connectivity expectations
 

@@ -20,6 +20,15 @@ protocol, schema version, authenticated local Site UUID, deployment UUID, Event 
 revision before applying. `/admin/event-deployments` reads only Site-local data and remains useful
 while Central is offline.
 
+## Room materialization and reconciliation
+
+During transactional snapshot application, Site automatically materializes program locations that
+have neither a Central mapped-room instruction nor an existing Site-owned mapping. It reuses an exact
+or uniquely normalized Site room match; otherwise it creates a new UUIDv7 Room and event-scoped
+program-room mapping. Ambiguous normalized matches remain unresolved. Existing mappings, including
+deliberate operator unmaps, are never overwritten by later snapshots. See
+[ADR-0009](../architecture/decisions/ADR-0009-site-room-materialization.md).
+
 ## Revision and recovery semantics
 
 Every payload is a complete snapshot. Equal revisions are duplicate-safe, lower revisions are stale,

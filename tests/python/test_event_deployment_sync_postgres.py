@@ -51,6 +51,9 @@ from upm_site.persistence.models import (
     Presentation,
     PresentationPresenter,
     PresentationSession,
+    ProgramRoomMapping,
+    Room,
+    RoomAssignment,
     SessionParticipant,
 )
 from upm_site.persistence.models import Event as SiteEvent
@@ -372,6 +375,115 @@ def test_site_revision_order_schema_failure_and_identity_security(
     with site_factory() as session:
         assert session.get(EventDeploymentProjection, deployment_id).applied_revision == 2
         assert session.get(SiteEvent, event_id).name == "Revision 2"
+
+
+def test_deployment_materializes_unmapped_rooms_and_preserves_site_overrides(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+        existing_room = Room(site_id=site_id, label="  BALLROOM   A ")
+        session.add(existing_room)
+        session.flush()
+        existing_room_id = existing_room.room_id
+
+    deployment_id, event_id = new_uuid7(), new_uuid7()
+    ballroom_session_id, expo_session_id = new_uuid7(), new_uuid7()
+
+    def envelope(revision: int) -> SyncEventEnvelope:
+        snapshot = EventDeploymentSnapshot(
+            deployment_id=deployment_id,
+            deployment_revision=revision,
+            event_id=event_id,
+            site_id=site_id,
+            event_name="Automatic room materialization",
+            sessions=[
+                SessionSnapshot(
+                    session_id=ballroom_session_id,
+                    title="Keynote",
+                    location_name="Ballroom A",
+                    status=SessionStatus.SCHEDULED,
+                    central_revision=revision,
+                ),
+                SessionSnapshot(
+                    session_id=expo_session_id,
+                    title="Expo",
+                    location_name="Expo Hall",
+                    status=SessionStatus.SCHEDULED,
+                    central_revision=revision,
+                ),
+            ],
+        )
+        return SyncEventEnvelope(
+            event_id=new_uuid7(),
+            event_type="central.event_deployment.updated",
+            protocol_version=1,
+            source="central",
+            source_sequence=revision,
+            authority=AuthorityScope.CENTRAL,
+            entity_type="event_deployment",
+            entity_id=deployment_id,
+            occurred_at=datetime.now(UTC),
+            payload=snapshot.model_dump(mode="json"),
+        )
+
+    with site_factory.begin() as session:
+        assert apply_central_event(session, envelope(1)).accepted
+    with site_factory() as session:
+        rooms = session.scalars(select(Room).where(Room.site_id == site_id)).all()
+        assert len(rooms) == 2
+        mappings = {
+            item.normalized_imported_label: item
+            for item in session.scalars(
+                select(ProgramRoomMapping).where(ProgramRoomMapping.event_id == event_id)
+            )
+        }
+        assert mappings["ballroom a"].room_id == existing_room_id
+        assert mappings["expo hall"].room_id in {item.room_id for item in rooms}
+        assert all(
+            item.confirmed_by == "deployment-auto-materialization" for item in mappings.values()
+        )
+        expo_room_id = mappings["expo hall"].room_id
+
+    # A Site operator's deliberate unmap remains authoritative across a newer snapshot.
+    with site_factory.begin() as session:
+        expo_mapping = session.scalar(
+            select(ProgramRoomMapping).where(
+                ProgramRoomMapping.event_id == event_id,
+                ProgramRoomMapping.normalized_imported_label == "expo hall",
+            )
+        )
+        expo_mapping.room_id = None
+        expo_mapping.confirmed_by = "site-operator"
+        expo_mapping.revision += 1
+    with site_factory.begin() as session:
+        assert apply_central_event(session, envelope(2)).accepted
+    with site_factory() as session:
+        assert session.scalar(select(Room).where(Room.room_id == expo_room_id)) is not None
+        assert len(session.scalars(select(Room).where(Room.site_id == site_id)).all()) == 2
+        expo_mapping = session.scalar(
+            select(ProgramRoomMapping).where(
+                ProgramRoomMapping.event_id == event_id,
+                ProgramRoomMapping.normalized_imported_label == "expo hall",
+            )
+        )
+        assert expo_mapping.room_id is None
+        assert expo_mapping.confirmed_by == "site-operator"
+        assert (
+            session.scalar(
+                select(RoomAssignment).where(
+                    RoomAssignment.session_id == expo_session_id,
+                    RoomAssignment.active.is_(True),
+                )
+            )
+            is None
+        )
 
 
 def test_complete_program_projection_replaces_removed_relationships(

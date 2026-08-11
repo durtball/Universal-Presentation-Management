@@ -38,7 +38,10 @@ from upm_site.persistence.models import (
     Session as SiteSession,
 )
 from upm_site.persistence.queue import SiteQueue
-from upm_site.room_operations import reconcile_program_room_assignments
+from upm_site.room_operations import (
+    materialize_program_room_mappings,
+    reconcile_program_room_assignments,
+)
 
 
 def _status_event(
@@ -263,6 +266,16 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         for mapping in snapshot.room_configuration.get("mappings", [])
         if isinstance(mapping, dict)
     }
+    centrally_mapped_labels = {
+        label
+        for label, mapping in room_mappings.items()
+        if mapping.get("mapping_status") == "mapped"
+    }
+    materialized_rooms = materialize_program_room_mappings(
+        session,
+        snapshot.event_id,
+        excluded_labels=centrally_mapped_labels,
+    )
     mapped_rooms = 0
     unresolved_rooms = 0
     room_conflicts = 0
@@ -453,6 +466,10 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         "rooms": mapped_rooms,
         "unresolved_rooms": unresolved_rooms,
         "room_conflicts": room_conflicts,
+        "rooms_created": materialized_rooms["created_rooms"],
+        "rooms_reused": materialized_rooms["reused_rooms"],
+        "room_mappings_created": materialized_rooms["created_mappings"],
+        "room_labels_ambiguous": materialized_rooms["ambiguous_labels"],
     }
 
 

@@ -18,7 +18,7 @@ These rules operationalize the [Master Architecture](../architecture/UPM_MASTER_
 - A Site remains operational from Site-local data through WAN and Central outages.
 - Central-owned and Site-owned state crosses boundaries only through explicit, secure, versioned contracts and established synchronization mechanisms.
 - Event/program propagation extends ADR-0007 complete snapshots; do not add ad hoc row replication or a parallel domain channel.
-- Rooms and signage displays are separate identity types. Imported strings do not create physical resources implicitly.
+- Rooms and signage displays are separate identity types. Imported strings are not physical-resource identities; automatic Site room materialization must follow ADR-0009 and preserve UUID and manual-override authority.
 
 ## Data, identity, and migrations
 

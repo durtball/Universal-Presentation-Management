@@ -66,6 +66,7 @@ Requirement labels:
 
 - **AP:** Rooms use stable UUIDs and remain distinct from signage displays and imported labels.
 - **ER:** Room/device assignment is server authoritative; reconnecting Agents may not overwrite it.
+- **ER:** Deployment materializes unmapped imported locations as UUID-identified Site rooms, reuses only deterministic matches, and preserves manual remaps/unmaps.
 - **ER:** Support `Room -> Sessions -> Presentations -> Media -> Agents/Endpoints -> Status` traceability.
 - **FP:** Complete room readiness, endpoint assignment, monitoring, and operator control workflows.
 

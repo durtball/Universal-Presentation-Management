@@ -60,7 +60,7 @@
 
 - Site Room and RoomAssignment persistence exists. Site API/UI can create, list, edit, enable, archive, and open physical rooms by stable UUID.
 - Central stores per-Site mappings from normalized imported room label to an existing Site room UUID/label.
-- Site also owns explicit per-event imported-label mappings. Operators can map or deliberately unmap a deployed program location; reconciliation links projected sessions without treating labels as identity or allowing Central to overwrite Site authority.
+- Site also owns explicit per-event imported-label mappings. Deployment automatically reuses a deterministic existing room or creates a UUIDv7 Site room for otherwise unmapped locations; ambiguous matches remain unresolved. Operators can remap or deliberately unmap a deployed program location, and later snapshots preserve that Site authority.
 - A room workspace shows chronological sessions, presentations, current version/media metadata, processing state, and derived operational state. The dashboard surfaces persisted missing/error presentation, failed job, and upcoming-session conditions.
 - Site API/UI assigns enrolled active devices to primary and backup roles with server-authoritative history and duplicate-active-assignment constraints. Because no Agent runtime reports heartbeat/network/interface/version data, the UI truthfully marks telemetry as unavailable.
 
