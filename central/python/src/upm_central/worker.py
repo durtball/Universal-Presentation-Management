@@ -9,11 +9,14 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
+from uuid import UUID
 
 from sqlalchemy import text
 
 from upm_central.config import CentralDatabaseSettings
+from upm_central.lifecycle import run_deletion
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
+from upm_central.persistence.models import DeletionOperation
 from upm_central.persistence.queue import CentralQueue
 from upm_shared.identifiers import new_uuid7
 
@@ -80,6 +83,21 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
+                    if kind == "processing" and work.job_type.startswith("lifecycle.delete_"):
+                        operation = session.get(
+                            DeletionOperation, UUID(str(work.payload.get("deletion_operation_id")))
+                        )
+                        if operation is None:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="deletion_missing",
+                                message="deletion operation does not exist",
+                                retryable=False,
+                                base_delay_seconds=1,
+                            )
+                            continue
+                        run_deletion(session, operation)
                     queue.complete(work, worker_id)
                     log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if once:

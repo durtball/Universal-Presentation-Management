@@ -18,7 +18,8 @@ Status meanings:
 | Database | Independent Alembic histories | Yes | Yes | N/A | No | Implemented | Upgrade paths and isolation are tested; release-specific downgrade support varies by revision. |
 | Identity | UUIDv7 internal identity | Yes | Yes | No | No | Implemented | Shared generator/contracts and PostgreSQL UUID columns are tested. |
 | People | Permanent person identities | Yes | Projection | No | No | Implemented | Central model/API/import matching and Site event-scoped projection exist. |
-| People | Protected person deletion | API | N/A | N/A | N/A | Partial | Dependency-impact and guarded delete API exist; browser deletion workflow does not. |
+| People | Protected person deletion | API + UI | N/A | N/A | N/A | Implemented | Detailed impact, exact-name confirmation, durable cleanup, retained-history removal, progress, and surviving audit evidence. |
+| Events | Operational lifecycle deletion | API + UI | Durable purge projection | N/A | N/A | Implemented | Explicit cleanup preserves Person history and shared resources and sends offline-safe protocol-v1 tombstones. |
 | Events | Event create/list/edit | API + UI | Projection | No | No | Partial | Central create/list UI and API edits exist; full lifecycle administration is incomplete. |
 | Program | Participants, sessions, presentations domain | API + UI | Projection + UI | No | No | Implemented | Normalized backend relationships, migrations, snapshot projection, and read views exist. |
 | Program | Direct browser program editing | Read-oriented | Read-only | No | No | Partial | Backend CRUD is broad; browser pages mostly list imported data rather than edit it. |

@@ -31,6 +31,7 @@ from upm_central.event_deployments import (
     retry_deployment,
     revoke_deployment,
 )
+from upm_central.lifecycle_api import register_lifecycle_routes
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import (
     AdminSession,
@@ -962,4 +963,5 @@ body:JSON.stringify({name:document.querySelector('#event-name').value})});load()
 </script></body></html>"""
 
     register_program_routes(app, db, require_admin)
+    register_lifecycle_routes(app, db, require_admin)
     return app

@@ -24,7 +24,11 @@ from upm_shared.enums import (
 )
 from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
-from upm_site.event_deployments import apply_revocation_event, apply_snapshot_event
+from upm_site.event_deployments import (
+    apply_event_deletion,
+    apply_revocation_event,
+    apply_snapshot_event,
+)
 from upm_site.persistence.models import (
     CentralRegistration,
     Event,
@@ -208,6 +212,11 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         except (KeyError, TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
             _enqueue_deployment_failure(session, event, application_error)
+    elif event.event_type == "central.event.deleted":
+        try:
+            apply_event_deletion(session, event)
+        except (KeyError, TypeError, ValueError) as exc:
+            application_error = str(exc)[:2048]
     else:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="unsupported_event_type"

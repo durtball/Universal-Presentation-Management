@@ -18,6 +18,14 @@
     font: inherit;
   }
 }
+
+.dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 1rem; background: rgb(0 0 0 / 65%); }
+.dialog { width: min(42rem, 100%); max-height: 90vh; overflow: auto; padding: 1.5rem; border: 1px solid var(--border); border-radius: 1rem; background: var(--surface, #171b25); box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 45%); }
+.danger-text { padding: .9rem; border-left: .3rem solid #d44; background: rgb(190 30 45 / 12%); }
+.impact-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(9rem,1fr)); gap: .6rem; }
+.impact-grid div { padding: .6rem; border: 1px solid var(--border); border-radius: .5rem; }
+.impact-grid dt { text-transform: capitalize; color: var(--muted); }.impact-grid dd { margin: .2rem 0 0; font-size: 1.35rem; font-weight: 700; }
+.button-row { display: flex; justify-content: flex-end; gap: .6rem; margin-top: 1rem; }.button--danger { border-color: #d44; color: #fff; background: #a22; }
 @layer tokens {
   :root {
     color-scheme: dark;

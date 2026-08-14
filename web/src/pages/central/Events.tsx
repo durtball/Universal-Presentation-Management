@@ -9,8 +9,9 @@ import { Page, Panel } from "../../components/Page";
 import { useApi } from "../../hooks/useApi";
 import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
+import { DeletionDialog } from "../../components/DeletionDialog";
 
-const columns: Column<EventRecord>[] = [
+const baseColumns: Column<EventRecord>[] = [
   {
     key: "name",
     label: "Event",
@@ -46,6 +47,9 @@ export function Events() {
   const [name, setName] = useState("");
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   const [error, setError] = useState<unknown>();
+  const [deleting, setDeleting] = useState<EventRecord>();
+  const columns = useMemo<Column<EventRecord>[]>(()=>[...baseColumns, {key:"actions",label:"Actions",value:()=>"",
+    render:(row)=><button className="button button--danger" type="button" onClick={()=>setDeleting(row)}>Delete Event</button>}],[]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(undefined);
     try { await api.createEvent(name, timezone); setName(""); result.refresh(); }
@@ -80,6 +84,10 @@ export function Events() {
             />
           )}
         </PageState>
+        {deleting ? <DeletionDialog kind="Event" name={deleting.name}
+          load={()=>api.eventDeletionImpact(deleting.event_id)}
+          start={(confirmation)=>api.deleteEvent(deleting.event_id, confirmation)}
+          close={()=>{setDeleting(undefined);result.refresh();}} /> : null}
       </AdminBoundary>
     </Page>
   );

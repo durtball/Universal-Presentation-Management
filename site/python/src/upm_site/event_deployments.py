@@ -1,10 +1,11 @@
 """Transactional application of Central event deployment snapshots at a Site."""
+# ruff: noqa: E501
 
 from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import (
@@ -558,3 +559,36 @@ def apply_revocation_event(session: Session, event: SyncEventEnvelope) -> str:
     )
     _status_event(session, deployment, "revoked", causation_id=event.event_id)
     return "revoked"
+
+
+def apply_event_deletion(session: Session, event: SyncEventEnvelope) -> str:
+    """Explicitly purge one Central event projection while preserving shared Site resources."""
+    event_id = UUID(str(event.payload["event_id"]))
+    if event.entity_id != event_id:
+        raise ValueError("event identity does not match deletion envelope")
+    # Ordered statements intentionally document ownership instead of relying on FK cascades.
+    params = {"event_id": event_id}
+    statements = [
+        "DELETE FROM room_assignments WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id)",
+        "DELETE FROM presentation_assets WHERE presentation_version_id IN (SELECT presentation_version_id FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id))",
+        "DELETE FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
+        "DELETE FROM presentation_presenters WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
+        "DELETE FROM presentation_sessions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
+        "DELETE FROM presentations WHERE event_id=:event_id",
+        "DELETE FROM session_participants WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id)",
+        "DELETE FROM sessions WHERE event_id=:event_id",
+        "DELETE FROM event_participations WHERE event_id=:event_id",
+        "DELETE FROM external_identifier_projections WHERE event_id=:event_id",
+        "DELETE FROM program_room_mappings WHERE event_id=:event_id",
+        "DELETE FROM event_deployment_revisions WHERE deployment_id IN (SELECT deployment_id FROM event_deployments WHERE central_event_id=:event_id)",
+        "DELETE FROM event_deployments WHERE central_event_id=:event_id",
+        # Only explicitly event-owned rooms are eligible; reusable rooms have a NULL/different event.
+        "DELETE FROM device_assignments WHERE room_id IN (SELECT room_id FROM rooms WHERE event_id=:event_id)",
+        "DELETE FROM rooms WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM program_room_mappings m WHERE m.room_id=rooms.room_id)",
+        "UPDATE media_objects SET deleted_at=COALESCE(deleted_at, now()) WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM presentation_assets a WHERE a.media_object_id=media_objects.media_object_id)",
+        "DELETE FROM events WHERE event_id=:event_id",
+        "DELETE FROM person_projections p WHERE NOT EXISTS (SELECT 1 FROM event_participations ep WHERE ep.person_id=p.person_id)",
+    ]
+    for statement in statements:
+        session.execute(text(statement), params)
+    return "deleted"

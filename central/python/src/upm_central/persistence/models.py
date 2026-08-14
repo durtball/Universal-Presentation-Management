@@ -1182,3 +1182,57 @@ class AuditRecord(CentralBase):
     )
     before_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     after_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class RetainedPersonHistory(CentralBase):
+    """Minimal, person-owned history which is deliberately independent of an Event FK."""
+
+    __tablename__ = "retained_person_history"
+
+    retained_history_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    person_id: Mapped[UUID] = mapped_column(
+        ForeignKey("persons.person_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
+    event_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    participation_summary: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    retained_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class DeletionOperation(CentralBase):
+    """Durable lifecycle state and audit evidence; target columns intentionally have no FK."""
+
+    __tablename__ = "deletion_operations"
+    __table_args__ = (UniqueConstraint("target_type", "target_id"),)
+
+    deletion_operation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    target_display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    initiated_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    stage: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    dependency_counts: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    site_statuses: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    media_results: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

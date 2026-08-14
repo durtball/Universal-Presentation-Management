@@ -1,0 +1,415 @@
+"""Explicit, retry-safe Central lifecycle deletion orchestration."""
+
+from uuid import UUID
+
+from fastapi import HTTPException, status
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.orm import Session
+
+from upm_central.persistence.models import (
+    AuditRecord,
+    DeletionOperation,
+    Event,
+    EventDeployment,
+    EventDeploymentRevision,
+    EventParticipation,
+    ExternalIdentifier,
+    ImportBatch,
+    ImportRow,
+    ImportSource,
+    ImportValidationIssue,
+    MediaObjectReplica,
+    OutboxEvent,
+    Person,
+    PersonIdentityLink,
+    PersonIdentitySignal,
+    Presentation,
+    PresentationAsset,
+    PresentationPresenter,
+    PresentationSession,
+    PresentationVersion,
+    ProcessingJob,
+    ReconciliationDecision,
+    RetainedPersonHistory,
+    SessionParticipant,
+    SyncEvent,
+    TransferJob,
+    utc_now,
+)
+from upm_central.persistence.models import (
+    Session as ProgramSession,
+)
+from upm_central.persistence.queue import CentralQueue
+from upm_central.sync import next_sequence
+from upm_shared.enums import JobPriority, SourceSystem
+from upm_shared.jobs import PRIORITY_VALUES, OutboxPayload
+
+
+def _count(session: Session, model, *criteria) -> int:
+    return int(session.scalar(select(func.count()).select_from(model).where(*criteria)) or 0)
+
+
+def event_impact(session: Session, event_id: UUID) -> dict[str, int]:
+    session_ids = select(ProgramSession.session_id).where(ProgramSession.event_id == event_id)
+    presentation_ids = select(Presentation.presentation_id).where(Presentation.event_id == event_id)
+    version_ids = select(PresentationVersion.presentation_version_id).where(
+        PresentationVersion.presentation_id.in_(presentation_ids)
+    )
+    return {
+        "sessions": _count(session, ProgramSession, ProgramSession.event_id == event_id),
+        "presenters": _count(session, EventParticipation, EventParticipation.event_id == event_id),
+        "presentations": _count(session, Presentation, Presentation.event_id == event_id),
+        "rooms": len(
+            set(
+                session.scalars(
+                    select(ProgramSession.location_name).where(
+                        ProgramSession.event_id == event_id,
+                        ProgramSession.location_name.is_not(None),
+                    )
+                )
+            )
+        ),
+        "media_files": _count(
+            session, PresentationAsset, PresentationAsset.presentation_version_id.in_(version_ids)
+        ),
+        "site_deployments": _count(session, EventDeployment, EventDeployment.event_id == event_id),
+        "imports": _count(session, ImportBatch, ImportBatch.event_id == event_id),
+        "session_participations": _count(
+            session, SessionParticipant, SessionParticipant.session_id.in_(session_ids)
+        ),
+    }
+
+
+def person_deletion_impact(session: Session, person_id: UUID) -> dict[str, int]:
+    participation_ids = select(EventParticipation.event_participation_id).where(
+        EventParticipation.person_id == person_id
+    )
+    retained = _count(session, RetainedPersonHistory, RetainedPersonHistory.person_id == person_id)
+    return {
+        "event_participations": _count(
+            session, EventParticipation, EventParticipation.person_id == person_id
+        ),
+        "session_participations": _count(
+            session,
+            SessionParticipant,
+            SessionParticipant.event_participation_id.in_(participation_ids),
+        ),
+        "presentation_relationships": _count(
+            session,
+            PresentationPresenter,
+            PresentationPresenter.event_participation_id.in_(participation_ids),
+        ),
+        "retained_history": retained,
+        "identity_signals": _count(
+            session, PersonIdentitySignal, PersonIdentitySignal.person_id == person_id
+        ),
+        "identity_links": _count(
+            session,
+            PersonIdentityLink,
+            (PersonIdentityLink.person_id == person_id)
+            | (PersonIdentityLink.linked_person_id == person_id),
+        ),
+        "media_files": 0,
+    }
+
+
+def request_deletion(
+    session: Session, target_type: str, target_id: UUID, confirmation: str, actor: str
+) -> DeletionOperation:
+    target = session.get(Event if target_type == "event" else Person, target_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"{target_type} not found")
+    name = target.name if target_type == "event" else target.display_name
+    if confirmation != name:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"type the exact {target_type} name to confirm",
+        )
+    existing = session.scalar(
+        select(DeletionOperation).where(
+            DeletionOperation.target_type == target_type, DeletionOperation.target_id == target_id
+        )
+    )
+    if existing:
+        return existing
+    impact = (
+        event_impact(session, target_id)
+        if target_type == "event"
+        else person_deletion_impact(session, target_id)
+    )
+    sites = (
+        [
+            {
+                "site_id": str(d.site_id),
+                "display_name": d.site.display_name if getattr(d, "site", None) else str(d.site_id),
+                "status": "pending",
+            }
+            for d in session.scalars(
+                select(EventDeployment).where(EventDeployment.event_id == target_id)
+            )
+        ]
+        if target_type == "event"
+        else []
+    )
+    operation = DeletionOperation(
+        target_type=target_type,
+        target_id=target_id,
+        target_display_name=name,
+        initiated_by=actor,
+        dependency_counts=impact,
+        site_statuses=sites,
+    )
+    session.add(operation)
+    session.flush()
+    CentralQueue(session).enqueue_processing(
+        job_type=f"lifecycle.delete_{target_type}",
+        payload={"deletion_operation_id": str(operation.deletion_operation_id)},
+        idempotency_key=str(operation.deletion_operation_id),
+        max_attempts=10,
+        priority=PRIORITY_VALUES[JobPriority.HIGH],
+        required_capabilities=[],
+    )
+    session.add(
+        AuditRecord(
+            actor_id=actor,
+            action=f"central.{target_type}.deletion_requested",
+            target_type=target_type,
+            target_id=target_id,
+            before_context={"display_name": name},
+            after_context={"operation_id": str(operation.deletion_operation_id), "counts": impact},
+        )
+    )
+    return operation
+
+
+def run_deletion(session: Session, operation: DeletionOperation) -> None:
+    """Execute ordered cleanup inside the worker's atomic database transaction."""
+    if operation.status == "completed":
+        return
+    operation.status = "running"
+    operation.stage = "central_cleanup"
+    operation.attempt_count += 1
+    if operation.target_type == "event":
+        _delete_event(session, operation)
+    else:
+        _delete_person(session, operation)
+    operation.status = "completed"
+    operation.stage = "completed"
+    operation.completed_at = utc_now()
+    session.add(
+        AuditRecord(
+            actor_id=operation.initiated_by,
+            action=f"central.{operation.target_type}.deleted",
+            target_type=operation.target_type,
+            target_id=operation.target_id,
+            before_context={"display_name": operation.target_display_name},
+            after_context={
+                "operation_id": str(operation.deletion_operation_id),
+                "counts": operation.dependency_counts,
+                "sites": operation.site_statuses,
+                "media": operation.media_results,
+                "state": "completed",
+            },
+        )
+    )
+
+
+def _delete_event(session: Session, op: DeletionOperation) -> None:
+    event = session.get(Event, op.target_id)
+    if event is None:
+        return
+    participations = session.scalars(
+        select(EventParticipation).where(EventParticipation.event_id == event.event_id)
+    ).all()
+    for p in participations:
+        exists = session.scalar(
+            select(RetainedPersonHistory).where(
+                RetainedPersonHistory.person_id == p.person_id,
+                RetainedPersonHistory.source_event_id == event.event_id,
+            )
+        )
+        if not exists:
+            session.add(
+                RetainedPersonHistory(
+                    person_id=p.person_id,
+                    source_event_id=event.event_id,
+                    event_name=event.name,
+                    participation_summary={
+                        "role": p.role,
+                        "display_name": p.display_name,
+                        "is_presenter": p.is_presenter,
+                        "source": p.source,
+                    },
+                )
+            )
+    deployment_rows = session.scalars(
+        select(EventDeployment).where(EventDeployment.event_id == event.event_id)
+    ).all()
+    for deployment in deployment_rows:
+        CentralQueue(session).enqueue_outbox(
+            event_type="central.event.deleted",
+            aggregate_type="event",
+            aggregate_id=event.event_id,
+            owning_site_id=deployment.site_id,
+            event_id=None,
+            source_sequence=next_sequence(session, deployment.site_id),
+            idempotency_key=f"event-delete:{event.event_id}:{deployment.site_id}",
+            payload=OutboxPayload(
+                source_system=SourceSystem.CENTRAL,
+                schema_version=1,
+                data={
+                    "event_id": str(event.event_id),
+                    "deletion_operation_id": str(op.deletion_operation_id),
+                },
+            ),
+        )
+    pids = select(Presentation.presentation_id).where(Presentation.event_id == event.event_id)
+    vids = select(PresentationVersion.presentation_version_id).where(
+        PresentationVersion.presentation_id.in_(pids)
+    )
+    media_ids = set(
+        session.scalars(
+            select(PresentationAsset.media_object_id).where(
+                PresentationAsset.presentation_version_id.in_(vids)
+            )
+        )
+    )
+    session.execute(
+        delete(PresentationAsset).where(PresentationAsset.presentation_version_id.in_(vids))
+    )
+    session.execute(
+        delete(PresentationVersion).where(PresentationVersion.presentation_id.in_(pids))
+    )
+    session.execute(
+        delete(PresentationPresenter).where(PresentationPresenter.presentation_id.in_(pids))
+    )
+    session.execute(
+        delete(PresentationSession).where(PresentationSession.presentation_id.in_(pids))
+    )
+    session.execute(delete(Presentation).where(Presentation.event_id == event.event_id))
+    sids = select(ProgramSession.session_id).where(ProgramSession.event_id == event.event_id)
+    epids = select(EventParticipation.event_participation_id).where(
+        EventParticipation.event_id == event.event_id
+    )
+    session.execute(
+        delete(SessionParticipant).where(
+            (SessionParticipant.session_id.in_(sids))
+            | (SessionParticipant.event_participation_id.in_(epids))
+        )
+    )
+    session.execute(delete(ProgramSession).where(ProgramSession.event_id == event.event_id))
+    session.execute(delete(EventParticipation).where(EventParticipation.event_id == event.event_id))
+    batches = session.scalars(
+        select(ImportBatch).where(ImportBatch.event_id == event.event_id)
+    ).all()
+    for batch in batches:
+        rows = select(ImportRow.import_row_id).where(
+            ImportRow.import_batch_id == batch.import_batch_id
+        )
+        session.execute(
+            delete(ReconciliationDecision).where(ReconciliationDecision.import_row_id.in_(rows))
+        )
+        session.execute(
+            delete(ImportValidationIssue).where(ImportValidationIssue.import_row_id.in_(rows))
+        )
+        session.execute(delete(ImportRow).where(ImportRow.import_batch_id == batch.import_batch_id))
+        source_id = batch.import_source_id
+        session.delete(batch)
+        session.flush()
+        if not session.scalar(
+            select(ImportBatch.import_batch_id).where(ImportBatch.import_source_id == source_id)
+        ):
+            session.execute(delete(ImportSource).where(ImportSource.import_source_id == source_id))
+    deployment_ids = select(EventDeployment.deployment_id).where(
+        EventDeployment.event_id == event.event_id
+    )
+    session.execute(
+        delete(EventDeploymentRevision).where(
+            EventDeploymentRevision.deployment_id.in_(deployment_ids)
+        )
+    )
+    session.execute(delete(EventDeployment).where(EventDeployment.event_id == event.event_id))
+    session.execute(delete(ExternalIdentifier).where(ExternalIdentifier.event_id == event.event_id))
+    session.execute(delete(SyncEvent).where(SyncEvent.event_id == event.event_id))
+    session.execute(delete(OutboxEvent).where(OutboxEvent.event_id == event.event_id))
+    session.execute(
+        update(AuditRecord).where(AuditRecord.event_id == event.event_id).values(event_id=None)
+    )
+    deleted_media = 0
+    for media_id in media_ids:
+        if not session.scalar(
+            select(PresentationAsset.presentation_asset_id).where(
+                PresentationAsset.media_object_id == media_id
+            )
+        ):
+            session.execute(delete(ProcessingJob).where(ProcessingJob.media_object_id == media_id))
+            session.execute(delete(TransferJob).where(TransferJob.media_object_id == media_id))
+            session.execute(
+                delete(MediaObjectReplica).where(MediaObjectReplica.media_object_id == media_id)
+            )
+            deleted_media += 1
+    session.execute(
+        delete(MediaObjectReplica).where(
+            MediaObjectReplica.event_id == event.event_id,
+            ~MediaObjectReplica.media_object_id.in_(select(PresentationAsset.media_object_id)),
+        )
+    )
+    # Shared objects lose only the deleted Event association; their stable media identity remains.
+    session.execute(
+        update(MediaObjectReplica)
+        .where(MediaObjectReplica.event_id == event.event_id)
+        .values(event_id=None)
+    )
+    op.media_results = {
+        "eligible_removed": deleted_media,
+        "shared_preserved": len(media_ids) - deleted_media,
+    }
+    session.delete(event)
+
+
+def _delete_person(session: Session, op: DeletionOperation) -> None:
+    person = session.get(Person, op.target_id)
+    if person is None:
+        return
+    epids = select(EventParticipation.event_participation_id).where(
+        EventParticipation.person_id == person.person_id
+    )
+    session.execute(
+        delete(SessionParticipant).where(SessionParticipant.event_participation_id.in_(epids))
+    )
+    session.execute(
+        delete(PresentationPresenter).where(PresentationPresenter.event_participation_id.in_(epids))
+    )
+    session.execute(
+        delete(EventParticipation).where(EventParticipation.person_id == person.person_id)
+    )
+    session.execute(
+        delete(RetainedPersonHistory).where(RetainedPersonHistory.person_id == person.person_id)
+    )
+    session.execute(
+        delete(PersonIdentitySignal).where(PersonIdentitySignal.person_id == person.person_id)
+    )
+    session.execute(
+        delete(PersonIdentityLink).where(
+            (PersonIdentityLink.person_id == person.person_id)
+            | (PersonIdentityLink.linked_person_id == person.person_id)
+        )
+    )
+    session.execute(
+        delete(ExternalIdentifier).where(ExternalIdentifier.entity_id == person.person_id)
+    )
+    session.execute(
+        update(ImportRow)
+        .where(
+            (ImportRow.proposed_person_id == person.person_id)
+            | (ImportRow.resolved_person_id == person.person_id)
+        )
+        .values(proposed_person_id=None, resolved_person_id=None)
+    )
+    session.execute(
+        update(ReconciliationDecision)
+        .where(ReconciliationDecision.selected_person_id == person.person_id)
+        .values(selected_person_id=None)
+    )
+    session.delete(person)
+    op.media_results = {"eligible_removed": 0, "shared_preserved": 0}

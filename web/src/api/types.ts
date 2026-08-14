@@ -42,6 +42,21 @@ export interface PersonRecord extends Row {
   organization?: string;
   professional_title?: string;
 }
+export interface DeletionPreview extends Row {
+  target_id: string;
+  confirmation: string;
+  impact: Record<string, number>;
+}
+export interface DeletionOperation extends Row {
+  deletion_operation_id: string;
+  target_type: "event" | "person";
+  target_display_name: string;
+  status: string;
+  stage: string;
+  dependency_counts: Record<string, number>;
+  site_statuses: Array<{ site_id: string; display_name: string; status: string }>;
+  last_error?: string | null;
+}
 export type ImportStatus =
   | "uploaded"
   | "parsing"

@@ -13,5 +13,6 @@ Architecture Decision Records (ADRs) capture implementation decisions that refin
 | [ADR-0007](ADR-0007-event-deployment-snapshots.md) | Accepted | Event deployment snapshots |
 | [ADR-0008](ADR-0008-shared-react-admin-frontends.md) | Accepted | Shared React admin frontends with separate production images |
 | [ADR-0009](ADR-0009-site-room-materialization.md) | Accepted | Site room materialization from deployed program locations |
+| [ADR-0010](ADR-0010-lifecycle-deletion-and-retention.md) | Accepted | Operational lifecycle deletion and permanent-person retention |
 
 New decisions must not silently weaken Central/Site separation, Site offline autonomy, PostgreSQL requirements, or other master-architecture constraints.

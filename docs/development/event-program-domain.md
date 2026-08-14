@@ -14,8 +14,11 @@ person to participate in many events without duplicating permanent identity.
 
 Names are never authoritative matching keys. Reconciliation evaluates, in order, an explicitly
 supplied UPM person UUID, unique external identifiers, normalized email, and name-only candidate
-evidence. Name-only evidence always requires review. Protected person deletion requires exact UUID
-confirmation, records an audit event, and refuses deletion while retained dependencies exist.
+evidence. Name-only evidence always requires review. Protected Person deletion requires exact-name
+confirmation and queues durable cleanup of operational relationships and person-owned retained
+history. Event deletion instead removes active program/deployment data after preserving intentional
+participation facts under the permanent Person UUID. Archive retains Event data, and ADR-0007
+revocation retains the Site projection. Target-independent audit evidence survives deletion.
 
 ## Program relationships and workflow
 

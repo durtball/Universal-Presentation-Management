@@ -5,6 +5,8 @@ import type {
   Health,
   ImportBatch,
   PersonRecord,
+  DeletionOperation,
+  DeletionPreview,
   Row,
   RoomMapping,
   SiteRecord,
@@ -36,6 +38,13 @@ export function centralApi(csrfToken: string | null = null) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, timezone }),
       }),
+    eventDeletionImpact: (eventId: string) =>
+      get<DeletionPreview>(`/api/v1/admin/events/${eventId}/deletion-impact`),
+    deleteEvent: (eventId: string, confirmation: string) =>
+      client.request<DeletionOperation>(`/api/v1/admin/events/${eventId}`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      }),
     deployEvent: (eventId: string, siteId: string) =>
       client.request<Row>(`/api/v1/admin/events/${eventId}/deployments`, {
         method: "POST",
@@ -48,6 +57,13 @@ export function centralApi(csrfToken: string | null = null) {
       }),
     people: (signal?: AbortSignal) =>
       get<PersonRecord[]>("/api/v1/admin/people", signal),
+    personDeletionImpact: (personId: string) =>
+      get<DeletionPreview>(`/api/v1/admin/people/${personId}/lifecycle-deletion-impact`),
+    deletePerson: (personId: string, confirmation: string) =>
+      client.request<DeletionOperation>(`/api/v1/admin/people/${personId}/lifecycle`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      }),
     participants: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/participants`, signal),
     sessions: (eventId: string, signal?: AbortSignal) =>
