@@ -3,6 +3,7 @@
 import io
 import os
 from collections.abc import Iterator
+from datetime import datetime, time
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,9 +22,14 @@ from upm_central.persistence.models import (
     EventDeployment,
     EventParticipation,
     Person,
+    Presentation,
+    PresentationPresenter,
+    PresentationSession,
+    SessionParticipant,
     Site,
 )
-from upm_shared.enums import EnrollmentState
+from upm_central.persistence.models import Session as ProgramSession
+from upm_shared.enums import EnrollmentState, ParticipantStatus, SessionStatus
 
 CENTRAL_URL = os.getenv("UPM_CENTRAL_DATABASE_URL")
 
@@ -95,6 +101,114 @@ def _xlsx_bytes() -> bytes:
             "Grand Ballroom",
         ]
     )
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _wide_program_xlsx_bytes(*, include_extra: bool = False) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "Presentation ID",
+            "Presentation Title",
+            "Date",
+            "Start Time",
+            "End Time",
+            "Track",
+            "Session Format",
+            "Room",
+            "First Name",
+            "Last Name",
+            "Email",
+        ]
+    )
+    rows = [
+        (
+            3468947,
+            "Cloud One",
+            datetime(2026, 8, 4),
+            time(16, 15),
+            time(16, 35),
+            "AI Agents",
+            "Solo Talk",
+            "Venetian Ballroom F",
+            "Ada",
+            "One",
+            "ada@example.com",
+        ),
+        (
+            3468947,
+            "Cloud One",
+            datetime(2026, 8, 4),
+            time(16, 15),
+            time(16, 35),
+            "AI Agents",
+            "Solo Talk",
+            "Venetian Ballroom F",
+            "Ben",
+            "Two",
+            "ben@example.com",
+        ),
+        (
+            3468948,
+            "Later Cloud",
+            datetime(2026, 8, 4),
+            time(17, 0),
+            time(17, 20),
+            "AI Agents",
+            "Solo Talk",
+            "Venetian Ballroom F",
+            "Cara",
+            "Three",
+            "cara@example.com",
+        ),
+        (
+            3468949,
+            "Next Door",
+            datetime(2026, 8, 4),
+            time(16, 15),
+            time(16, 35),
+            "AI Agents",
+            "Solo Talk",
+            "Venetian Ballroom G",
+            "Dev",
+            "Four",
+            "dev@example.com",
+        ),
+        (
+            3468950,
+            "Tomorrow",
+            datetime(2026, 8, 5),
+            time(16, 15),
+            time(16, 35),
+            "AI Agents",
+            "Solo Talk",
+            "Venetian Ballroom F",
+            "Eve",
+            "Five",
+            "eve@example.com",
+        ),
+    ]
+    if include_extra:
+        rows.append(
+            (
+                3468951,
+                "Cloud Three",
+                datetime(2026, 8, 4),
+                time(16, 15),
+                time(16, 35),
+                "AI Agents",
+                "Solo Talk",
+                "Venetian Ballroom F",
+                "Finn",
+                "Six",
+                "finn@example.com",
+            )
+        )
+    for row in rows:
+        sheet.append(row)
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -368,6 +482,281 @@ def test_people_program_import_and_revision_workflow(program_database: str) -> N
                 select(EventParticipation).where(
                     EventParticipation.event_id == UUID(event_id),
                     EventParticipation.person_id == person.person_id,
+                )
+            )
+            is not None
+        )
+    engine.dispose()
+
+
+def test_wide_program_rows_create_deterministic_grouped_sessions(program_database: str) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    engine = create_engine(program_database)
+    site_id = uuid4()
+    with Session(engine) as session, session.begin():
+        session.add(
+            Site(
+                site_id=site_id,
+                display_name="Import Site",
+                enabled=True,
+                enrollment_state=EnrollmentState.ACTIVE,
+            )
+        )
+
+    with TestClient(create_app(settings)) as client:
+        event_id = client.post(
+            "/api/v1/admin/events",
+            headers=headers,
+            json={"name": "Wide Program", "timezone": "UTC"},
+        ).json()["event_id"]
+        upload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={
+                "file": (
+                    "program.xlsx",
+                    _wide_program_xlsx_bytes(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            data={"importer_type": "program"},
+        )
+        assert upload.status_code == 201
+        batch_id = upload.json()["import_batch_id"]
+        review_response = client.get(f"/api/v1/admin/imports/{batch_id}", headers=headers)
+        assert review_response.status_code == 200
+        review = review_response.json()
+        assert review["preview_counts"]["people_or_presenters"] == 5
+        assert review["preview_counts"]["sessions"] == 4
+        assert review["preview_counts"]["presentations"] == 5
+        assert review["preview_counts"]["unresolved_room_mappings"] == 4
+        committed = client.post(f"/api/v1/admin/imports/{batch_id}/commit", headers=headers)
+        assert committed.status_code == 200
+
+        sessions = client.get(f"/api/v1/admin/events/{event_id}/sessions", headers=headers).json()
+        presentations = client.get(
+            f"/api/v1/admin/events/{event_id}/presentations", headers=headers
+        ).json()
+        assert len(sessions) == 4
+        assert len(presentations) == 4
+        first = next(
+            item
+            for item in sessions
+            if item["starts_at"] == "2026-08-04T16:15:00Z"
+            and item["location_name"] == "Venetian Ballroom F"
+        )
+        assert {item["display_name"] for item in first["presenters"]} == {"Ada One", "Ben Two"}
+        assert {
+            item["presentation_code"]
+            for item in presentations
+            if item["preferred_session_id"] == first["session_id"]
+        } == {"3468947"}
+        original_session_ids = {item["session_code"]: item["session_id"] for item in sessions}
+
+        reupload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={
+                "file": (
+                    "program-revised.xlsx",
+                    _wide_program_xlsx_bytes(include_extra=True),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            data={"importer_type": "program"},
+        )
+        assert (
+            client.post(
+                f"/api/v1/admin/imports/{reupload.json()['import_batch_id']}/commit",
+                headers=headers,
+            ).status_code
+            == 200
+        )
+        stable_sessions = client.get(
+            f"/api/v1/admin/events/{event_id}/sessions", headers=headers
+        ).json()
+        assert {
+            item["session_code"]: item["session_id"] for item in stable_sessions
+        } == original_session_ids
+
+        deployment = client.post(
+            f"/api/v1/admin/events/{event_id}/deployments",
+            headers=headers,
+            json={"site_id": str(site_id)},
+        )
+        assert deployment.status_code == 201
+
+    with Session(engine) as session:
+        assert session.query(ProgramSession).filter_by(event_id=UUID(event_id)).count() == 4
+        assert session.query(Presentation).filter_by(event_id=UUID(event_id)).count() == 5
+        assert session.query(PresentationSession).count() == 5
+        assert session.query(PresentationPresenter).count() == 6
+        snapshot = (
+            session.get(EventDeployment, UUID(deployment.json()["deployment_id"]))
+            .snapshots[-1]
+            .snapshot
+        )
+        assert len(snapshot["sessions"]) == 4
+        assert {item["location_name"] for item in snapshot["sessions"]} == {
+            "Venetian Ballroom F",
+            "Venetian Ballroom G",
+        }
+    engine.dispose()
+
+
+def test_authoritative_reimport_reconciles_relationships_and_preserves_manual_ones(
+    program_database: str,
+) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    first = (
+        b"Presentation ID,Presentation Title,Session ID,Session Title,Room,Email,First Name\n"
+        b"P-1,Talk,S-A,Session A,Room A,ada@example.com,Ada\n"
+        b"P-1,Talk,S-A,Session A,Room A,ben@example.com,Ben\n"
+    )
+    revised = (
+        b"Presentation ID,Presentation Title,Session ID,Session Title,Room,Email,First Name\n"
+        b"P-1,Talk,S-B,Session B,Room B,cara@example.com,Cara\n"
+        b"P-1,Talk,S-B,Session B,Room B,ben@example.com,Ben\n"
+    )
+    engine = create_engine(program_database)
+    with TestClient(create_app(settings)) as client:
+        event_id = client.post(
+            "/api/v1/admin/events",
+            headers=headers,
+            json={"name": "Reimport", "timezone": "UTC"},
+        ).json()["event_id"]
+        upload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={"file": ("first.csv", first, "text/csv")},
+            data={"importer_type": "program"},
+        )
+        assert upload.status_code == 201
+        assert (
+            client.post(
+                f"/api/v1/admin/imports/{upload.json()['import_batch_id']}/commit", headers=headers
+            ).status_code
+            == 200
+        )
+
+        with Session(engine) as session, session.begin():
+            presentation = session.scalar(
+                select(Presentation).where(Presentation.presentation_code == "P-1")
+            )
+            session_a = session.scalar(
+                select(ProgramSession).where(ProgramSession.session_code == "S-A")
+            )
+            manual_session = ProgramSession(
+                event_id=UUID(event_id), title="Manual Session", status=SessionStatus.SCHEDULED
+            )
+            manual_person = Person(
+                display_name="Manual Presenter",
+                normalized_name="manual presenter",
+                primary_email="manual@example.com",
+                normalized_email="manual@example.com",
+            )
+            session.add_all([manual_session, manual_person])
+            session.flush()
+            manual_participant = EventParticipation(
+                event_id=UUID(event_id),
+                person_id=manual_person.person_id,
+                participant_status=ParticipantStatus.ACTIVE,
+                is_presenter=True,
+                source="manual",
+            )
+            session.add(manual_participant)
+            session.flush()
+            session.add_all(
+                [
+                    PresentationSession(
+                        presentation_id=presentation.presentation_id,
+                        session_id=manual_session.session_id,
+                        primary_session=False,
+                        source="manual",
+                    ),
+                    PresentationPresenter(
+                        presentation_id=presentation.presentation_id,
+                        event_participation_id=manual_participant.event_participation_id,
+                        role="presenter",
+                        presenter_order=99,
+                        source="manual",
+                    ),
+                    SessionParticipant(
+                        session_id=session_a.session_id,
+                        event_participation_id=manual_participant.event_participation_id,
+                        role="presenter",
+                        presenter_order=99,
+                        source="manual",
+                    ),
+                ]
+            )
+
+        upload = client.post(
+            f"/api/v1/admin/events/{event_id}/imports",
+            headers=headers,
+            files={"file": ("revised.csv", revised, "text/csv")},
+            data={"importer_type": "program"},
+        )
+        assert upload.status_code == 201
+        assert (
+            client.post(
+                f"/api/v1/admin/imports/{upload.json()['import_batch_id']}/commit", headers=headers
+            ).status_code
+            == 200
+        )
+
+    with Session(engine) as session:
+        presentation = session.scalar(
+            select(Presentation).where(Presentation.presentation_code == "P-1")
+        )
+        imported_sessions = session.scalars(
+            select(PresentationSession).where(
+                PresentationSession.presentation_id == presentation.presentation_id,
+                PresentationSession.source == "import",
+            )
+        ).all()
+        assert len(imported_sessions) == 1
+        assert imported_sessions[0].primary_session is True
+        assert session.get(ProgramSession, imported_sessions[0].session_id).session_code == "S-B"
+        assert (
+            session.scalar(
+                select(PresentationSession).where(
+                    PresentationSession.presentation_id == presentation.presentation_id,
+                    PresentationSession.source == "manual",
+                )
+            )
+            is not None
+        )
+        imported_presenters = session.scalars(
+            select(PresentationPresenter)
+            .where(
+                PresentationPresenter.presentation_id == presentation.presentation_id,
+                PresentationPresenter.source == "import",
+            )
+            .order_by(PresentationPresenter.presenter_order)
+        ).all()
+        assert [link.event_participation.person.primary_email for link in imported_presenters] == [
+            "cara@example.com",
+            "ben@example.com",
+        ]
+        assert [link.primary_presenter for link in imported_presenters] == [True, False]
+        assert (
+            session.scalar(
+                select(PresentationPresenter).where(
+                    PresentationPresenter.presentation_id == presentation.presentation_id,
+                    PresentationPresenter.source == "manual",
                 )
             )
             is not None
