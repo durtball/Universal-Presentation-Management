@@ -31,6 +31,7 @@ from upm_central.event_deployments import (
     retry_deployment,
     revoke_deployment,
 )
+from upm_central.lifecycle import clear_event_program, delete_event
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import (
     AdminSession,
@@ -602,7 +603,9 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     @app.get("/api/v1/admin/events", dependencies=[Depends(require_admin)])
     def list_events(session: DbSession) -> list[dict[str, object]]:
         result = []
-        for event in session.scalars(select(Event).order_by(Event.name)):
+        for event in session.scalars(
+            select(Event).where(Event.archived_at.is_(None)).order_by(Event.name)
+        ):
             deployments = session.scalars(
                 select(EventDeployment).where(EventDeployment.event_id == event.event_id)
             ).all()
@@ -649,6 +652,22 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             push_deployment(session, deployment)
             pushed.append(deployment.deployment_id)
         return {"event_id": event_id, "revision": event.revision, "deployments_pushed": pushed}
+
+    @app.post("/api/v1/admin/events/{event_id}/reset", dependencies=[Depends(require_admin)])
+    def reset_event(event_id: UUID, request: Request, session: DbSession) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        counts = clear_event_program(session, event, actor=request.state.admin_actor)
+        return {"event_id": event_id, "reset": True, "affected_counts": counts}
+
+    @app.delete("/api/v1/admin/events/{event_id}", dependencies=[Depends(require_admin)])
+    def remove_event(event_id: UUID, request: Request, session: DbSession) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+        counts = delete_event(session, event, actor=request.state.admin_actor)
+        return {"event_id": event_id, "deleted": True, "affected_counts": counts}
 
     @app.get(
         "/api/v1/admin/events/{event_id}/deployments",
@@ -961,5 +980,7 @@ async function createEvent(){await fetch('/api/v1/admin/events',{method:'POST',h
 body:JSON.stringify({name:document.querySelector('#event-name').value})});load()}
 </script></body></html>"""
 
-    register_program_routes(app, db, require_admin)
+    register_program_routes(
+        app, db, require_admin, lambda: get_settings().enable_destructive_test_tools
+    )
     return app

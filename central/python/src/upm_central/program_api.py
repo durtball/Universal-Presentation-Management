@@ -6,13 +6,14 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from upm_central.imports import commit_batch, create_batch, decide, detect_columns
+from upm_central.lifecycle import person_preview, purge_people
 from upm_central.persistence.models import (
     Event,
     EventParticipation,
@@ -73,6 +74,16 @@ class PersonUpdate(PersonWrite):
 
 
 class DeleteConfirmation(ApiModel):
+    confirmation: str
+
+
+class PeoplePurge(ApiModel):
+    person_ids: list[UUID] | None = None
+    confirmation: str
+
+
+class TestDataReset(ApiModel):
+    categories: list[str] = Field(default_factory=lambda: ["all_program_data"])
     confirmation: str
 
 
@@ -288,6 +299,7 @@ def register_program_routes(
     app: FastAPI,
     db: Callable[[], Iterator[Session]],
     require_admin: Callable[..., None],
+    destructive_tools_enabled: Callable[[], bool] = lambda: False,
 ) -> None:
     DbSession = Annotated[Session, Depends(db)]
     admin = [Depends(require_admin)]
@@ -420,6 +432,115 @@ def register_program_routes(
             session, person, confirmation=payload.confirmation, actor=x_upm_actor or "central-admin"
         )
         return {"person_id": person_id, "deleted": True}
+
+    @app.get("/api/v1/admin/testing-tools", dependencies=admin, tags=["testing-tools"])
+    def testing_tools() -> dict[str, bool]:
+        return {"enabled": destructive_tools_enabled()}
+
+    def require_test_tools() -> None:
+        if not destructive_tools_enabled():
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="destructive testing tools disabled"
+            )
+
+    @app.get(
+        "/api/v1/admin/testing-tools/person-purge-preview",
+        dependencies=admin,
+        tags=["testing-tools"],
+    )
+    def people_purge_preview(session: DbSession) -> dict[str, object]:
+        require_test_tools()
+        return {
+            "affected_counts": person_preview(session),
+            "required_confirmation": "DELETE ALL SPEAKERS",
+        }
+
+    @app.post("/api/v1/admin/people/purge", dependencies=admin, tags=["people"])
+    def purge_person_registry(
+        payload: PeoplePurge, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        mass = payload.person_ids is None
+        if mass:
+            require_test_tools()
+            required = "DELETE ALL SPEAKERS"
+        else:
+            required = "DELETE SELECTED PEOPLE"
+        if payload.confirmation != required:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"type {required} to confirm"
+            )
+        counts = purge_people(session, payload.person_ids, actor=request.state.admin_actor)
+        return {"deleted": True, "affected_counts": counts}
+
+    @app.post("/api/v1/admin/testing-tools/reset", dependencies=admin, tags=["testing-tools"])
+    def reset_test_data(
+        payload: TestDataReset, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        require_test_tools()
+        if payload.confirmation != "RESET TEST DATA":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail="type RESET TEST DATA to confirm"
+            )
+        allowed = {
+            "all_program_data",
+            "events",
+            "imports",
+            "sessions",
+            "event_presenter_participation",
+            "presentations",
+            "room_event_assignments",
+            "permanent_people",
+        }
+        if not payload.categories or not set(payload.categories) <= allowed:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid reset categories"
+            )
+        # The all-program option is intentionally a coherent full reset. Category resets retain
+        # event shells and clear the selected program family; interdependent program families are
+        # cleared together rather than leaving broken references.
+        all_program = "all_program_data" in payload.categories
+        clear_program = all_program or bool(
+            set(payload.categories)
+            & {
+                "sessions",
+                "event_presenter_participation",
+                "presentations",
+                "room_event_assignments",
+                "imports",
+            }
+        )
+        totals: dict[str, int] = {}
+        events = list(session.scalars(select(Event).order_by(Event.event_id)))
+        if all_program or "events" in payload.categories:
+            from upm_central.lifecycle import delete_event
+
+            for event in events:
+                counts = delete_event(session, event, actor=request.state.admin_actor)
+                for key, value in counts.items():
+                    totals[key] = totals.get(key, 0) + value
+        elif clear_program:
+            from upm_central.lifecycle import clear_event_program
+
+            for event in events:
+                counts = clear_event_program(session, event, actor=request.state.admin_actor)
+                for key, value in counts.items():
+                    totals[key] = totals.get(key, 0) + value
+        if all_program or "permanent_people" in payload.categories:
+            for key, value in purge_people(session, None, actor=request.state.admin_actor).items():
+                totals[key] = totals.get(key, 0) + value
+        audit(
+            session,
+            action="central.test_data.reset",
+            target_type="program_data",
+            target_id=None,
+            after={"categories": payload.categories, "affected_counts": totals, "success": True},
+            actor=request.state.admin_actor,
+        )
+        return {
+            "reset": True,
+            "affected_counts": totals,
+            "preserved": ["media", "sites", "devices", "users", "authentication", "infrastructure"],
+        }
 
     @app.get("/api/v1/admin/events/{event_id}/participants", dependencies=admin, tags=["program"])
     def list_participants(event_id: UUID, session: DbSession) -> list[dict[str, object]]:

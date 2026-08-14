@@ -56,6 +56,12 @@
 - Presentation-oriented CSV/XLSX rows create and reuse sessions from explicit source session identifiers or a deterministic title/schedule/location/track/format composite; presentation and presenter relationships are retained and imported room labels flow into deployment snapshots.
 - Reconciliation uses explicit UUID, unique external identifier, and normalized email evidence; name-only evidence requires review. Commit is transactional and guarded against stale program/person revisions.
 - Central browser administration supports Event creation, functional upload/review/reconciliation/commit, relationship lists, Site enrollment approval, deployment, Site room mapping, and useful failure states.
+- Central lifecycle administration provides transactional event reset/archive-delete and
+  dependency-ordered permanent-person purge. Registry-wide purge and full importer-test reset are
+  disabled by default behind `UPM_CENTRAL_ENABLE_DESTRUCTIVE_TEST_TOOLS`; their UI requires exact
+  typed confirmation and a person dependency preview. Event deletion first emits an empty ADR-0007
+  snapshot, then archives the empty shell so offline Sites can remove stale program projections.
+  Media replicas and infrastructure, authentication, Site, and device state are preserved.
 
 ### Rooms
 

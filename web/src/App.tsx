@@ -13,6 +13,7 @@ import { EventScoped } from "./pages/central/EventScoped";
 import { Imports } from "./pages/central/Imports";
 import { Login } from "./pages/central/Login";
 import { People } from "./pages/central/People";
+import { TestingTools } from "./pages/central/TestingTools";
 import { Sites } from "./pages/central/Sites";
 import { RoomMappings } from "./pages/central/RoomMappings";
 import {
@@ -51,6 +52,7 @@ function CentralApp() {
         <Route path="/admin/events" element={<Events />} />
         <Route path="/admin/events/:eventId" element={<EventDetailRoute />} />
         <Route path="/admin/people" element={<People />} />
+        <Route path="/admin/testing-tools" element={<TestingTools />} />
         <Route
           path="/admin/sessions"
           element={<EventScoped type="sessions" />}

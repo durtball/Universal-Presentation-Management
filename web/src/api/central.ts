@@ -48,6 +48,21 @@ export function centralApi(csrfToken: string | null = null) {
       }),
     people: (signal?: AbortSignal) =>
       get<PersonRecord[]>("/api/v1/admin/people", signal),
+    testingTools: (signal?: AbortSignal) =>
+      get<{ enabled: boolean }>("/api/v1/admin/testing-tools", signal),
+    personPurgePreview: (signal?: AbortSignal) =>
+      get<{ affected_counts: Record<string, number>; required_confirmation: string }>(
+        "/api/v1/admin/testing-tools/person-purge-preview", signal),
+    purgeAllPeople: (confirmation: string) =>
+      client.request<Row>("/api/v1/admin/people/purge", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ person_ids: null, confirmation }),
+      }),
+    resetTestData: (confirmation: string) =>
+      client.request<Row>("/api/v1/admin/testing-tools/reset", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ categories: ["all_program_data"], confirmation }),
+      }),
     participants: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/participants`, signal),
     sessions: (eventId: string, signal?: AbortSignal) =>

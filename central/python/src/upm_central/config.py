@@ -24,6 +24,7 @@ class CentralDatabaseSettings(BaseSettings):
     public_url: str = "http://upm-central:8080"
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
+    enable_destructive_test_tools: bool = False
 
     @field_validator("database_url")
     @classmethod
