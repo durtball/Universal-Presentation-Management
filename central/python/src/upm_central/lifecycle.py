@@ -42,7 +42,12 @@ from upm_central.persistence.models import (
 from upm_central.persistence.queue import CentralQueue
 from upm_central.sync import next_sequence
 from upm_shared.enums import JobPriority, SourceSystem
-from upm_shared.jobs import PRIORITY_VALUES, OutboxPayload
+from upm_shared.jobs import (
+    PRIORITY_VALUES,
+    LifecycleDeletionJobData,
+    LifecycleDeletionJobPayload,
+    OutboxPayload,
+)
 
 
 def _count(session: Session, model, *criteria) -> int:
@@ -163,7 +168,9 @@ def request_deletion(
     session.flush()
     CentralQueue(session).enqueue_processing(
         job_type=f"lifecycle.delete_{target_type}",
-        payload={"deletion_operation_id": str(operation.deletion_operation_id)},
+        payload=LifecycleDeletionJobPayload(
+            data=LifecycleDeletionJobData(deletion_operation_id=operation.deletion_operation_id)
+        ),
         idempotency_key=str(operation.deletion_operation_id),
         max_attempts=10,
         priority=PRIORITY_VALUES[JobPriority.HIGH],
@@ -274,6 +281,13 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
             )
         )
     )
+    media_ids.update(
+        session.scalars(
+            select(MediaObjectReplica.media_object_id).where(
+                MediaObjectReplica.event_id == event.event_id
+            )
+        )
+    )
     session.execute(
         delete(PresentationAsset).where(PresentationAsset.presentation_version_id.in_(vids))
     )
@@ -348,12 +362,6 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
                 delete(MediaObjectReplica).where(MediaObjectReplica.media_object_id == media_id)
             )
             deleted_media += 1
-    session.execute(
-        delete(MediaObjectReplica).where(
-            MediaObjectReplica.event_id == event.event_id,
-            ~MediaObjectReplica.media_object_id.in_(select(PresentationAsset.media_object_id)),
-        )
-    )
     # Shared objects lose only the deleted Event association; their stable media identity remains.
     session.execute(
         update(MediaObjectReplica)

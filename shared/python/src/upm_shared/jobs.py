@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,20 @@ class JobPayload(BaseModel):
 
     schema_version: Annotated[int, Field(ge=1)] = 1
     data: dict[str, object] = Field(default_factory=dict)
+
+
+class LifecycleDeletionJobData(BaseModel):
+    """Strongly typed identity required by Central lifecycle deletion handlers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    deletion_operation_id: UUID
+
+
+class LifecycleDeletionJobPayload(JobPayload):
+    """Versioned payload contract for lifecycle.delete_event/person jobs."""
+
+    data: LifecycleDeletionJobData
 
 
 class OutboxPayload(BaseModel):

@@ -15,7 +15,13 @@ from upm_central.persistence.models import (
     WorkerIdentity,
 )
 from upm_shared.enums import JobStatus
-from upm_shared.jobs import JobPayload, OutboxPayload, retry_delay, utc_now
+from upm_shared.jobs import (
+    JobPayload,
+    LifecycleDeletionJobPayload,
+    OutboxPayload,
+    retry_delay,
+    utc_now,
+)
 
 JobModel = TypeVar("JobModel", ProcessingJob, TransferJob)
 logger = logging.getLogger(__name__)
@@ -28,7 +34,14 @@ class CentralQueue:
         self.session = session
 
     def enqueue_processing(self, **values: Any) -> ProcessingJob:
-        values["payload"] = JobPayload.model_validate(values.get("payload", {})).model_dump()
+        payload_model = (
+            LifecycleDeletionJobPayload
+            if values.get("job_type") in {"lifecycle.delete_event", "lifecycle.delete_person"}
+            else JobPayload
+        )
+        values["payload"] = payload_model.model_validate(values.get("payload", {})).model_dump(
+            mode="json"
+        )
         job = ProcessingJob(**values)
         self.session.add(job)
         self.session.flush()

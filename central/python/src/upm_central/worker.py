@@ -9,7 +9,6 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
-from uuid import UUID
 
 from sqlalchemy import text
 
@@ -19,10 +18,31 @@ from upm_central.persistence.database import create_central_engine, create_centr
 from upm_central.persistence.models import DeletionOperation
 from upm_central.persistence.queue import CentralQueue
 from upm_shared.identifiers import new_uuid7
+from upm_shared.jobs import LifecycleDeletionJobPayload
 
 
 def log(event: str, **context: object) -> None:
     print(json.dumps({"event": event, **context}, default=str), flush=True)
+
+
+def execute_processing_job(session, queue: CentralQueue, work, worker_id: str) -> bool:
+    """Dispatch one claimed Central processing job; return false when it was failed."""
+    if work.job_type not in {"lifecycle.delete_event", "lifecycle.delete_person"}:
+        return True
+    payload = LifecycleDeletionJobPayload.model_validate(work.payload)
+    operation = session.get(DeletionOperation, payload.data.deletion_operation_id)
+    if operation is None:
+        queue.fail(
+            work,
+            worker_id,
+            error_code="deletion_missing",
+            message="deletion operation does not exist",
+            retryable=False,
+            base_delay_seconds=1,
+        )
+        return False
+    run_deletion(session, operation)
+    return True
 
 
 def run(*, sync: bool = False, once: bool = False) -> int:
@@ -83,21 +103,10 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if kind == "processing" and work.job_type.startswith("lifecycle.delete_"):
-                        operation = session.get(
-                            DeletionOperation, UUID(str(work.payload.get("deletion_operation_id")))
-                        )
-                        if operation is None:
-                            queue.fail(
-                                work,
-                                worker_id,
-                                error_code="deletion_missing",
-                                message="deletion operation does not exist",
-                                retryable=False,
-                                base_delay_seconds=1,
-                            )
-                            continue
-                        run_deletion(session, operation)
+                    if kind == "processing" and not execute_processing_job(
+                        session, queue, work, worker_id
+                    ):
+                        continue
                     queue.complete(work, worker_id)
                     log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if once:

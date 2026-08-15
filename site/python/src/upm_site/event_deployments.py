@@ -586,6 +586,10 @@ def apply_event_deletion(session: Session, event: SyncEventEnvelope) -> str:
         "DELETE FROM device_assignments WHERE room_id IN (SELECT room_id FROM rooms WHERE event_id=:event_id)",
         "DELETE FROM rooms WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM program_room_mappings m WHERE m.room_id=rooms.room_id)",
         "UPDATE media_objects SET deleted_at=COALESCE(deleted_at, now()) WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM presentation_assets a WHERE a.media_object_id=media_objects.media_object_id)",
+        "UPDATE media_objects SET event_id=NULL WHERE event_id=:event_id",
+        "UPDATE sync_events SET event_id=NULL WHERE event_id=:event_id",
+        "UPDATE outbox_events SET event_id=NULL WHERE event_id=:event_id",
+        "UPDATE audit_records SET event_id=NULL WHERE event_id=:event_id",
         "DELETE FROM events WHERE event_id=:event_id",
         "DELETE FROM person_projections p WHERE NOT EXISTS (SELECT 1 FROM event_participations ep WHERE ep.person_id=p.person_id)",
     ]
