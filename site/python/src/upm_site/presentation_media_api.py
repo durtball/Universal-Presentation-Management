@@ -9,8 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from upm_shared.enums import PresentationProcessingStatus, PresentationWorkflowStatus, SyncState
+from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
+from upm_shared.enums import (
+    PresentationProcessingStatus,
+    PresentationWorkflowStatus,
+    SourceSystem,
+    SyncState,
+)
 from upm_shared.identifiers import new_uuid7
+from upm_shared.jobs import OutboxPayload
 from upm_shared.presentation_media import (
     MatchCandidate,
     allocate_presentation_identifier,
@@ -25,6 +32,8 @@ from upm_site.persistence.models import (
     PresentationVersion,
 )
 from upm_site.persistence.models import Session as ProgramSession
+from upm_site.persistence.queue import SiteQueue
+from upm_site.sync import next_sequence
 
 
 class SitePresentationCreate(BaseModel):
@@ -75,6 +84,28 @@ def register_presentation_media_routes(
         )
         session.add(item)
         session.flush()
+        SiteQueue(session).enqueue_outbox(
+            event_type="site.presentation.upserted",
+            aggregate_type="presentation",
+            aggregate_id=item.presentation_id,
+            site_id=event.site_id,
+            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+            source_sequence=next_sequence(session),
+            idempotency_key=f"presentation:{item.presentation_id}:{item.revision}",
+            payload=OutboxPayload(
+                source_system=SourceSystem.SITE,
+                data={
+                    "presentation_id": str(item.presentation_id),
+                    "event_id": str(item.event_id),
+                    "session_id": str(item.session_id) if item.session_id else None,
+                    "title": item.title,
+                    "presentation_identifier": item.presentation_identifier,
+                    "presentation_identifier_source": item.presentation_identifier_source,
+                    "external_presentation_id": item.external_presentation_id,
+                    "revision": item.revision,
+                },
+            ),
+        )
         return {
             "presentation_id": item.presentation_id,
             "presentation_identifier": item.presentation_identifier,
@@ -111,6 +142,24 @@ def register_presentation_media_routes(
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         presentation.sync_state = SyncState.PENDING
         session.flush()
+        SiteQueue(session).enqueue_outbox(
+            event_type="site.presentation_version.created",
+            aggregate_type="presentation_version",
+            aggregate_id=version.presentation_version_id,
+            site_id=session.get(Event, presentation.event_id).site_id,
+            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+            source_sequence=next_sequence(session),
+            idempotency_key=f"presentation-version:{version.presentation_version_id}",
+            payload=OutboxPayload(
+                source_system=SourceSystem.SITE,
+                data={
+                    "presentation_version_id": str(version.presentation_version_id),
+                    "presentation_id": str(presentation_id),
+                    "version_number": number,
+                    "created_at": version.created_at.isoformat(),
+                },
+            ),
+        )
         return {
             "presentation_version_id": version.presentation_version_id,
             "presentation_id": presentation_id,

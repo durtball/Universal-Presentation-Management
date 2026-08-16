@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 from upm_central.persistence.models import (
     EventDeployment,
     OutboxEvent,
+    Presentation,
+    PresentationMediaImport,
+    PresentationVersion,
     Site,
     SiteCredential,
     SiteEnrollmentClaim,
@@ -20,10 +23,12 @@ from upm_central.persistence.models import (
     SyncCursor,
     SyncReceipt,
     SyncSequence,
+    TransferJob,
     utc_now,
 )
 from upm_central.persistence.queue import CentralQueue
 from upm_shared.contracts.deployments import SiteDeploymentStatus
+from upm_shared.contracts.media_transfer import MediaTransferProgress
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
     EventAcknowledgement,
@@ -33,7 +38,11 @@ from upm_shared.enums import (
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
+    JobStatus,
+    MediaImportState,
+    MediaTransferState,
     SourceSystem,
+    SyncState,
 )
 from upm_shared.jobs import OutboxPayload
 
@@ -211,6 +220,150 @@ def apply_site_event(
             deployment.failure_reason = None
         site.last_seen_at = utc_now()
         site.last_successful_sync_at = utc_now()
+    elif event.event_type == "site.media_transfer.progress":
+        try:
+            progress = MediaTransferProgress.model_validate(event.payload)
+        except ValueError as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_transfer_progress",
+                detail=str(exc)[:512],
+            )
+        if progress.site_id != site.site_id or event.entity_id != progress.transfer_session_id:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="invalid_transfer_progress_identity",
+            )
+        transfer = session.get(TransferJob, progress.transfer_session_id, with_for_update=True)
+        media_import = session.scalar(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.transfer_job_id == progress.transfer_session_id
+            )
+        )
+        if (
+            transfer is None
+            or media_import is None
+            or transfer.owning_site_id != site.site_id
+            or media_import.event_id != progress.event_id
+            or media_import.presentation_version_id != progress.presentation_version_id
+            or progress.expected_size != media_import.size_bytes
+        ):
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="unknown_transfer_progress",
+            )
+        previous = int(transfer.payload.get("confirmed_offset", 0))
+        completed = transfer.status is JobStatus.SUCCEEDED
+        if progress.confirmed_offset >= previous and not completed:
+            transfer.payload = {
+                **transfer.payload,
+                "confirmed_offset": progress.confirmed_offset,
+                "expected_size": progress.expected_size,
+                "site_state": progress.state,
+                "last_progress_at": progress.last_progress_at.isoformat(),
+                "local_media_ready": progress.local_media_ready,
+            }
+            transfer.progress = (
+                100
+                if progress.expected_size == 0
+                else progress.confirmed_offset * 100 / progress.expected_size
+            )
+            if progress.state is MediaTransferState.COMPLETED and progress.local_media_ready:
+                transfer.status = JobStatus.SUCCEEDED
+                transfer.completed_at = utc_now()
+                media_import.import_state = MediaImportState.SITE_READY
+                media_import.site_media_object_id = progress.media_object_id
+                media_import.sync_state = SyncState.SYNCHRONIZED
+            elif progress.state is MediaTransferState.FAILED:
+                transfer.status = JobStatus.FAILED
+                transfer.last_error = progress.error_detail
+                media_import.import_state = MediaImportState.FAILED
+            else:
+                media_import.import_state = MediaImportState.TRANSFERRING
+        site.last_seen_at = utc_now()
+        site.last_successful_sync_at = utc_now()
+    elif event.event_type == "site.presentation.upserted":
+        payload = event.payload
+        try:
+            presentation_id = UUID(str(payload["presentation_id"]))
+            event_id = UUID(str(payload["event_id"]))
+            session_id = UUID(str(payload["session_id"])) if payload.get("session_id") else None
+            revision = int(payload.get("revision", 1))
+        except (KeyError, TypeError, ValueError) as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_presentation",
+                detail=str(exc)[:512],
+            )
+        deployment = session.scalar(
+            select(EventDeployment).where(
+                EventDeployment.site_id == site.site_id,
+                EventDeployment.event_id == event_id,
+            )
+        )
+        if deployment is None or event.entity_id != presentation_id:
+            return EventAcknowledgement(
+                event_id=event.event_id, accepted=False, error_code="invalid_presentation_scope"
+            )
+        item = session.get(Presentation, presentation_id)
+        if item is None:
+            item = Presentation(
+                presentation_id=presentation_id,
+                event_id=event_id,
+                session_id=session_id,
+                title=str(payload["title"]),
+                presentation_identifier=str(payload["presentation_identifier"]),
+                presentation_identifier_source=str(payload["presentation_identifier_source"]),
+                external_presentation_id=payload.get("external_presentation_id"),
+                source="site",
+                source_metadata={"origin_site_id": str(site.site_id)},
+                revision=revision,
+            )
+            session.add(item)
+        elif revision > item.revision:
+            item.title = str(payload["title"])
+            item.session_id = session_id
+            item.external_presentation_id = payload.get("external_presentation_id")
+            item.revision = revision
+    elif event.event_type == "site.presentation_version.created":
+        payload = event.payload
+        try:
+            version_id = UUID(str(payload["presentation_version_id"]))
+            presentation_id = UUID(str(payload["presentation_id"]))
+            version_number = int(payload["version_number"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_presentation_version",
+                detail=str(exc)[:512],
+            )
+        presentation = session.get(Presentation, presentation_id)
+        if presentation is None or event.entity_id != version_id:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="presentation_metadata_required",
+            )
+        version = session.get(PresentationVersion, version_id)
+        if version is None:
+            session.add(
+                PresentationVersion(
+                    presentation_version_id=version_id,
+                    presentation_id=presentation_id,
+                    version_number=version_number,
+                )
+            )
+        elif version.presentation_id != presentation_id or version.version_number != version_number:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="presentation_version_conflict",
+            )
     else:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="unsupported_event_type"

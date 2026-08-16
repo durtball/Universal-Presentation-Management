@@ -7,10 +7,14 @@ from pathlib import Path
 import httpx
 from sqlalchemy.orm import Session, sessionmaker
 
-from upm_shared.enums import MediaCategory, MediaTransferState
+from upm_shared.contracts.media_transfer import MediaTransferProgress
+from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
+from upm_shared.enums import MediaCategory, MediaTransferState, SourceSystem
+from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import IngestionRequest, MediaIngestionService
 from upm_site.persistence.models import MediaTransferSession, TransferJob, utc_now
+from upm_site.persistence.queue import SiteQueue
 from upm_site.sync_transport import auth_context, checked
 
 
@@ -64,6 +68,7 @@ def execute_central_pull(
         transfer.confirmed_offset = next_offset
         transfer.last_progress_at = utc_now()
     if transfer.confirmed_offset != transfer.expected_size:
+        enqueue_transfer_progress(session, transfer)
         return False
     transfer.state = MediaTransferState.VERIFYING
     digest = hashlib.sha256()
@@ -92,4 +97,48 @@ def execute_central_pull(
     transfer.state = MediaTransferState.COMPLETED
     transfer.error_detail = None
     path.unlink(missing_ok=True)
+    enqueue_transfer_progress(session, transfer, local_media_ready=True)
     return True
+
+
+def enqueue_transfer_progress(
+    session: Session,
+    transfer: MediaTransferSession,
+    *,
+    local_media_ready: bool = False,
+) -> None:
+    """Publish one durable event per acknowledged block or state transition."""
+    from upm_site.sync import next_sequence
+
+    observed_at = transfer.last_progress_at or utc_now()
+    progress = MediaTransferProgress(
+        transfer_session_id=transfer.transfer_session_id,
+        site_id=transfer.site_id,
+        event_id=transfer.event_id,
+        presentation_id=transfer.presentation_id,
+        presentation_version_id=transfer.presentation_version_id,
+        expected_size=transfer.expected_size,
+        confirmed_offset=transfer.confirmed_offset,
+        state=transfer.state,
+        retry_count=transfer.retry_count,
+        last_progress_at=observed_at,
+        media_object_id=transfer.media_object_id,
+        local_media_ready=local_media_ready,
+        error_detail=transfer.error_detail,
+    )
+    SiteQueue(session).enqueue_outbox(
+        event_type="site.media_transfer.progress",
+        aggregate_type="media_transfer",
+        aggregate_id=transfer.transfer_session_id,
+        site_id=transfer.site_id,
+        protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+        source_sequence=next_sequence(session),
+        idempotency_key=(
+            f"media-progress:{transfer.transfer_session_id}:"
+            f"{transfer.confirmed_offset}:{transfer.state}"
+        ),
+        payload=OutboxPayload(
+            source_system=SourceSystem.SITE,
+            data=progress.model_dump(mode="json"),
+        ),
+    )

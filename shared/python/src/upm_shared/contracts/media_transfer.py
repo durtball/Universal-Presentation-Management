@@ -58,6 +58,12 @@ class MediaTransferProgress(ContractModel):
     state: MediaTransferState
     retry_count: int = Field(default=0, ge=0)
     last_progress_at: datetime
+    event_id: EventId | None = None
+    presentation_id: PresentationId | None = None
+    presentation_version_id: PresentationVersionId | None = None
+    media_object_id: MediaObjectId | None = None
+    local_media_ready: bool = False
+    error_detail: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
     def offset_is_within_expected_size(self) -> "MediaTransferProgress":

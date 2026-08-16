@@ -103,9 +103,9 @@
 
 - **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
-- **Transfer execution:** Central-to-Site Site-pull has a resumable offset reader and Site worker;
-  reverse replication, progress projection, cleanup execution, bandwidth control, and progress UI
-  remain absent.
+- **Transfer execution:** Central-to-Site Site-pull has a resumable offset reader, Site worker, and
+  Site-to-Central progress projection; reverse replication, cleanup execution, bandwidth control,
+  and progress UI remain absent.
 - **Transfer architecture:** ADR-0011 now fixes Site-initiated Central pull, Site-initiated reverse
   push, durable byte-offset resume, Site-scoped authorization, SHA-256 finalization, partial
   ownership, retry/replay, and separate replication/readiness semantics. Runtime coverage remains
@@ -114,8 +114,13 @@
   the existing outbox, exposes bounded offset reads, and Site persists sessions and pulls real
   blocks into private partial storage. Each block is fsynced before its offset transaction commits;
   restart truncates unacknowledged tail bytes, full SHA-256 gates idempotent existing Site ingestion,
-  and the default block is configurable at 4 MiB. Site progress events, Central progress projection,
-  reverse Site-to-Central replication, and partial-expiry execution remain incomplete.
+  and the default block is configurable at 4 MiB. Every durable block/state advancement publishes
+  a Site-authoritative progress event; Central consumes it monotonically and projects byte progress,
+  failure, completed Site media identity, and READY only after verified ingestion completion.
+- **Site-originated metadata:** disconnected Site Presentation and PresentationVersion creation now
+  queues stable-identity outbox events. Central materializes the same UUIDs idempotently within an
+  authorized Event deployment and rejects identity/version conflicts. Reverse Site-to-Central
+  binary replication and partial-expiry execution remain incomplete.
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
   ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
   durable staging/match/version/transfer-queue APIs are implemented foundations. Reverse binary

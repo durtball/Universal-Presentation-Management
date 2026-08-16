@@ -16,8 +16,9 @@ from sqlalchemy import text
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
-from upm_site.media.transfer import execute_central_pull
+from upm_site.media.transfer import enqueue_transfer_progress, execute_central_pull
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
+from upm_site.persistence.models import MediaTransferSession
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
@@ -95,6 +96,12 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                     session, factory, settings, work, client
                                 )
                         except Exception as error:
+                            transfer_session = session.get(
+                                MediaTransferSession, work.transfer_job_id
+                            )
+                            if transfer_session is not None:
+                                transfer_session.error_detail = str(error)[:2048]
+                                enqueue_transfer_progress(session, transfer_session)
                             queue.fail(
                                 work,
                                 worker_id,
