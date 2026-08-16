@@ -44,6 +44,7 @@ from upm_shared.presentation_media import (
     MatchCandidate,
     canonical_presentation_filename,
     match_presentation,
+    normalize_source_relative_path,
 )
 
 
@@ -78,6 +79,7 @@ class CentralMediaStagingService:
         event_id: UUID,
         destination_site_id: UUID | None,
         original_filename: str,
+        source_relative_path: str | None,
         content_type: str | None,
         idempotency_key: str | None,
         chunks: AsyncIterator[bytes],
@@ -95,6 +97,10 @@ class CentralMediaStagingService:
             raise MediaStagingError("invalid original filename", "invalid_filename")
         if Path(filename).suffix.lower() not in SUPPORTED_PRESENTATION_EXTENSIONS:
             raise MediaStagingError("unsupported presentation extension", "unsupported_type")
+        try:
+            relative_path = normalize_source_relative_path(source_relative_path, filename)
+        except ValueError as error:
+            raise MediaStagingError(str(error), "invalid_source_relative_path") from error
         with self.factory.begin() as session:
             if session.get(Event, event_id) is None:
                 raise MediaStagingError("event not found", "event_not_found")
@@ -114,6 +120,7 @@ class CentralMediaStagingService:
                 event_id=event_id,
                 destination_site_id=destination_site_id,
                 original_filename=filename,
+                source_relative_path=relative_path,
                 staging_key=f"{import_id}.upload",
                 mime_type=content_type,
                 idempotency_key=idempotency_key,

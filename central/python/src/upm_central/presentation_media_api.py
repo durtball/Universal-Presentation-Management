@@ -4,6 +4,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from typing import Annotated
+from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -66,6 +67,7 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "presentation_identifier": item.presentation_identifier,
         "external_presentation_id": item.external_presentation_id,
         "original_filename": item.original_filename,
+        "source_relative_path": item.source_relative_path,
         "canonical_filename": item.canonical_filename,
         "size_bytes": item.size_bytes,
         "mime_type": item.mime_type,
@@ -106,6 +108,9 @@ def register_presentation_media_routes(
         event_id: UUID,
         request: Request,
         original_filename: Annotated[str, Header(alias="X-UPM-Original-Filename")],
+        source_relative_path: Annotated[
+            str | None, Header(alias="X-UPM-Source-Relative-Path")
+        ] = None,
         destination_site_id: Annotated[UUID | None, Query()] = None,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
         content_type: Annotated[str | None, Header(alias="Content-Type")] = None,
@@ -117,7 +122,10 @@ def register_presentation_media_routes(
             item = await service.stage(
                 event_id=event_id,
                 destination_site_id=destination_site_id,
-                original_filename=original_filename,
+                original_filename=unquote(original_filename),
+                source_relative_path=unquote(source_relative_path)
+                if source_relative_path
+                else None,
                 content_type=content_type,
                 idempotency_key=idempotency_key,
                 chunks=request.stream(),

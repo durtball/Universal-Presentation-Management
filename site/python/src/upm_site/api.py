@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
+from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -80,6 +81,7 @@ class MediaResponse(BaseModel):
     object_key: str
     category: MediaCategory
     original_filename: str
+    source_relative_path: str | None
     canonical_filename: str | None
     mime_type: str | None
     size_bytes: int | None = Field(ge=0)
@@ -145,6 +147,7 @@ def _media_response(session: Session, media: MediaObject) -> MediaResponse:
         object_key=media.object_key,
         category=media.category,
         original_filename=media.original_filename,
+        source_relative_path=media.source_relative_path,
         canonical_filename=media.canonical_filename,
         mime_type=media.mime_type,
         size_bytes=media.size_bytes,
@@ -234,6 +237,9 @@ def create_app(
         site_id: Annotated[UUID, Query()],
         category: Annotated[MediaCategory, Query()],
         original_filename: Annotated[str, Header(alias="X-UPM-Original-Filename")],
+        source_relative_path: Annotated[
+            str | None, Header(alias="X-UPM-Source-Relative-Path")
+        ] = None,
         expected_size: Annotated[int | None, Query(ge=0)] = None,
         event_id: Annotated[UUID | None, Query()] = None,
         presentation_version_id: Annotated[UUID | None, Query()] = None,
@@ -249,7 +255,8 @@ def create_app(
         )
         request = IngestionRequest(
             site_id=site_id,
-            original_filename=original_filename,
+            original_filename=unquote(original_filename),
+            source_relative_path=unquote(source_relative_path) if source_relative_path else None,
             category=category,
             expected_size=expected_size if expected_size is not None else content_length,
             event_id=event_id,

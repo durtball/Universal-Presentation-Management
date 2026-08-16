@@ -958,6 +958,7 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     presentation_identifier: Mapped[str | None] = mapped_column(String(128))
     external_presentation_id: Mapped[str | None] = mapped_column(String(512))
     original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_relative_path: Mapped[str | None] = mapped_column(String(2048))
     canonical_filename: Mapped[str | None] = mapped_column(String(1024))
     staging_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)

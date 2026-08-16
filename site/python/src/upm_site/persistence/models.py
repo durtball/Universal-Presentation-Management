@@ -741,6 +741,7 @@ class MediaObject(SiteRecordMixin, SiteBase):
         upm_enum(MediaCategory, length=32), nullable=False
     )
     original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_relative_path: Mapped[str | None] = mapped_column(String(2048))
     canonical_filename: Mapped[str | None] = mapped_column(String(1024))
     content_hash: Mapped[str | None] = mapped_column(String(255))
     hash_algorithm: Mapped[str | None] = mapped_column(String(32))

@@ -131,6 +131,9 @@
   foundations. Shared Central/Site Event Media workspaces now provide streamed multi-file upload,
   deterministic and explicitly confirmed manual matching, unmatched-media retention, paginated
   presentation lists, version history, local readiness, and Site-to-Central replication progress.
+  The shared upload queue accepts single or multiple PPT/PPTX/PDF files, recursively selected browser
+  directories, bounded per-file streaming, retryable partial failures, skipped incidental-file
+  reporting, and separately validated source-relative-path provenance.
   Concurrent revision reconciliation, complete Site audit/outbox handlers, Site RBAC, guarded
   unmatched deletion/rename, and complete bulk Central-to-Site deployment controls remain incomplete.
   Running-stack end-to-end verification is still required before calling the overall workflow

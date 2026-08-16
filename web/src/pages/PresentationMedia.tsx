@@ -33,12 +33,12 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
   }, [mode, activeEvent, session?.csrfToken]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
-  const doUpload = async (file: File, progress: (value: number) => void) => {
-    if (mode === "central") await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress);
+  const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string) => {
+    if (mode === "central") await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath);
     else {
       let versionId: string | null = null;
       if (uploadTarget) versionId = (await siteApi.createVersion(uploadTarget)).presentation_version_id;
-      await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress);
+      await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath);
     }
     data.refresh();
   };

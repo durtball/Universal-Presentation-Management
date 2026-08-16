@@ -241,6 +241,8 @@ export interface SiteMedia extends Row {
   media_object_id: string;
   file?: string;
   filename?: string;
+  original_filename?: string;
+  source_relative_path?: string | null;
   presentation?: { presentation_id: string; title: string } | null;
   version_number?: number | null;
   size_bytes?: number | null;
@@ -324,6 +326,7 @@ export interface CentralMediaImport extends Row {
   presentation_version_id?: string | null;
   presentation_identifier?: string | null;
   original_filename: string;
+  source_relative_path?: string | null;
   canonical_filename?: string | null;
   size_bytes?: number | null;
   mime_type?: string | null;

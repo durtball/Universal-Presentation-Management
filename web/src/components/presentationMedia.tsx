@@ -1,6 +1,7 @@
-import { useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { PresentationMediaRow, PresentationMediaVersion } from "../api/types";
 import { StatusBadge } from "./StatusBadge";
+import { runBounded, selectPresentationFiles, type SelectedUpload, type SkippedUpload } from "./uploadSelection";
 
 export function MediaStatusBadge({ value }: { value: unknown }) {
   const mapped: Record<string, string> = {
@@ -11,22 +12,29 @@ export function MediaStatusBadge({ value }: { value: unknown }) {
   return <StatusBadge value={mapped[String(value)] ?? value} />;
 }
 
-export interface UploadItem { id: string; file: File; progress: number; state: "queued" | "uploading" | "complete" | "failed"; error?: string }
+export interface UploadItem extends SelectedUpload { progress: number; state: "queued" | "uploading" | "complete" | "failed"; error?: string }
 
 export function MediaUploadDialog({ title, onClose, upload }: {
   title: string; onClose: () => void;
-  upload: (file: File, progress: (value: number) => void) => Promise<void>;
+  upload: (file: File, progress: (value: number) => void, relativePath?: string) => Promise<void>;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<UploadItem[]>([]);
-  const add = (files: FileList | File[]) => setItems((current) => [
-    ...current,
-    ...Array.from(files).map((file) => ({ id: crypto.randomUUID(), file, progress: 0, state: "queued" as const })),
-  ]);
+  const [skipped, setSkipped] = useState<SkippedUpload[]>([]);
+  useEffect(() => {
+    folderInput.current?.setAttribute("webkitdirectory", "");
+    folderInput.current?.setAttribute("directory", "");
+  }, []);
+  const add = (files: FileList | File[]) => {
+    const selection = selectPresentationFiles(Array.from(files));
+    setItems((current) => [...current, ...selection.accepted.map((item) => ({ ...item, progress: 0, state: "queued" as const }))]);
+    setSkipped((current) => [...current, ...selection.skipped]);
+  };
   const run = async (item: UploadItem) => {
     setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "uploading", error: undefined } : value));
     try {
-      await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)));
+      await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)), item.relativePath);
       setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress: 100, state: "complete" } : value));
     } catch (error) {
       setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : value));
@@ -39,12 +47,15 @@ export function MediaUploadDialog({ title, onClose, upload }: {
       <p>Original files are streamed to the server and preserved. Replacements create a new version.</p>
       <div className="drop-zone" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
         <strong>Drop presentation files here</strong><span>or</span>
-        <button className="button" onClick={() => input.current?.click()}>Browse files</button>
-        <input ref={input} hidden type="file" multiple accept=".ppt,.pptx,.pps,.ppsx,.pdf,.key,.odp" onChange={(event) => event.target.files && add(event.target.files)} />
+        <div className="button-row upload-choices"><button className="button" onClick={() => input.current?.click()}>Upload Files</button><button className="button" onClick={() => folderInput.current?.click()}>Upload Folder</button></div>
+        <input ref={input} hidden type="file" multiple accept=".ppt,.pptx,.pdf" onChange={(event) => event.target.files && add(event.target.files)} />
+        <input ref={folderInput} hidden type="file" multiple accept=".ppt,.pptx,.pdf" onChange={(event) => event.target.files && add(event.target.files)} />
       </div>
+      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Completed <strong>{items.filter((item) => item.state === "complete").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
       <UploadQueue items={items} retry={run} />
+      {skipped.length > 0 && <details className="skipped-files"><summary>{skipped.length} unsupported or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
       <div className="button-row">
-        {items.some((item) => item.state === "queued") && <button className="button button--primary" onClick={() => items.filter((item) => item.state === "queued").forEach((item) => void run(item))}>Upload queue</button>}
+        {items.some((item) => item.state === "queued") && <button className="button button--primary" onClick={() => void runBounded(items.filter((item) => item.state === "queued"), run)}>Upload {items.filter((item) => item.state === "queued").length} file{items.filter((item) => item.state === "queued").length === 1 ? "" : "s"}</button>}
         <button className="button" onClick={onClose}>Done</button>
       </div>
     </section>
@@ -55,7 +66,7 @@ export function UploadQueue({ items, retry }: { items: UploadItem[]; retry: (ite
   if (!items.length) return null;
   return <div className="upload-queue" aria-label="Upload queue">
     {items.map((item) => <article key={item.id}>
-      <div><strong>{item.file.name}</strong><small>{formatBytes(item.file.size)}</small></div>
+      <div><strong>{item.file.name}</strong><small>{item.relativePath || "Individual file"} · {formatBytes(item.file.size)}</small></div>
       <progress max="100" value={item.progress}>{Math.round(item.progress)}%</progress>
       <MediaStatusBadge value={item.state} />
       {item.error && <p className="error-text">{friendlyError(item.error)}</p>}

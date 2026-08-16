@@ -11,9 +11,27 @@ from upm_shared.presentation_media import (
     canonical_presentation_filename,
     generate_presentation_identifier,
     match_presentation,
+    normalize_source_relative_path,
     operational_sort_key,
     safe_filename_component,
 )
+
+
+def test_source_relative_path_is_safe_provenance_only() -> None:
+    assert (
+        normalize_source_relative_path("Event Slides/Monday/Room 101/1001.pptx", "1001.pptx")
+        == "Monday/Room 101/1001.pptx"
+    )
+    for unsafe in (
+        "../deck.pptx",
+        "/deck.pptx",
+        r"C:\deck.pptx",
+        r"\\server\deck.pptx",
+        "root/../deck.pptx",
+        "root/deck.pptx\x00",
+    ):
+        with pytest.raises(ValueError):
+            normalize_source_relative_path(unsafe, "deck.pptx")
 
 
 def test_imported_and_offline_generated_identifiers_are_stable_and_distinct() -> None:

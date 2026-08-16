@@ -28,6 +28,7 @@ from upm_shared.jobs import PRIORITY_VALUES
 from upm_shared.presentation_media import (
     CanonicalPresentationMetadata,
     canonical_presentation_filename,
+    normalize_source_relative_path,
 )
 from upm_site.media.storage import (
     StorageError,
@@ -81,6 +82,7 @@ class IngestionRequest:
     storage_target_id: UUID | None = None
     idempotency_key: str | None = None
     client_mime_type: str | None = None
+    source_relative_path: str | None = None
     replicate_to_central: bool = True
 
 
@@ -310,6 +312,10 @@ class MediaIngestionService:
             raise IngestionError("expected size cannot be negative", code="invalid_metadata")
         if request.idempotency_key is not None and not 1 <= len(request.idempotency_key) <= 255:
             raise IngestionError("idempotency key must contain 1 to 255 characters")
+        try:
+            normalize_source_relative_path(request.source_relative_path, request.original_filename)
+        except ValueError as error:
+            raise IngestionError(str(error), code="invalid_source_relative_path") from error
         linked = request.presentation_version_id is not None
         if linked and request.category not in {
             MediaCategory.PRESENTATION,
@@ -503,6 +509,9 @@ class MediaIngestionService:
                 object_key=object_key,
                 category=request.category,
                 original_filename=filename,
+                source_relative_path=normalize_source_relative_path(
+                    request.source_relative_path, filename
+                ),
                 canonical_filename=canonical_filename,
                 mime_type=request.client_mime_type,
                 availability=MediaAvailability.STAGING,

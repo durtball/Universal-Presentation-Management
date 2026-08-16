@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePath
+from pathlib import PurePath, PurePosixPath
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -30,6 +30,23 @@ _WINDOWS_RESERVED = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 SUPPORTED_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pdf"})
+
+
+def normalize_source_relative_path(value: str | None, original_filename: str) -> str | None:
+    """Validate untrusted browser path provenance without using it for storage identity."""
+    if value is None or not value.strip():
+        return None
+    raw = unicodedata.normalize("NFC", value.strip()).replace("\\", "/")
+    if "\x00" in raw or raw.startswith(("/", "//")) or re.match(r"^[A-Za-z]:", raw):
+        raise ValueError("invalid source relative path")
+    parts = PurePosixPath(raw).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("invalid source relative path")
+    # Browsers include the selected root folder. Retain useful children, never an authority path.
+    relative = PurePosixPath(*parts[1:]) if len(parts) > 1 else PurePosixPath(parts[0])
+    if relative.name != original_filename or len(str(relative)) > 2048:
+        raise ValueError("source relative path does not match original filename")
+    return str(relative)
 
 
 def _origin_component(origin_code: str) -> str:

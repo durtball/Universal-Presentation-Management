@@ -183,6 +183,9 @@
   .media-toolbar label { display:grid; gap:5px; min-width:190px; font-weight:600; }
   .drop-zone { display:grid; place-items:center; gap:8px; min-height:170px; padding:24px; border:2px dashed var(--border-strong); border-radius:var(--radius); background:var(--surface-soft); }
   .upload-queue { display:grid; gap:8px; margin-top:16px; }
+  .upload-summary { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:14px; padding:10px; border:1px solid var(--border); background:var(--surface-soft); }
+  .skipped-files { margin-top:12px; color:var(--muted); }.skipped-files strong { color:var(--text); }
+  .upload-choices { justify-content:center; margin:0; }
   .upload-queue article { display:grid; grid-template-columns:minmax(0,2fr) minmax(100px,1fr) auto auto; align-items:center; gap:10px; padding:10px; border:1px solid var(--border); border-radius:var(--radius-small); }
   .upload-queue article div,.upload-queue article small { display:block; min-width:0; overflow-wrap:anywhere; }
   progress { width:100%; accent-color:var(--accent); }
