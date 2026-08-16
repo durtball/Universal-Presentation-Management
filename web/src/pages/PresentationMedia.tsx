@@ -33,14 +33,19 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
   }, [mode, activeEvent, session?.csrfToken]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
-  const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string) => {
-    if (mode === "central") await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath);
+  const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => {
+    if (mode === "central") {
+      const result = await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath, retrying);
+      data.refresh();
+      return { state: result.match_state === "exact" || result.match_state === "manual" ? "matched" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const };
+    }
     else {
       let versionId: string | null = null;
       if (uploadTarget) versionId = (await siteApi.createVersion(uploadTarget)).presentation_version_id;
-      await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath);
+      await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath, retrying);
     }
     data.refresh();
+    return { state: uploadTarget ? "matched" as const : "needs_review" as const };
   };
   if (events.loading) return <Loading />;
   if (events.error) return <ErrorSurface error={events.error} onRetry={events.refresh} />;
@@ -48,9 +53,10 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     {mode === "site" && <div className="autonomy-banner"><strong>Site-local autonomy</strong><span>Uploading and using local media never requires Central connectivity.</span></div>}
     <Panel><div className="media-toolbar"><label>Event<select className="input" value={activeEvent} onChange={(event) => setEventId(event.target.value)}>{events.data?.map((event) => <option value={event.id} key={event.id}>{event.name}</option>)}</select></label><label>Status<select className="input" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">All states</option><option value="missing">Missing media</option><option value="ready">Ready</option><option value="failed">Failed</option></select></label><button className="button" onClick={data.refresh}>Refresh status</button></div></Panel>
     {data.loading ? <Loading /> : data.error ? <ErrorSurface error={data.error} onRetry={data.refresh} /> : data.data ? <>
+      {(summary.expected === 0) && <div className="autonomy-banner autonomy-banner--warning"><strong>No Presentation records available</strong><span>This event currently has no committed Presentation records available for matching. Files will still be preserved for review.</span></div>}
       <div className="metrics"><Metric label="Total presentations" value={summary.expected ?? rows.length} /><Metric label={mode === "central" ? "With media" : "Locally ready"} value={summary.with_media ?? summary.ready ?? 0} tone="success" /><Metric label="Missing media" value={summary.missing ?? 0} tone="warning" /><Metric label="Synchronizing" value={summary.transferring ?? summary.sync_pending ?? 0} /><Metric label="Failures" value={summary.failed ?? 0} tone="danger" /><Metric label="Unmatched uploads" value={data.data.unmatched.length} /></div>
       <Panel title="Presentations" description="Current media and version state. Select Details for complete history."><DataTable rows={rows} columns={columns} rowKey={(row) => row.presentation_id} label="presentation media" pageSize={25} actions={(row) => <><button className="button button--small" onClick={() => setSelected(row)}>Details</button><button className="button button--small" onClick={() => { setUploadTarget(row.presentation_id); setUpload(true); }}>New version</button></>} /></Panel>
-      <Panel title="Unmatched / Unassigned Media" description="Files are preserved here until an operator explicitly assigns them.">{data.data.unmatched.length ? <div className="unmatched-grid">{data.data.unmatched.map((item) => <article key={String(item.media_import_id || item.media_object_id)}><strong>{String(item.original_filename || item.filename || "Uploaded media")}</strong><MediaStatusBadge value={item.match_state || item.availability || "unassigned"} /><small>{formatBytes(Number(item.size_bytes) || undefined)}</small>{mode === "central" && <MatchControl item={item as CentralMediaImport} presentations={rows} onDone={data.refresh} csrf={session.csrfToken} />}</article>)}</div> : <Empty title="No unmatched media" />}</Panel>
+      <Panel title="Needs Review" description="Unmatched, ambiguous, and unclassified files are safely preserved here until an operator assigns them.">{data.data.unmatched.length ? <div className="unmatched-grid">{data.data.unmatched.map((item) => <article key={String(item.media_import_id || item.media_object_id)}><strong>{String(item.original_filename || item.filename || "Uploaded media")}</strong><small>{String(item.source_relative_path || "Individual file upload")}</small><MediaStatusBadge value={item.match_state || item.availability || "unassigned"} /><small>{formatBytes(Number(item.size_bytes) || undefined)}</small>{mode === "central" && <MatchControl item={item as CentralMediaImport} presentations={rows} onDone={data.refresh} csrf={session.csrfToken} />}</article>)}</div> : <Empty title="No media needs review" />}</Panel>
     </> : <Empty title="Select an event" />}
     {upload && <MediaUploadDialog title={uploadTarget ? "Upload a new presentation version" : "Upload presentation media"} onClose={() => { setUpload(false); setUploadTarget(""); data.refresh(); }} upload={doUpload} />}
     {selected && <PresentationMediaDetail row={selected} onClose={() => setSelected(null)} actions={(version) => mode === "site" && version.replication && ["failed", "retry_wait"].includes(version.replication.state) ? <button className="button button--small" onClick={() => void siteApi.retryReplication(version.replication!.replication_session_id).then(data.refresh)}>Retry Central replication</button> : null} />}

@@ -1,4 +1,5 @@
 import { createCentralClient } from "./client";
+import { uploadFile } from "./upload";
 import type {
   AuthSession,
   EventRecord,
@@ -16,7 +17,6 @@ import type {
   CentralMediaWorkspace,
 } from "./types";
 
-let uploadRequestSequence = 0;
 
 export function centralApi(csrfToken: string | null = null) {
   const client = createCentralClient(csrfToken);
@@ -103,10 +103,8 @@ export function centralApi(csrfToken: string | null = null) {
       get<Row[]>(`/api/v1/admin/events/${eventId}/presentations`, signal),
     mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
       get<CentralMediaWorkspace>(`/api/v1/admin/events/${eventId}/media-imports`, signal),
-    uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void, relativePath?: string) =>
-      xhrUpload<CentralMediaImport>(
-        `/api/v1/admin/events/${eventId}/media-imports`, file, onProgress, csrfToken, relativePath,
-      ),
+    uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void, relativePath?: string, onRetry?: (count: number) => void) =>
+      uploadFile<CentralMediaImport>({ path: `/api/v1/admin/events/${eventId}/media-imports`, file, progress: onProgress, csrf: csrfToken, relativePath, retrying: onRetry }),
     assignMedia: (importId: string, presentationId: string) =>
       client.request<CentralMediaImport>(
         `/api/v1/admin/media-imports/${importId}/assignment/${presentationId}`,
@@ -165,32 +163,4 @@ export function centralApi(csrfToken: string | null = null) {
         body: "{}",
       }),
   };
-}
-
-function xhrUpload<T>(path: string, file: File, progress: (value: number) => void, csrf: string | null, relativePath?: string) {
-  return new Promise<T>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("POST", path);
-    request.responseType = "json";
-    request.setRequestHeader("X-UPM-Original-Filename", encodeURIComponent(file.name));
-    if (relativePath) request.setRequestHeader("X-UPM-Source-Relative-Path", encodeURIComponent(relativePath));
-    request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-    request.setRequestHeader("Idempotency-Key", `browser-upload-${Date.now()}-${uploadRequestSequence++}`);
-    if (csrf) request.setRequestHeader("X-CSRF-Token", csrf);
-    request.upload.onprogress = (event) => progress(event.lengthComputable ? event.loaded / event.total * 100 : 0);
-    request.onerror = () => reject(new Error("Upload interrupted. Check the network and retry."));
-    request.onload = () => request.status >= 200 && request.status < 300
-      ? resolve(request.response as T)
-      : reject(new Error(uploadError(request)));
-    request.send(file);
-  });
-}
-
-function uploadError(request: XMLHttpRequest) {
-  const detail = request.response?.detail;
-  const message = typeof detail === "string" ? detail : detail?.message;
-  if (request.status === 401 || request.status === 403) return "Authentication failed. Sign in again and retry.";
-  if (request.status === 413) return "File is larger than the configured upload limit.";
-  if (request.status === 409) return message || "Duplicate upload or version conflict.";
-  return message || `Upload failed${request.status ? ` (HTTP ${request.status})` : ""}.`;
 }

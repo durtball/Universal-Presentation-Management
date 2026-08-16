@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
@@ -46,6 +47,8 @@ from upm_shared.presentation_media import (
     match_presentation,
     normalize_source_relative_path,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MediaStagingError(RuntimeError):
@@ -95,8 +98,7 @@ class CentralMediaStagingService:
             or any(ord(character) < 32 for character in raw_filename)
         ):
             raise MediaStagingError("invalid original filename", "invalid_filename")
-        if Path(filename).suffix.lower() not in SUPPORTED_PRESENTATION_EXTENSIONS:
-            raise MediaStagingError("unsupported presentation extension", "unsupported_type")
+        recognized_presentation = Path(filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
         try:
             relative_path = normalize_source_relative_path(source_relative_path, filename)
         except ValueError as error:
@@ -104,31 +106,38 @@ class CentralMediaStagingService:
         with self.factory.begin() as session:
             if session.get(Event, event_id) is None:
                 raise MediaStagingError("event not found", "event_not_found")
+            existing = None
             if idempotency_key:
                 existing = session.scalar(
                     select(PresentationMediaImport).where(
                         PresentationMediaImport.idempotency_key == idempotency_key
                     )
                 )
-                if existing:
+                if existing and existing.import_state is not MediaImportState.FAILED:
                     session.refresh(existing)
                     session.expunge(existing)
                     return existing
-            import_id = new_uuid7()
-            record = PresentationMediaImport(
-                media_import_id=import_id,
-                event_id=event_id,
-                destination_site_id=destination_site_id,
-                original_filename=filename,
-                source_relative_path=relative_path,
-                staging_key=f"{import_id}.upload",
-                mime_type=content_type,
-                idempotency_key=idempotency_key,
-                match_state=MediaMatchState.UNMATCHED,
-                import_state=MediaImportState.UPLOADING,
-                sync_state=SyncState.LOCAL,
-            )
-            session.add(record)
+            import_id = existing.media_import_id if existing else new_uuid7()
+            if existing:
+                existing.import_state = MediaImportState.UPLOADING
+                existing.error_code = None
+                existing.error_detail = None
+                existing.retry_count += 1
+            else:
+                record = PresentationMediaImport(
+                    media_import_id=import_id,
+                    event_id=event_id,
+                    destination_site_id=destination_site_id,
+                    original_filename=filename,
+                    source_relative_path=relative_path,
+                    staging_key=f"{import_id}.upload",
+                    mime_type=content_type,
+                    idempotency_key=idempotency_key,
+                    match_state=MediaMatchState.UNMATCHED,
+                    import_state=MediaImportState.UPLOADING,
+                    sync_state=SyncState.LOCAL,
+                )
+                session.add(record)
         await to_thread.run_sync(self.root.mkdir, 0o750, True, True)
         temporary = _safe_staging_path(self.root, f".{import_id}.partial")
         final = _safe_staging_path(self.root, f"{import_id}.upload")
@@ -156,32 +165,76 @@ class CentralMediaStagingService:
                 failed.error_code = getattr(error, "code", "staging_failed")
                 failed.error_detail = str(error)[:2048]
             raise
-        with self.factory.begin() as session:
-            record = session.get(PresentationMediaImport, import_id)
-            record.size_bytes = total
-            record.sha256 = digest.hexdigest()
-            record.import_state = MediaImportState.STAGED
-            self._automatic_match_and_assign(session, record)
-            session.add(
-                AuditRecord(
-                    actor_id=actor,
-                    action="central.presentation_media.uploaded",
-                    target_type="presentation_media_import",
-                    target_id=record.media_import_id,
-                    site_id=destination_site_id,
-                    event_id=event_id,
-                    after_context={
+        try:
+            with self.factory.begin() as session:
+                record = session.get(PresentationMediaImport, import_id)
+                record.size_bytes = total
+                record.sha256 = digest.hexdigest()
+                record.import_state = MediaImportState.STAGED
+                if recognized_presentation:
+                    self._automatic_match_and_assign(session, record)
+                else:
+                    record.match_state = MediaMatchState.UNMATCHED
+                    record.match_reason = "Unclassified media type preserved for operator review"
+                    record.import_state = MediaImportState.NEEDS_REVIEW
+                session.add(
+                    AuditRecord(
+                        actor_id=actor,
+                        action="central.presentation_media.uploaded",
+                        target_type="presentation_media_import",
+                        target_id=record.media_import_id,
+                        site_id=destination_site_id,
+                        event_id=event_id,
+                        after_context={
+                            "original_filename": filename,
+                            "size_bytes": total,
+                            "sha256": record.sha256,
+                            "match_state": record.match_state,
+                        },
+                    )
+                )
+                session.flush()
+                session.refresh(record)
+                session.expunge(record)
+                logger.info(
+                    "presentation_media_staged",
+                    extra={
+                        "media_import_id": str(import_id),
+                        "event_id": str(event_id),
                         "original_filename": filename,
-                        "size_bytes": total,
-                        "sha256": record.sha256,
-                        "match_state": record.match_state,
+                        "source_relative_path": relative_path,
+                        "result": str(record.import_state),
+                        "match_result": str(record.match_state),
+                        "presentation_identifier_candidate": record.external_presentation_id,
                     },
                 )
+                return record
+        except Exception as error:
+            logger.exception(
+                "presentation_media_post_staging_failed",
+                extra={
+                    "media_import_id": str(import_id),
+                    "event_id": str(event_id),
+                    "original_filename": filename,
+                    "source_relative_path": relative_path,
+                    "exception_type": type(error).__name__,
+                },
             )
-            session.flush()
-            session.refresh(record)
-            session.expunge(record)
-            return record
+            with self.factory.begin() as session:
+                record = session.get(PresentationMediaImport, import_id)
+                record.size_bytes = total
+                record.sha256 = digest.hexdigest()
+                record.match_state = MediaMatchState.UNMATCHED
+                record.match_reason = "Post-upload processing failed; file preserved for review"
+                record.import_state = MediaImportState.NEEDS_REVIEW
+                record.error_code = (
+                    error.code if isinstance(error, MediaStagingError) else "processing_failed"
+                )
+                record.error_detail = f"{type(error).__name__}: {error}"[:2048]
+                session.flush()
+                session.refresh(record)
+                session.expunge(record)
+                return record
 
     def _automatic_match_and_assign(
         self, session: Session, record: PresentationMediaImport
@@ -205,7 +258,7 @@ class CentralMediaStagingService:
         record.match_candidates = [str(item) for item in result.candidate_ids]
         if result.state is MediaMatchState.EXACT and result.presentation_id:
             self.assign(session, record, result.presentation_id, manual=False)
-        elif result.state is MediaMatchState.AMBIGUOUS:
+        elif result.state in {MediaMatchState.AMBIGUOUS, MediaMatchState.UNMATCHED}:
             record.import_state = MediaImportState.NEEDS_REVIEW
 
     def assign(

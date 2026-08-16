@@ -4,13 +4,13 @@ import { MediaUploadDialog, PresentationMediaDetail, ReplicationStatus } from ".
 
 describe("presentation media workflows", () => {
   it("queues multiple files and reports upload completion", async () => {
-    const upload = vi.fn(async (_file: File, progress: (value: number) => void) => progress(100));
+    const upload = vi.fn(async (_file: File, progress: (value: number) => void) => { progress(100); return { state: "staged" as const }; });
     render(<MediaUploadDialog title="Upload media" onClose={() => undefined} upload={upload} />);
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files: [new File(["one"], "UPM-101.pptx"), new File(["two"], "unknown.pdf")] } });
     fireEvent.click(screen.getByRole("button", { name: "Upload 2 files" }));
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
-    expect(await screen.findAllByText("Complete")).toHaveLength(2);
+    expect(await screen.findAllByText("Staged")).toHaveLength(3); // summary label plus two items
   });
 
   it("shows current version, complete history, canonical names, and local readiness", () => {

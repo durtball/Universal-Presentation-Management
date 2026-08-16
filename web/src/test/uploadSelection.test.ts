@@ -16,7 +16,7 @@ describe("presentation upload selection", () => {
     },
   );
 
-  it("recursively selected folders retain four nested files and skip incidentals", () => {
+  it("retains supported and unknown nested files while skipping only incidentals", () => {
     const result = selectPresentationFiles([
       file("a.pptx", "root/day1/room1/a.pptx"), file("b.pdf", "root/day1/room1/b.pdf"),
       file("c.PPTX", "root/day1/room2/c.PPTX"), file("slides.ppt", "root/day2/room1/slides.ppt"),
@@ -25,8 +25,10 @@ describe("presentation upload selection", () => {
     ]);
     expect(result.accepted.map((item) => item.relativePath)).toEqual([
       "root/day1/room1/a.pptx", "root/day1/room1/b.pdf", "root/day1/room2/c.PPTX", "root/day2/room1/slides.ppt",
+      "root/day2/notes.txt",
     ]);
-    expect(result.skipped).toHaveLength(3);
+    expect(result.skipped).toHaveLength(2);
+    expect(result.accepted.find((item) => item.file.name === "notes.txt")?.recognized).toBe(false);
   });
 
   it("does not collapse duplicate basenames from different folders", () => {
@@ -45,5 +47,24 @@ describe("presentation upload selection", () => {
     }, 2);
     expect(maximum).toBeLessThanOrEqual(2);
     expect(completed).toEqual(["a", "c"]);
+  });
+
+  it("preserves a 370-item batch while skipping only known junk", async () => {
+    const selected = [
+      ...Array.from({ length: 300 }, (_, index) => file(`${index}.pptx`, `root/room/${index}.pptx`)),
+      ...Array.from({ length: 50 }, (_, index) => file(`material-${index}.xyz`, `root/source/material-${index}.xyz`)),
+      ...Array.from({ length: 20 }, (_, index) => file(`~$lock-${index}.pptx`, `root/~$lock-${index}.pptx`)),
+    ];
+    const result = selectPresentationFiles(selected);
+    expect(result.accepted).toHaveLength(350);
+    expect(result.accepted.filter((item) => !item.recognized)).toHaveLength(50);
+    expect(result.skipped).toHaveLength(20);
+    let active = 0; let maximum = 0; let completed = 0;
+    await runBounded(result.accepted, async () => {
+      active += 1; maximum = Math.max(maximum, active);
+      await Promise.resolve(); completed += 1; active -= 1;
+    });
+    expect(maximum).toBe(2);
+    expect(completed).toBe(350);
   });
 });

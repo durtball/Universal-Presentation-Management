@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePath, PurePosixPath
@@ -42,8 +42,7 @@ def normalize_source_relative_path(value: str | None, original_filename: str) ->
     parts = PurePosixPath(raw).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError("invalid source relative path")
-    # Browsers include the selected root folder. Retain useful children, never an authority path.
-    relative = PurePosixPath(*parts[1:]) if len(parts) > 1 else PurePosixPath(parts[0])
+    relative = PurePosixPath(*parts)
     if relative.name != original_filename or len(str(relative)) > 2048:
         raise ValueError("source relative path does not match original filename")
     return str(relative)
@@ -163,33 +162,63 @@ def _match_token(value: str | None) -> str:
 
 def match_presentation(filename: str, candidates: Iterable[MatchCandidate]) -> MatchResult:
     """Match only deterministic identity evidence; never guess ambiguous results."""
-    basename = PurePath(filename).stem
+    basename = unicodedata.normalize("NFKC", PurePath(filename).stem).strip().upper()
     normalized = _match_token(basename)
     candidates = tuple(candidates)
-    evidence: list[tuple[MatchCandidate, str]] = []
-    for candidate in candidates:
-        stable = _match_token(candidate.presentation_identifier)
-        external = _match_token(candidate.external_presentation_id)
-        expected = (
-            _match_token(PurePath(candidate.expected_filename).stem)
-            if candidate.expected_filename
-            else ""
-        )
-        if stable and stable in normalized:
-            evidence.append((candidate, "Exact UPM Presentation Identifier match"))
-        elif external and external in normalized:
-            evidence.append((candidate, "Exact imported Presentation ID match"))
-        elif expected and expected == normalized:
-            evidence.append((candidate, "Exact expected filename match"))
-    unique = {item.presentation_id: (item, reason) for item, reason in evidence}
-    if len(unique) == 1:
-        item, reason = next(iter(unique.values()))
+    tiers: tuple[tuple[str, Callable[[MatchCandidate], str | None]], ...] = (
+        (
+            "Presentation Identifier",
+            lambda item: item.presentation_identifier,
+        ),
+        ("external Presentation ID", lambda item: item.external_presentation_id),
+    )
+    for label, value_for in tiers:
+        prefix_matches: list[tuple[MatchCandidate, str]] = []
+        for candidate in candidates:
+            value = unicodedata.normalize("NFKC", value_for(candidate) or "").strip().upper()
+            if value and basename.startswith(value):
+                suffix = basename[len(value) :]
+                if not suffix or suffix[0] in "-_. ":
+                    prefix_matches.append((candidate, value))
+        if prefix_matches:
+            longest = max(len(value) for _, value in prefix_matches)
+            unique = {
+                item.presentation_id: (item, value)
+                for item, value in prefix_matches
+                if len(value) == longest
+            }
+            if len(unique) == 1:
+                item, value = next(iter(unique.values()))
+                return MatchResult(
+                    MediaMatchState.EXACT,
+                    item.presentation_id,
+                    f"Exact {label} match: {value}",
+                    (item.presentation_id,),
+                )
+            ids = tuple(sorted(unique, key=str))
+            return MatchResult(
+                MediaMatchState.AMBIGUOUS,
+                None,
+                f"Ambiguous: {label} matches multiple records",
+                ids,
+            )
+    expected = [
+        candidate
+        for candidate in candidates
+        if candidate.expected_filename
+        and _match_token(PurePath(candidate.expected_filename).stem) == normalized
+    ]
+    if len({item.presentation_id for item in expected}) == 1:
+        item = expected[0]
         return MatchResult(
-            MediaMatchState.EXACT, item.presentation_id, reason, (item.presentation_id,)
+            MediaMatchState.EXACT,
+            item.presentation_id,
+            "Exact expected filename match",
+            (item.presentation_id,),
         )
-    if unique:
-        ids = tuple(sorted(unique, key=str))
-        return MatchResult(MediaMatchState.AMBIGUOUS, None, "Multiple exact identity matches", ids)
+    if expected:
+        ids = tuple(sorted({item.presentation_id for item in expected}, key=str))
+        return MatchResult(MediaMatchState.AMBIGUOUS, None, "Ambiguous expected filename", ids)
     return MatchResult(MediaMatchState.UNMATCHED, None, "No deterministic identity evidence")
 
 

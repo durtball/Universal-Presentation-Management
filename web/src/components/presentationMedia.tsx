@@ -12,33 +12,56 @@ export function MediaStatusBadge({ value }: { value: unknown }) {
   return <StatusBadge value={mapped[String(value)] ?? value} />;
 }
 
-export interface UploadItem extends SelectedUpload { progress: number; state: "queued" | "uploading" | "complete" | "failed"; error?: string }
+type UploadState = "queued" | "uploading" | "retrying" | "staged" | "needs_review" | "matched" | "failed";
+export interface UploadItem extends SelectedUpload { progress: number; state: UploadState; retryCount: number; error?: string }
 
 export function MediaUploadDialog({ title, onClose, upload }: {
   title: string; onClose: () => void;
-  upload: (file: File, progress: (value: number) => void, relativePath?: string) => Promise<void>;
+  upload: (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => Promise<{ state: "staged" | "needs_review" | "matched" }>;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<UploadItem[]>([]);
   const [skipped, setSkipped] = useState<SkippedUpload[]>([]);
+  const [paused, setPaused] = useState(false);
+  const [running, setRunning] = useState(false);
+  const pausedRef = useRef(false);
+  const resumeWaiters = useRef<Array<() => void>>([]);
   useEffect(() => {
     folderInput.current?.setAttribute("webkitdirectory", "");
     folderInput.current?.setAttribute("directory", "");
   }, []);
   const add = (files: FileList | File[]) => {
     const selection = selectPresentationFiles(Array.from(files));
-    setItems((current) => [...current, ...selection.accepted.map((item) => ({ ...item, progress: 0, state: "queued" as const }))]);
+    setItems((current) => [...current, ...selection.accepted.map((item) => ({ ...item, progress: 0, state: "queued" as const, retryCount: 0 }))]);
     setSkipped((current) => [...current, ...selection.skipped]);
   };
   const run = async (item: UploadItem) => {
     setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "uploading", error: undefined } : value));
     try {
-      await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)), item.relativePath);
-      setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress: 100, state: "complete" } : value));
+      const result = await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)), item.relativePath, (retryCount) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "retrying", retryCount } : value)));
+      setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress: 100, state: result.state } : value));
     } catch (error) {
       setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : value));
     }
+  };
+  const waitIfPaused = () => pausedRef.current ? new Promise<void>((resolve) => resumeWaiters.current.push(resolve)) : Promise.resolve();
+  const setQueuePaused = (value: boolean) => {
+    pausedRef.current = value; setPaused(value);
+    if (!value) resumeWaiters.current.splice(0).forEach((resolve) => resolve());
+  };
+  const start = async () => {
+    if (running) return;
+    setRunning(true);
+    await runBounded(items.filter((item) => item.state === "queued"), run, undefined, waitIfPaused);
+    setRunning(false);
+  };
+  const retryFailed = async () => {
+    const failed = items.filter((item) => item.state === "failed");
+    setItems((all) => all.map((item) => item.state === "failed" ? { ...item, state: "queued", error: undefined } : item));
+    setRunning(true);
+    await runBounded(failed, run, undefined, waitIfPaused);
+    setRunning(false);
   };
   const drop = (event: DragEvent) => { event.preventDefault(); add(event.dataTransfer.files); };
   return <div className="dialog-backdrop" role="presentation">
@@ -48,14 +71,16 @@ export function MediaUploadDialog({ title, onClose, upload }: {
       <div className="drop-zone" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
         <strong>Drop presentation files here</strong><span>or</span>
         <div className="button-row upload-choices"><button className="button" onClick={() => input.current?.click()}>Upload Files</button><button className="button" onClick={() => folderInput.current?.click()}>Upload Folder</button></div>
-        <input ref={input} hidden type="file" multiple accept=".ppt,.pptx,.pdf" onChange={(event) => event.target.files && add(event.target.files)} />
-        <input ref={folderInput} hidden type="file" multiple accept=".ppt,.pptx,.pdf" onChange={(event) => event.target.files && add(event.target.files)} />
+        <input ref={input} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
+        <input ref={folderInput} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
       </div>
-      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Completed <strong>{items.filter((item) => item.state === "complete").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
+      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Eligible <strong>{items.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Staged <strong>{items.filter((item) => item.state === "staged").length}</strong></span><span>Matched <strong>{items.filter((item) => item.state === "matched").length}</strong></span><span>Needs review <strong>{items.filter((item) => item.state === "needs_review").length}</strong></span><span>Retrying <strong>{items.filter((item) => item.state === "retrying").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
       <UploadQueue items={items} retry={run} />
-      {skipped.length > 0 && <details className="skipped-files"><summary>{skipped.length} unsupported or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
+      {skipped.length > 0 && <details className="skipped-files"><summary>{skipped.length} known junk or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
       <div className="button-row">
-        {items.some((item) => item.state === "queued") && <button className="button button--primary" onClick={() => void runBounded(items.filter((item) => item.state === "queued"), run)}>Upload {items.filter((item) => item.state === "queued").length} file{items.filter((item) => item.state === "queued").length === 1 ? "" : "s"}</button>}
+        {items.some((item) => item.state === "queued") && !running && <button className="button button--primary" onClick={() => void start()}>Upload {items.filter((item) => item.state === "queued").length} file{items.filter((item) => item.state === "queued").length === 1 ? "" : "s"}</button>}
+        {running && <button className="button" onClick={() => setQueuePaused(!paused)}>{paused ? "Resume" : "Pause"}</button>}
+        {items.some((item) => item.state === "failed") && !running && <button className="button" onClick={() => void retryFailed()}>Retry Failed</button>}
         <button className="button" onClick={onClose}>Done</button>
       </div>
     </section>
@@ -69,6 +94,7 @@ export function UploadQueue({ items, retry }: { items: UploadItem[]; retry: (ite
       <div><strong>{item.file.name}</strong><small>{item.relativePath || "Individual file"} · {formatBytes(item.file.size)}</small></div>
       <progress max="100" value={item.progress}>{Math.round(item.progress)}%</progress>
       <MediaStatusBadge value={item.state} />
+      {item.retryCount > 0 && <small>Automatic retries: {item.retryCount}</small>}
       {item.error && <p className="error-text">{friendlyError(item.error)}</p>}
       {item.state === "failed" && <button className="button button--small" onClick={() => void retry(item)}>Retry</button>}
     </article>)}

@@ -1,5 +1,6 @@
 """Authenticated Central presentation-media staging and review APIs."""
 
+import logging
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -11,6 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.config import CentralDatabaseSettings
@@ -41,6 +43,8 @@ from upm_shared.enums import (
     MediaReplicationState,
     MediaTransferState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReplicationCreate(BaseModel):
@@ -136,6 +140,42 @@ def register_presentation_media_routes(
             if error.code == "event_not_found":
                 code = 404
             raise HTTPException(code, detail={"code": error.code, "message": str(error)}) from error
+        except OSError as error:
+            logger.exception(
+                "central_media_staging_storage_error",
+                extra={"event_id": str(event_id), "exception_type": type(error).__name__},
+            )
+            raise HTTPException(
+                status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail={
+                    "code": "staging_storage_error",
+                    "message": "Media staging storage is unavailable.",
+                },
+            ) from error
+        except SQLAlchemyError as error:
+            logger.exception(
+                "central_media_staging_database_error",
+                extra={"event_id": str(event_id), "exception_type": type(error).__name__},
+            )
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "database_error",
+                    "message": "Media metadata service is temporarily unavailable.",
+                },
+            ) from error
+        except Exception as error:
+            logger.exception(
+                "central_media_staging_internal_error",
+                extra={"event_id": str(event_id), "exception_type": type(error).__name__},
+            )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "server_internal_error",
+                    "message": "Unexpected media staging failure.",
+                },
+            ) from error
         return _view(item)
 
     @app.get(

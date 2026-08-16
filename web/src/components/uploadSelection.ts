@@ -1,10 +1,14 @@
 export const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx", ".pdf"]);
-export const DEFAULT_UPLOAD_CONCURRENCY = 3;
+const configuredConcurrency = Number(import.meta.env.VITE_UPM_UPLOAD_CONCURRENCY ?? 2);
+export const DEFAULT_UPLOAD_CONCURRENCY = Number.isInteger(configuredConcurrency)
+  ? Math.min(4, Math.max(1, configuredConcurrency))
+  : 2;
 
 export interface SelectedUpload {
   id: string;
   file: File;
   relativePath?: string;
+  recognized: boolean;
 }
 export interface SkippedUpload { path: string; reason: string }
 
@@ -22,12 +26,12 @@ export function selectPresentationFiles(files: Iterable<File>): {
     let reason = "";
     if (file.name.startsWith("~$")) reason = "Temporary Office lock file";
     else if (file.name === ".DS_Store" || file.name.toLowerCase() === "thumbs.db") reason = "System metadata file";
-    else if (!PRESENTATION_EXTENSIONS.has(extension)) reason = "Unsupported file type";
     if (reason) skipped.push({ path, reason });
     else accepted.push({
       id: `upload-${Date.now()}-${nextUploadId++}`,
       file,
       relativePath: file.webkitRelativePath || undefined,
+      recognized: PRESENTATION_EXTENSIONS.has(extension),
     });
   }
   return { accepted, skipped };
@@ -35,11 +39,13 @@ export function selectPresentationFiles(files: Iterable<File>): {
 
 export async function runBounded<T>(
   values: readonly T[], worker: (value: T) => Promise<void>, concurrency = DEFAULT_UPLOAD_CONCURRENCY,
+  beforeEach: () => Promise<void> = async () => undefined,
 ) {
   let cursor = 0;
   const run = async () => {
     while (cursor < values.length) {
       const value = values[cursor++];
+      await beforeEach();
       await worker(value);
     }
   };

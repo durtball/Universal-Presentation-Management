@@ -20,7 +20,7 @@ from upm_shared.presentation_media import (
 def test_source_relative_path_is_safe_provenance_only() -> None:
     assert (
         normalize_source_relative_path("Event Slides/Monday/Room 101/1001.pptx", "1001.pptx")
-        == "Monday/Room 101/1001.pptx"
+        == "Event Slides/Monday/Room 101/1001.pptx"
     )
     for unsafe in (
         "../deck.pptx",
@@ -32,6 +32,35 @@ def test_source_relative_path_is_safe_provenance_only() -> None:
     ):
         with pytest.raises(ValueError):
             normalize_source_relative_path(unsafe, "deck.pptx")
+
+
+def test_matcher_prefers_longest_known_identifier_prefix_and_boundaries() -> None:
+    ids = ["3261639", "3273219", "3418952", "A4-827", "123", "1234"]
+    candidates = [
+        MatchCandidate(UUID(int=index + 1), f"UPM-{value}", value)
+        for index, value in enumerate(ids)
+    ]
+    examples = {
+        "3261639-Forsythe.pptx": "3261639",
+        "3273219_Seiberling.pptx": "3273219",
+        "3418952 Kaneta.pptx": "3418952",
+        "A4-827_Smith.pptx": "A4-827",
+        "1234-Jones.pptx": "1234",
+    }
+    for filename, expected in examples.items():
+        result = match_presentation(filename, candidates)
+        assert result.state is MediaMatchState.EXACT
+        assert result.presentation_id == candidates[ids.index(expected)].presentation_id
+        assert expected in result.reason
+
+
+def test_no_match_is_reviewable_not_an_exception() -> None:
+    result = match_presentation(
+        "random-speaker-deck.pptx",
+        [MatchCandidate(UUID(int=1), "UPM-123", "123")],
+    )
+    assert result.state is MediaMatchState.UNMATCHED
+    assert result.presentation_id is None
 
 
 def test_imported_and_offline_generated_identifiers_are_stable_and_distinct() -> None:
@@ -114,7 +143,8 @@ def test_matching_prefers_exact_identity_and_preserves_ambiguity() -> None:
     result = match_presentation("12345_Smith_slides.pptx", [first, second])
     assert result.state is MediaMatchState.EXACT
     assert result.presentation_id == first.presentation_id
-    ambiguous = match_presentation("12345_777_deck.pdf", [first, second])
+    duplicate = MatchCandidate(UUID(int=3), "UPM-OTHER", "12345")
+    ambiguous = match_presentation("12345_deck.pdf", [first, duplicate])
     assert ambiguous.state is MediaMatchState.AMBIGUOUS
     assert ambiguous.presentation_id is None
     assert match_presentation("Smith.pptx", [first]).state is MediaMatchState.UNMATCHED

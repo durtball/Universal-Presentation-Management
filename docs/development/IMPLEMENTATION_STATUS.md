@@ -134,6 +134,10 @@
   The shared upload queue accepts single or multiple PPT/PPTX/PDF files, recursively selected browser
   directories, bounded per-file streaming, retryable partial failures, skipped incidental-file
   reporting, and separately validated source-relative-path provenance.
+  Folder uploads now use two active request slots, bounded exponential retry for transient pressure,
+  pause/resume and retry-failed controls, preserve non-junk unknown extensions for review, and use
+  longest-boundary matching against known Event Presentation Identifiers and external IDs. Central
+  retains durably staged bytes as needs-review records when matching/version post-processing fails.
   Concurrent revision reconciliation, complete Site audit/outbox handlers, Site RBAC, guarded
   unmatched deletion/rename, and complete bulk Central-to-Site deployment controls remain incomplete.
   Running-stack end-to-end verification is still required before calling the overall workflow

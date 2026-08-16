@@ -363,7 +363,7 @@ def test_site_api_upload_metadata_status_and_storage_health_without_central(
         assert payload["availability"] == "available"
         assert payload["mime_type"] == "application/pdf"
         assert payload["original_filename"] == "walk-in.pdf"
-        assert payload["source_relative_path"] == "day1/walk-in.pdf"
+        assert payload["source_relative_path"] == "Event Slides/day1/walk-in.pdf"
 
         metadata = client.get(f"/api/v1/media/{payload['media_object_id']}")
         assert metadata.status_code == 200
