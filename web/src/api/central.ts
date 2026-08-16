@@ -95,6 +95,10 @@ export function centralApi(csrfToken: string | null = null) {
       get<DeletionOperation | null>("/api/v1/admin/people-bulk-deletion/current"),
     deletionStatus: (operationId: string) =>
       get<DeletionOperation>(`/api/v1/admin/deletions/${operationId}`),
+    retryDeletion: (operationId: string) =>
+      client.request<DeletionOperation>(`/api/v1/admin/deletions/${operationId}/retry`, {
+        method: "POST",
+      }),
     participants: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/participants`, signal),
     sessions: (eventId: string, signal?: AbortSignal) =>

@@ -73,6 +73,8 @@ export function Events() {
         {deleting ? <DeletionDialog kind="Event" name={deleting.name}
           load={()=>api.eventDeletionImpact(deleting.event_id)}
           start={(confirmation)=>api.deleteEvent(deleting.event_id, confirmation)}
+          status={api.deletionStatus}
+          retry={api.retryDeletion}
           close={()=>{setDeleting(undefined);result.refresh();}} /> : null}
         {editing !== undefined ? <EventDialog event={editing??undefined}
           save={values=>editing ? api.updateEvent(editing.event_id, values) : api.createEvent(values)}

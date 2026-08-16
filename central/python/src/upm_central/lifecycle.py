@@ -20,12 +20,14 @@ from upm_central.persistence.models import (
     ImportSource,
     ImportValidationIssue,
     MediaObjectReplica,
+    MediaReplicationReceiveSession,
     OutboxEvent,
     Person,
     PersonIdentityLink,
     PersonIdentitySignal,
     Presentation,
     PresentationAsset,
+    PresentationMediaImport,
     PresentationPresenter,
     PresentationSession,
     PresentationVersion,
@@ -43,7 +45,7 @@ from upm_central.persistence.models import (
 from upm_central.persistence.queue import CentralQueue
 from upm_central.program import touch_event_program
 from upm_central.sync import next_sequence
-from upm_shared.enums import JobPriority, SourceSystem
+from upm_shared.enums import JobPriority, JobStatus, SourceSystem
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import (
     PRIORITY_VALUES,
@@ -84,6 +86,17 @@ def event_impact(session: Session, event_id: UUID) -> dict[str, int]:
         ),
         "site_deployments": _count(session, EventDeployment, EventDeployment.event_id == event_id),
         "imports": _count(session, ImportBatch, ImportBatch.event_id == event_id),
+        "presentation_media_imports": _count(
+            session, PresentationMediaImport, PresentationMediaImport.event_id == event_id
+        ),
+        "media_replication_sessions": _count(
+            session,
+            MediaReplicationReceiveSession,
+            MediaReplicationReceiveSession.event_id == event_id,
+        ),
+        "outbox_events_retained": _count(session, OutboxEvent, OutboxEvent.event_id == event_id),
+        "sync_events_retained": _count(session, SyncEvent, SyncEvent.event_id == event_id),
+        "audit_records_retained": _count(session, AuditRecord, AuditRecord.event_id == event_id),
         "session_participations": _count(
             session, SessionParticipant, SessionParticipant.session_id.in_(session_ids)
         ),
@@ -289,10 +302,36 @@ def request_deletion(
             action=f"central.{target_type}.deletion_requested",
             target_type=target_type,
             target_id=target_id,
+            event_id=target_id if target_type == "event" else None,
             before_context={"display_name": name},
             after_context={"operation_id": str(operation.deletion_operation_id), "counts": impact},
         )
     )
+    return operation
+
+
+def retry_deletion(session: Session, operation: DeletionOperation) -> DeletionOperation:
+    """Requeue a corrected failed operation without changing its stable identity."""
+    if operation.status != "failed":
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="only failed deletions can be retried")
+    job = session.scalar(
+        select(ProcessingJob).where(
+            ProcessingJob.idempotency_key == str(operation.deletion_operation_id),
+            ProcessingJob.job_type.like("lifecycle.delete%"),
+        )
+    )
+    if job is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="deletion job is unavailable")
+    job.status = JobStatus.PENDING
+    job.attempt_count = 0
+    job.next_attempt_at = utc_now()
+    job.completed_at = None
+    job.error_code = None
+    job.last_error = None
+    job.error_metadata = None
+    operation.status = "pending"
+    operation.stage = "queued"
+    operation.last_error = None
     return operation
 
 
@@ -326,6 +365,7 @@ def run_deletion(session: Session, operation: DeletionOperation) -> None:
             action=f"central.{operation.target_type}.deleted",
             target_type=operation.target_type,
             target_id=operation.target_id,
+            event_id=operation.target_id if operation.target_type == "event" else None,
             before_context={"display_name": operation.target_display_name},
             after_context={
                 "operation_id": str(operation.deletion_operation_id),
@@ -501,6 +541,29 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
             )
         )
     )
+    import_transfer_ids = set(
+        session.scalars(
+            select(PresentationMediaImport.transfer_job_id).where(
+                PresentationMediaImport.event_id == event.event_id,
+                PresentationMediaImport.transfer_job_id.is_not(None),
+            )
+        )
+    )
+    # Imports and receive sessions can reference presentations, versions, transfer
+    # jobs, and replicas.  Remove these subordinate operational rows first,
+    # including failed/unmatched imports which have no Presentation relationship.
+    session.execute(
+        delete(PresentationMediaImport).where(PresentationMediaImport.event_id == event.event_id)
+    )
+    session.execute(
+        delete(MediaReplicationReceiveSession).where(
+            MediaReplicationReceiveSession.event_id == event.event_id
+        )
+    )
+    if import_transfer_ids:
+        session.execute(
+            delete(TransferJob).where(TransferJob.transfer_job_id.in_(import_transfer_ids))
+        )
     session.execute(
         delete(PresentationAsset).where(PresentationAsset.presentation_version_id.in_(vids))
     )
@@ -557,11 +620,16 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
     )
     session.execute(delete(EventDeployment).where(EventDeployment.event_id == event.event_id))
     session.execute(delete(ExternalIdentifier).where(ExternalIdentifier.event_id == event.event_id))
-    session.execute(delete(SyncEvent).where(SyncEvent.event_id == event.event_id))
-    session.execute(delete(OutboxEvent).where(OutboxEvent.event_id == event.event_id))
+    # Transport and audit history survive independently.  The deletion tombstone
+    # above is event_id-free and remains deliverable to an offline Site.  Older
+    # envelopes retain their payload/sequence while dropping only the live FK.
     session.execute(
-        update(AuditRecord).where(AuditRecord.event_id == event.event_id).values(event_id=None)
+        update(SyncEvent).where(SyncEvent.event_id == event.event_id).values(event_id=None)
     )
+    session.execute(
+        update(OutboxEvent).where(OutboxEvent.event_id == event.event_id).values(event_id=None)
+    )
+    # AuditRecord.event_id is intentionally a historical UUID without a live FK.
     deleted_media = 0
     for media_id in media_ids:
         if not session.scalar(

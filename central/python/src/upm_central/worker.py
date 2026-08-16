@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Event
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from upm_central.config import CentralDatabaseSettings
 from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
@@ -68,6 +69,18 @@ def processing_deletion_operation_id(work):
     if work.job_type in {"lifecycle.delete_event", "lifecycle.delete_person"}:
         return LifecycleDeletionJobPayload.model_validate(work.payload).data.deletion_operation_id
     return None
+
+
+def deletion_failure_details(exc: Exception) -> dict[str, object]:
+    """Extract safe PostgreSQL diagnostics without credentials or a traceback."""
+    original = getattr(exc, "orig", None)
+    diagnostic = getattr(original, "diag", None)
+    return {
+        "error_type": type(exc).__name__,
+        "database_constraint": getattr(diagnostic, "constraint_name", None),
+        "database_table": getattr(diagnostic, "table_name", None),
+        "database_detail": getattr(diagnostic, "message_detail", None) or str(original or exc),
+    }
 
 
 def run(*, sync: bool = False, once: bool = False) -> int:
@@ -139,33 +152,57 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 executed = execute_processing_job(session, queue, work, worker_id)
                         except Exception as exc:
                             operation_id = processing_deletion_operation_id(work)
+                            operation = (
+                                session.get(DeletionOperation, operation_id)
+                                if operation_id
+                                else None
+                            )
+                            details = deletion_failure_details(exc)
+                            deterministic = isinstance(exc, (IntegrityError, ProgrammingError))
                             queue.fail(
                                 work,
                                 worker_id,
                                 error_code="deletion_execution_failed",
                                 message=str(exc),
-                                retryable=True,
+                                retryable=not deterministic,
                                 base_delay_seconds=5,
+                                metadata={
+                                    **details,
+                                    "phase": operation.stage if operation else "dispatch",
+                                },
                             )
-                            if operation_id is not None:
-                                operation = session.get(DeletionOperation, operation_id)
-                                if operation is not None:
-                                    operation.status = (
-                                        "failed"
-                                        if work.status in {JobStatus.FAILED, JobStatus.EXHAUSTED}
-                                        else "retry_wait"
-                                    )
-                                    operation.stage = operation.status
-                                    operation.last_error = (
-                                        "Deletion processing failed and will be retried."
-                                        if operation.status == "retry_wait"
-                                        else "Deletion processing failed after all retry attempts."
-                                    )
+                            if operation is not None:
+                                operation.status = (
+                                    "failed"
+                                    if work.status in {JobStatus.FAILED, JobStatus.EXHAUSTED}
+                                    else "retry_wait"
+                                )
+                                operation.stage = operation.status
+                                table = details["database_table"] or "A database dependency"
+                                operation.last_error = (
+                                    "Deletion processing failed transiently and will be retried."
+                                    if operation.status == "retry_wait"
+                                    else f"Deletion failed: {table} still references "
+                                    "this Event. The operation can be retried after "
+                                    "the dependency issue is resolved."
+                                )
                             log(
                                 "deletion_execution_failed",
                                 worker_id=worker_id,
                                 work_id=work_id,
-                                error_type=type(exc).__name__,
+                                deletion_operation_id=operation_id,
+                                target_event_id=operation.target_id
+                                if operation and operation.target_type == "event"
+                                else None,
+                                target_event_name=operation.target_display_name
+                                if operation and operation.target_type == "event"
+                                else None,
+                                phase=operation.stage if operation else "dispatch",
+                                retry_count=work.attempt_count,
+                                next_retry_at=work.next_attempt_at
+                                if work.status == JobStatus.RETRY_WAIT
+                                else None,
+                                **details,
                             )
                             continue
                         if not executed:

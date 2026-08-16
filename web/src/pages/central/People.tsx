@@ -76,6 +76,8 @@ export function People() {
         {deleting ? <DeletionDialog kind="Permanent Person" name={deleting.display_name}
           load={()=>api.personDeletionImpact(deleting.person_id)}
           start={(confirmation)=>api.deletePerson(deleting.person_id,confirmation)}
+          status={api.deletionStatus}
+          retry={api.retryDeletion}
           close={()=>{setDeleting(undefined);result.refresh();}}/> : null}
         {showBulkDelete ? <BulkPeopleDeletionDialog
           load={()=>api.bulkPeopleDeletionImpact()} start={confirmation=>api.deleteAllPeople(confirmation)}

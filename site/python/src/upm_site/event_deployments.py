@@ -586,6 +586,8 @@ def apply_event_deletion(session: Session, event: SyncEventEnvelope) -> str:
     params = {"event_id": event_id}
     statements = [
         "DELETE FROM room_assignments WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id)",
+        "DELETE FROM media_transfer_sessions WHERE event_id=:event_id",
+        "DELETE FROM media_replication_sessions WHERE event_id=:event_id",
         "DELETE FROM presentation_assets WHERE presentation_version_id IN (SELECT presentation_version_id FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id))",
         "DELETE FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
         "DELETE FROM presentation_presenters WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",

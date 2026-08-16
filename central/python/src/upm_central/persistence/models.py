@@ -1202,7 +1202,7 @@ class SyncEvent(CentralRecordMixin, CentralBase):
         ForeignKey("sites.site_id", ondelete="RESTRICT")
     )
     event_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("events.event_id", ondelete="RESTRICT")
+        ForeignKey("events.event_id", ondelete="SET NULL")
     )
     aggregate_type: Mapped[str] = mapped_column(String(100), nullable=False)
     aggregate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
@@ -1245,7 +1245,7 @@ class OutboxEvent(CentralBase):
         ForeignKey("sites.site_id", ondelete="RESTRICT")
     )
     event_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("events.event_id", ondelete="RESTRICT")
+        ForeignKey("events.event_id", ondelete="SET NULL")
     )
     source_system: Mapped[SourceSystem] = mapped_column(
         Enum(
@@ -1310,9 +1310,9 @@ class AuditRecord(CentralBase):
     target_type: Mapped[str] = mapped_column(String(100), nullable=False)
     target_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     site_id: Mapped[UUID | None] = mapped_column(ForeignKey("sites.site_id", ondelete="RESTRICT"))
-    event_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("events.event_id", ondelete="RESTRICT")
-    )
+    # Historical identity, deliberately not a live Event FK.  Audit evidence must
+    # continue to identify a permanently deleted Event by its stable UUID.
+    event_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

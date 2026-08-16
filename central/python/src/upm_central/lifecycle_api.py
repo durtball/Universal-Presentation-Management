@@ -15,6 +15,7 @@ from upm_central.lifecycle import (
     person_deletion_impact,
     request_bulk_people_deletion,
     request_deletion,
+    retry_deletion,
 )
 from upm_central.persistence.models import DeletionOperation, Event, Person
 
@@ -127,6 +128,13 @@ def register_lifecycle_routes(
         if item is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="deletion not found")
         return _view(item)
+
+    @app.post("/api/v1/admin/deletions/{operation_id}/retry", status_code=202, dependencies=admin)
+    def retry_failed_deletion(operation_id: UUID, session: Db):
+        item = session.get(DeletionOperation, operation_id)
+        if item is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="deletion not found")
+        return _view(retry_deletion(session, item))
 
     @app.get("/api/v1/admin/deletions", dependencies=admin)
     def deletions(session: Db):
