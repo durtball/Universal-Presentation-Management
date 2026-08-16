@@ -28,7 +28,7 @@ function StorageCard({ root, targets, test, activate }: { root: StorageTarget; t
       <progress max="100" value={used} aria-label={`${used.toFixed(1)} percent used`} />
       <dl className="fact-grid">
         <div><dt>Total</dt><dd>{size(root.total_bytes)}</dd></div>
-        <div><dt>Used</dt><dd>{size(root.used_bytes)}</dd></div>
+        <div><dt>Filesystem used</dt><dd>{size(root.used_bytes)}</dd></div>
         <div><dt>Available</dt><dd>{size(root.free_bytes)}</dd></div>
         <div><dt>UPM usage</dt><dd>{size(root.upm_owned_bytes)}</dd></div>
         <div><dt>{root.role === "staging" ? "Staged/importing files" : "Media objects"}</dt><dd>{root.object_count ?? 0}</dd></div>

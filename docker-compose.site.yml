@@ -136,10 +136,11 @@ services:
       UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: site
       UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
       UPM_MEDIA_STORAGE_STATE_PATH: /state/assignments.json
-      UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_SITE_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Default Temporary Storage","internal_path":"/storage/temp","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Default Media Storage","internal_path":"/storage/media","roles":["media"]}]}'
+      UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_SITE_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000014","name":"Site Staging Storage","internal_path":"/storage/staging","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Site Media Storage","internal_path":"/storage/media","roles":["media"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Site Temporary Storage","internal_path":"/storage/temp","roles":["staging"]}]}'
     volumes:
-      - site-storage-temp:/storage/temp
-      - site-storage-media:/storage/media
+      - ${UPM_SITE_STAGING_HOST_PATH:-site-storage-staging}:/storage/staging
+      - ${UPM_SITE_MEDIA_HOST_PATH:-site-storage-media}:/storage/media
+      - ${UPM_SITE_TEMP_HOST_PATH:-site-storage-temp}:/storage/temp
       - site-storage-state:/state
     networks:
       - site-internal
@@ -211,5 +212,6 @@ volumes:
   site-caddy-config:
   site-postgres-data:
   site-storage-temp:
+  site-storage-staging:
   site-storage-media:
   site-storage-state:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 from dataclasses import asdict, dataclass
@@ -11,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
 from upm_media_storage.config import Settings, TargetConfig
+
+logger = logging.getLogger(__name__)
 
 
 class StorageError(RuntimeError):
@@ -35,6 +38,20 @@ class StorageService:
         self.settings = settings
         self.targets = {target.storage_target_id: target for target in settings.targets()}
         self.assignments = self._load_assignments()
+        for target in self.targets.values():
+            observation = self.observe(target)
+            log = logger.info if observation.health != "Unavailable" else logger.warning
+            log(
+                "media_storage_target_startup",
+                extra={
+                    "storage_target_id": str(target.storage_target_id),
+                    "target_name": target.name,
+                    "internal_path": str(target.internal_path),
+                    "health": observation.health,
+                    "writable": observation.writable,
+                    "detail": observation.detail,
+                },
+            )
 
     def _load_assignments(self) -> dict[str, str]:
         defaults = {
@@ -156,9 +173,32 @@ class StorageService:
                 digest.update(block)
         return digest.hexdigest()
 
+    @staticmethod
+    def owned_usage(root: Path) -> tuple[int | None, int | None]:
+        """Measure files below one explicitly dedicated UPM target without following links."""
+        total = 0
+        count = 0
+        try:
+            pending = [root]
+            while pending:
+                directory = pending.pop()
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if entry.is_symlink() or entry.name.startswith(".upm-probe-"):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                            count += 1
+            return total, count
+        except OSError:
+            return None, None
+
     def payload(self, target: TargetConfig, probe: bool = False) -> dict:
         result = asdict(self.observe(target, probe))
         result["checked_at"] = result["checked_at"].isoformat()
+        owned_bytes, object_count = self.owned_usage(target.internal_path)
         return {
             "storage_target_id": str(target.storage_target_id),
             "name": target.name,
@@ -166,5 +206,7 @@ class StorageService:
             "backend_type": "local_filesystem",
             "internal_path": str(target.internal_path),
             "enabled": target.enabled,
+            "upm_owned_bytes": owned_bytes,
+            "object_count": object_count,
             **result,
         }

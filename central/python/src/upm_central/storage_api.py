@@ -39,6 +39,8 @@ def register_storage_routes(
             ),
             "detail": target["detail"],
             "role_compatibility": target["role_compatibility"],
+            "upm_owned_bytes": target.get("upm_owned_bytes"),
+            "object_count": target.get("object_count"),
         }
 
     @app.get("/api/v1/admin/storage", dependencies=protected, tags=["storage"])

@@ -152,8 +152,10 @@
 - **Storage administration:** a reusable, authenticated Media Storage service exposes explicitly
   mounted targets, real probes/capacity, persistent role assignments, durable staging references,
   and content-addressed SHA-256 commits. Central and Site Compose run independent instances with
-  persistent default volumes, and their shared themed page remains rendered during service outage
-  and can test/select compatible targets. Complete importer/replication client conversion and the
+  persistent default volumes or independently configurable staging/media/temp host bind mounts.
+  Their shared themed page remains rendered during service outage, can test/select compatible
+  targets, and distinguishes backing-filesystem use from recursively measured UPM-owned bytes.
+  Complete importer/replication client conversion and the
   database-owned resumable main-media migration worker remain incomplete.
 - **Program editing:** backend CRUD is broader than the browser; Sessions, Presenters, Presentations, and People pages are primarily read views after import.
 - **Imports:** current CSV/XLSX parsing is synchronous and limited to 25 MiB; arbitrary operator column mapping and worker processing are deferred.

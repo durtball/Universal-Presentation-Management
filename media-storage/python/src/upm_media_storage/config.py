@@ -36,9 +36,9 @@ class TargetConfig(BaseModel):
 
 DEFAULT_TARGETS = [
     TargetConfig(
-        storage_target_id=UUID("0198b8d0-63e0-7000-8000-000000000001"),
-        name="Default Temporary Storage",
-        internal_path=Path("/storage/temp"),
+        storage_target_id=UUID("0198b8d0-63e0-7000-8000-000000000004"),
+        name="Default Staging Storage",
+        internal_path=Path("/storage/staging"),
         roles={"staging"},
     ),
     TargetConfig(
@@ -46,6 +46,12 @@ DEFAULT_TARGETS = [
         name="Default Media Storage",
         internal_path=Path("/storage/media"),
         roles={"media"},
+    ),
+    TargetConfig(
+        storage_target_id=UUID("0198b8d0-63e0-7000-8000-000000000001"),
+        name="Default Temporary Storage",
+        internal_path=Path("/storage/temp"),
+        roles={"staging"},
     ),
 ]
 

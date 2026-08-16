@@ -3,8 +3,8 @@
 ## Media storage targets
 
 Central and each Site run their own `*-media-storage` service on the private deployment network.
-Development uses persistent named volumes for **Default Temporary Storage** and **Default Media
-Storage**; container recreation does not remove those volumes.
+Development uses persistent named volumes for **Default Staging Storage**, **Default Temporary
+Storage**, and **Default Media Storage**; container recreation does not remove those volumes.
 
 Production storage is mounted by Linux and explicitly exposed to only the local storage service:
 
@@ -21,6 +21,75 @@ a stable UUID, friendly `name`, container `internal_path`, and compatible `roles
 filesystems are mounted and monitored by the Linux host; UPM sees only the explicitly exposed
 target. Set a distinct random `UPM_CENTRAL_MEDIA_STORAGE_TOKEN` or
 `UPM_SITE_MEDIA_STORAGE_TOKEN`. Never publish the storage service port or proxy it through Caddy.
+
+### Configurable bind mounts and MS-01 layout
+
+The default Compose source for each target is a Docker named volume. Setting a host-path variable
+changes only that target to a bind mount; application source never contains a host-specific path.
+For example, an MS-01 can use:
+
+```text
+/srv/upm-storage/
+├── backups/
+├── media/
+│   ├── central/
+│   └── site/
+├── staging/
+│   ├── central/
+│   └── site/
+└── temp/
+    ├── central/
+    └── site/
+```
+
+```dotenv
+UPM_CENTRAL_STAGING_HOST_PATH=/srv/upm-storage/staging/central
+UPM_CENTRAL_MEDIA_HOST_PATH=/srv/upm-storage/media/central
+UPM_CENTRAL_TEMP_HOST_PATH=/srv/upm-storage/temp/central
+UPM_SITE_STAGING_HOST_PATH=/srv/upm-storage/staging/site
+UPM_SITE_MEDIA_HOST_PATH=/srv/upm-storage/media/site
+UPM_SITE_TEMP_HOST_PATH=/srv/upm-storage/temp/site
+```
+
+These become `/storage/staging`, `/storage/media`, and `/storage/temp` inside the corresponding
+deployment-local service. Central and Site must use distinct host directories even on one machine.
+Each directory on the same filesystem correctly reports the same filesystem total/free capacity;
+UPM-owned bytes are measured independently below each configured target root.
+
+The image runs as UID/GID `10001:10001`, is not privileged, and starts with target diagnostics in
+its logs. Before starting with bind mounts, create and grant only the required directories:
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 \
+  /srv/upm-storage/{staging,media,temp}/{central,site}
+```
+
+A missing, read-only, or incorrectly owned directory remains visible as `Unavailable`; do not make
+the service privileged to bypass permissions. The same variables may later point at a different
+local disk or a host-mounted NAS/NFS/SMB filesystem.
+
+### Moving existing named-volume data
+
+Changing a volume source to a bind mount hides—but does not delete—the old named volume. **Stop the
+owning API, worker, sync, and media-storage services before copying.** Inspect the old volume first:
+
+```bash
+docker run --rm -v upm-central-local_central-storage-media:/source:ro alpine:3.22 \
+  sh -c 'find /source -type f -printf "%s %p\n"'
+```
+
+Use `scripts/migrate-storage-volume.sh <volume-name> <empty-existing-destination>` for a controlled,
+non-destructive copy. It refuses a non-empty destination and never removes the source. Verify file
+counts/checksums, set ownership to `10001:10001`, set the host-path variable, recreate the storage
+service, run **Test Storage**, and retain the old volume until application-level verification and an
+explicit cleanup decision are complete. Never switch an active main-media target merely by hiding a
+non-empty old volume.
+
+The original temporary target keeps its stable target UUID and `/storage/temp` mount, so an
+existing persisted staging assignment is not silently reinterpreted as the new staging directory.
+After copying any in-flight data, use the Storage page to test and explicitly activate the new
+`/storage/staging` target. The `/state` volume remains unchanged and contains assignments only—not
+presentation bytes.
 
 ## MS-01 UPM Central deployment
 

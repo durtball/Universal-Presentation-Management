@@ -1,6 +1,7 @@
 """Deployment contract tests for independent Central and Site Compose stacks."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def compose_config(filename: str) -> dict:
+def compose_config(filename: str, environment: dict[str, str] | None = None) -> dict:
     result = subprocess.run(
         [
             "docker",
@@ -26,8 +27,61 @@ def compose_config(filename: str) -> dict:
         check=True,
         capture_output=True,
         text=True,
+        env={**os.environ, **(environment or {})},
     )
     return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("deployment", ["central", "site"])
+def test_media_storage_uses_named_volume_development_defaults(deployment: str) -> None:
+    service = compose_config(f"docker-compose.{deployment}.yml")["services"][
+        f"{deployment}-media-storage"
+    ]
+    mounts = {mount["target"]: mount for mount in service["volumes"]}
+
+    for role in ("staging", "media", "temp"):
+        assert mounts[f"/storage/{role}"]["type"] == "volume"
+        assert mounts[f"/storage/{role}"]["source"].endswith(f"{deployment}-storage-{role}")
+    assert mounts["/state"]["type"] == "volume"
+
+
+@pytest.mark.parametrize(
+    ("deployment", "paths"),
+    [
+        (
+            "central",
+            {
+                "staging": "/mnt/upm/staging/central",
+                "media": "/mnt/upm/media/central",
+                "temp": "/mnt/upm/temp/central",
+            },
+        ),
+        (
+            "site",
+            {
+                "staging": "/mnt/upm/staging/site",
+                "media": "/mnt/upm/media/site",
+                "temp": "/mnt/upm/temp/site",
+            },
+        ),
+    ],
+)
+def test_media_storage_host_paths_resolve_to_isolated_bind_mounts(
+    deployment: str, paths: dict[str, str]
+) -> None:
+    environment = {
+        f"UPM_{deployment.upper()}_{role.upper()}_HOST_PATH": path for role, path in paths.items()
+    }
+    service = compose_config(f"docker-compose.{deployment}.yml", environment)["services"][
+        f"{deployment}-media-storage"
+    ]
+    mounts = {mount["target"]: mount for mount in service["volumes"]}
+
+    for role, path in paths.items():
+        mount = mounts[f"/storage/{role}"]
+        assert mount["type"] == "bind"
+        assert mount["source"] == path
+        assert mount["target"] == f"/storage/{role}"
 
 
 @pytest.mark.parametrize(

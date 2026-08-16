@@ -420,6 +420,8 @@ def create_app(
                         "percent_used": target["percent_used"],
                         "last_successful_check_at": target["checked_at"],
                         "detail": target["detail"],
+                        "upm_owned_bytes": target.get("upm_owned_bytes"),
+                        "object_count": target.get("object_count"),
                     }
                 )
             return {"roots": roots, "targets": storage.targets(), "service_available": True}

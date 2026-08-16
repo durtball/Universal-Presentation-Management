@@ -58,12 +58,43 @@ def test_targets_report_capacity_and_probe_real_storage(tmp_path):
     assert result["total_bytes"] > 0 and result["free_bytes"] > 0
 
 
+def test_upm_usage_is_measured_separately_from_filesystem_usage(tmp_path):
+    client = configured_client(tmp_path)
+    payload = b"owned-by-upm"
+    (tmp_path / "staging" / "one.upload").write_bytes(payload)
+
+    target = client.get("/api/v1/storage/targets").json()["targets"][0]
+
+    assert target["upm_owned_bytes"] == len(payload)
+    assert target["object_count"] == 1
+    assert target["used_bytes"] >= target["upm_owned_bytes"]
+
+
+def test_target_activation_enforces_role_compatibility(tmp_path):
+    client = configured_client(tmp_path)
+
+    response = client.put(f"/api/v1/storage/assignments/staging/{MEDIA_ID}")
+
+    assert response.status_code == 422
+    assert "not compatible with staging" in response.json()["detail"]
+
+
 def test_missing_mount_is_structured_unavailable(tmp_path):
     client = configured_client(tmp_path)
     (tmp_path / "staging").rmdir()
     result = client.post(f"/api/v1/storage/targets/{STAGING_ID}/test").json()
     assert result["health"] == "Unavailable"
     assert "not mounted" in result["detail"]
+
+
+def test_permission_denied_is_structured_unavailable(tmp_path, monkeypatch):
+    client = configured_client(tmp_path)
+    monkeypatch.setattr("upm_media_storage.service.os.access", lambda *_args: False)
+
+    result = client.post(f"/api/v1/storage/targets/{STAGING_ID}/test").json()
+
+    assert result["health"] == "Unavailable"
+    assert result["writable"] is False
 
 
 def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
