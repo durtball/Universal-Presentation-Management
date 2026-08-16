@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.config import CentralDatabaseSettings
@@ -151,6 +151,18 @@ def register_presentation_media_routes(
                 detail={
                     "code": "staging_storage_error",
                     "message": f"Staging storage is unavailable: {reason}.",
+                },
+            ) from error
+        except ProgrammingError as error:
+            logger.exception(
+                "central_media_staging_schema_error",
+                extra={"event_id": str(event_id), "exception_type": type(error).__name__},
+            )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "database_schema_error",
+                    "message": "Media upload failed because the application schema is invalid.",
                 },
             ) from error
         except SQLAlchemyError as error:

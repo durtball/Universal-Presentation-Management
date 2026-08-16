@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+from sqlalchemy import Integer
 
 from upm_central.api import create_app
+from upm_central.persistence.models import StorageRoot
 from upm_central.presentation_media import MediaStagingError, _safe_staging_path
 
 
@@ -43,3 +45,12 @@ def test_central_media_routes_are_authenticated_and_versioned() -> None:
         "POST",
         "/api/v1/media-replications/{replication_session_id}/finalize",
     ) in routes
+
+
+def test_storage_root_uses_standard_central_record_revision() -> None:
+    revision = StorageRoot.__table__.columns["revision"]
+
+    assert isinstance(revision.type, Integer)
+    assert revision.nullable is False
+    assert revision.default is not None
+    assert revision.default.arg == 1

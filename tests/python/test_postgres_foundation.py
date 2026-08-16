@@ -35,6 +35,17 @@ def test_postgres_databases_and_version_histories_are_independent() -> None:
         assert "person_projections" in site_tables
         assert "storage_targets" in site_tables
         assert "persons" not in site_tables
+
+        with central_engine.connect() as connection:
+            central_version = connection.execute(
+                text("SELECT version_num FROM alembic_version_central")
+            ).scalar_one()
+        with site_engine.connect() as connection:
+            site_version = connection.execute(
+                text("SELECT version_num FROM alembic_version_site")
+            ).scalar_one()
+        assert central_version == "a84d91c6e2f0"
+        assert site_version
     finally:
         central_engine.dispose()
         site_engine.dispose()
@@ -84,6 +95,22 @@ def test_site_storage_constraints_are_present() -> None:
         }
         assert "ck_site_storage_targets_root_path_absolute" in constraints
         assert "ck_site_storage_targets_threshold_order" in constraints
+        columns = {item["name"] for item in inspect(engine).get_columns("storage_targets")}
+        assert "revision" in columns
+    finally:
+        engine.dispose()
+
+
+def test_central_storage_root_matches_record_mixin_schema() -> None:
+    engine = create_engine(CENTRAL_URL)
+    try:
+        columns = {item["name"]: item for item in inspect(engine).get_columns("storage_roots")}
+        assert "revision" in columns
+        assert columns["revision"]["nullable"] is False
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT revision FROM storage_roots WHERE enabled IS TRUE LIMIT 1")
+            ).scalar_one_or_none() in {None, 1}
     finally:
         engine.dispose()
 
