@@ -25,6 +25,8 @@ export const siteApi = {
     get<SiteDeployment[]>("/api/v1/event-deployments", signal),
   storage: (signal?: AbortSignal) =>
     get<StorageTarget[]>("/api/v1/storage-targets/health", signal),
+  testStorage: (id: string) => siteClient.request<StorageTarget>(
+    `/api/v1/storage-targets/${id}/test`, { method: "POST" }),
   program: (eventId: string, signal?: AbortSignal) =>
     get<Row>(`/api/v1/events/${eventId}/program`, signal),
   rooms: (signal?: AbortSignal) => get<SiteRoom[]>("/api/v1/rooms", signal),

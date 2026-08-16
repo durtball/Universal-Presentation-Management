@@ -15,5 +15,6 @@ Architecture Decision Records (ADRs) capture implementation decisions that refin
 | [ADR-0009](ADR-0009-site-room-materialization.md) | Accepted | Site room materialization from deployed program locations |
 | [ADR-0010](ADR-0010-lifecycle-deletion-and-retention.md) | Accepted | Operational lifecycle deletion and permanent-person retention |
 | [ADR-0011](ADR-0011-resumable-media-transfer-and-replication.md) | Accepted | Site-initiated resumable presentation-media transfer and replication |
+| [ADR-0012](ADR-0012-deployment-storage-roots.md) | Accepted | Deployment-local staging and media storage roots |
 
 New decisions must not silently weaken Central/Site separation, Site offline autonomy, PostgreSQL requirements, or other master-architecture constraints.

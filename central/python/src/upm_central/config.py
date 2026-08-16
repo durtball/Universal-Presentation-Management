@@ -24,7 +24,10 @@ class CentralDatabaseSettings(BaseSettings):
     public_url: str = "http://upm-central:8080"
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
-    media_staging_path: str = "/var/lib/upm/central-media"
+    media_staging_path: str = "/data/staging"
+    media_objects_path: str = "/data/objects"
+    storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
+    storage_critical_free_percent: Annotated[float, Field(ge=0, le=100)] = 5.0
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888
     transfer_block_bytes: Annotated[int, Field(ge=65_536, le=67_108_864)] = 4_194_304
     transfer_partial_retention_seconds: Annotated[int, Field(ge=3600)] = 604_800

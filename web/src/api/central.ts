@@ -15,6 +15,7 @@ import type {
   SiteRecord,
   CentralMediaImport,
   CentralMediaWorkspace,
+  StorageOverview,
 } from "./types";
 
 
@@ -34,6 +35,11 @@ export function centralApi(csrfToken: string | null = null) {
     logout: () =>
       client.request<void>("/api/v1/auth/logout", { method: "POST" }),
     health: (signal?: AbortSignal) => get<Health>("/health", signal),
+    storage: (signal?: AbortSignal) => get<StorageOverview>("/api/v1/admin/storage", signal),
+    testStorage: (role: string) => client.request<Row>(`/api/v1/admin/storage/${role}/test`, { method: "POST" }),
+    changeStaging: (path: string) => client.request<Row>("/api/v1/admin/storage/staging", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
+    }),
     sites: (signal?: AbortSignal) =>
       get<SiteRecord[]>("/api/v1/admin/sites", signal),
     events: (signal?: AbortSignal) =>

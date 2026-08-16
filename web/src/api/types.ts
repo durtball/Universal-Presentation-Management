@@ -137,13 +137,21 @@ export interface SiteRegistration extends Row {
 export interface StorageTarget extends Row {
   storage_target_id: string;
   display_name: string;
+  role?: "staging" | "media";
+  path?: string;
   available: boolean;
   writable: boolean;
   health: string;
   free_bytes?: number;
   total_bytes?: number;
+  used_bytes?: number;
+  percent_used?: number;
+  upm_owned_bytes?: number;
+  object_count?: number;
+  last_successful_check_at?: string;
   detail?: string;
 }
+export interface StorageOverview extends Row { roots: StorageTarget[] }
 export interface SiteDeployment extends Row {
   deployment_id: string;
   central_event_id: string;

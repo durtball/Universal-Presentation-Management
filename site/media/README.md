@@ -1,5 +1,20 @@
 # Site media ingestion
 
+## Production storage operations
+
+Site media is deployment-local and remains usable without Central. Mount a persistent host
+directory at `/data`; committed objects use `/data/objects` and transient work is shown separately
+as staging. Central uses an independent persistent volume with the same container convention.
+
+The Storage page performs an exclusive create, fsync, read-back, delete and capacity probe. The
+defaults warn below 15% free and become critical below 5%. A missing or read-only mount is
+unavailable; verify the host mount and container UID/GID permissions, then inspect service logs.
+
+Local disks, RAID, USB, NFS, and host-mounted SMB are equivalent mounted filesystems to UPM. The
+host owns mounting and credentials. Back up PostgreSQL and committed objects together; include
+staging when interrupted/operator-review uploads must be recoverable. Central and Sites never use
+one another's filesystem as an operational dependency.
+
 The Site is authoritative for its local files. A database `StorageTarget.root_path` names a filesystem root already mounted into the API and worker containers. Physical disk setup, mounting, RAID, and pooling remain host responsibilities.
 
 ## Configuration

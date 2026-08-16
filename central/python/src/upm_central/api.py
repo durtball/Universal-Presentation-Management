@@ -60,6 +60,7 @@ from upm_central.program import (
     validate_timezone,
 )
 from upm_central.program_api import register_program_routes
+from upm_central.storage_api import register_storage_routes
 from upm_central.sync import (
     apply_site_event,
     authenticate_site,
@@ -1059,5 +1060,6 @@ body:JSON.stringify({name:document.querySelector('#event-name').value})});load()
 
     register_program_routes(app, db, require_admin)
     register_presentation_media_routes(app, db, require_admin, get_factory, get_settings)
+    register_storage_routes(app, db, require_admin, get_settings)
     register_lifecycle_routes(app, db, require_admin)
     return app

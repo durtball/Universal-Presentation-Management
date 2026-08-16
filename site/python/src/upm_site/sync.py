@@ -23,6 +23,8 @@ from upm_shared.enums import (
     EventDeploymentStatus,
     MediaTransferState,
     SourceSystem,
+    StorageHealth,
+    StorageType,
 )
 from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
@@ -40,6 +42,7 @@ from upm_site.persistence.models import (
     MediaTransferSession,
     OutboxEvent,
     Site,
+    StorageTarget,
     SyncCursor,
     SyncReceipt,
     SyncSequence,
@@ -106,6 +109,29 @@ def bootstrap_identity(
         session.flush()
     elif settings.central_url and not registration.central_url:
         registration.central_url = settings.central_url
+    target = session.scalar(
+        select(StorageTarget).where(
+            StorageTarget.site_id == site.site_id,
+            StorageTarget.primary_media.is_(True),
+            StorageTarget.enabled.is_(True),
+        )
+    )
+    if target is None:
+        session.add(
+            StorageTarget(
+                site_id=site.site_id,
+                display_name="Main Media Storage",
+                storage_type=StorageType.MOUNTED_FILESYSTEM,
+                root_path=settings.media_mount_path,
+                enabled=True,
+                primary_media=True,
+                health=StorageHealth.UNKNOWN,
+                warning_free_bytes=None,
+                critical_free_bytes=None,
+                safety_reserve_bytes=1_073_741_824,
+            )
+        )
+        session.flush()
     return site, registration
 
 

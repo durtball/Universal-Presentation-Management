@@ -145,11 +145,12 @@ def register_presentation_media_routes(
                 "central_media_staging_storage_error",
                 extra={"event_id": str(event_id), "exception_type": type(error).__name__},
             )
+            reason = error.strerror or "configured path is not mounted or writable"
             raise HTTPException(
                 status.HTTP_507_INSUFFICIENT_STORAGE,
                 detail={
                     "code": "staging_storage_error",
-                    "message": "Media staging storage is unavailable.",
+                    "message": f"Staging storage is unavailable: {reason}.",
                 },
             ) from error
         except SQLAlchemyError as error:

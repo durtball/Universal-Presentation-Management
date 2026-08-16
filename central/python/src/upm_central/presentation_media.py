@@ -22,6 +22,7 @@ from upm_central.persistence.models import (
     PresentationMediaImport,
     PresentationPresenter,
     PresentationVersion,
+    StorageRoot,
     TransferJob,
 )
 from upm_central.persistence.models import Session as ProgramSession
@@ -118,6 +119,22 @@ class CentralMediaStagingService:
                     session.expunge(existing)
                     return existing
             import_id = existing.media_import_id if existing else new_uuid7()
+            storage_root = session.scalar(
+                select(StorageRoot).where(
+                    StorageRoot.role == "staging", StorageRoot.enabled.is_(True)
+                )
+            )
+            if storage_root is None:
+                storage_root = StorageRoot(
+                    role="staging",
+                    display_name="Temporary / Staging Storage",
+                    path=str(self.root),
+                    backend_type="filesystem",
+                    enabled=True,
+                )
+                session.add(storage_root)
+                session.flush()
+            self.root = Path(storage_root.path)
             if existing:
                 existing.import_state = MediaImportState.UPLOADING
                 existing.error_code = None
@@ -131,6 +148,7 @@ class CentralMediaStagingService:
                     original_filename=filename,
                     source_relative_path=relative_path,
                     staging_key=f"{import_id}.upload",
+                    staging_storage_root_id=storage_root.storage_root_id,
                     mime_type=content_type,
                     idempotency_key=idempotency_key,
                     match_state=MediaMatchState.UNMATCHED,

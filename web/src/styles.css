@@ -397,6 +397,10 @@
   .panel-grid--two {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .storage-card { display: grid; gap: 14px; }
+  .storage-card__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .storage-path { overflow-wrap: anywhere; color: var(--muted); }
+  .storage-card progress { width: 100%; height: 12px; accent-color: var(--accent); }
   .stack,
   .schedule-list {
     display: grid;

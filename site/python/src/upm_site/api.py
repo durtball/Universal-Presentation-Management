@@ -113,6 +113,8 @@ class StorageHealthResponse(BaseModel):
 
     storage_target_id: UUID
     display_name: str
+    role: Literal["staging", "media"] = "media"
+    path: str
     enabled: bool
     primary_media: bool
     observed_at: datetime
@@ -126,6 +128,9 @@ class StorageHealthResponse(BaseModel):
     warning_threshold_reached: bool
     critical_threshold_reached: bool
     detail: str | None
+    percent_used: float | None
+    upm_owned_bytes: int = 0
+    object_count: int = 0
 
 
 def _media_response(session: Session, media: MediaObject) -> MediaResponse:
@@ -162,13 +167,26 @@ def _media_response(session: Session, media: MediaObject) -> MediaResponse:
 
 
 def _health_response(
-    target: StorageTarget, observation: StorageObservation
+    target: StorageTarget,
+    observation: StorageObservation,
+    *,
+    owned_bytes: int = 0,
+    object_count: int = 0,
+    role: Literal["staging", "media"] = "media",
+    path: str | None = None,
 ) -> StorageHealthResponse:
     return StorageHealthResponse(
         display_name=target.display_name,
+        role=role,
+        path=path or target.root_path,
         enabled=target.enabled,
         primary_media=target.primary_media,
         **{field: getattr(observation, field) for field in StorageObservation.__dataclass_fields__},
+        percent_used=(observation.used_bytes * 100 / observation.total_bytes)
+        if observation.used_bytes is not None and observation.total_bytes
+        else None,
+        upm_owned_bytes=owned_bytes,
+        object_count=object_count,
     )
 
 
@@ -322,7 +340,73 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> list[StorageHealthResponse]:
         targets = session.scalars(select(StorageTarget).order_by(StorageTarget.display_name)).all()
-        return [_health_response(target, observe_storage(target)) for target in targets]
+        media_roots = [
+            _health_response(
+                target,
+                observe_storage(target),
+                owned_bytes=session.scalar(
+                    select(func.coalesce(func.sum(MediaObject.size_bytes), 0)).where(
+                        MediaObject.storage_target_id == target.storage_target_id,
+                        MediaObject.availability == MediaAvailability.AVAILABLE,
+                    )
+                )
+                or 0,
+                object_count=session.scalar(
+                    select(func.count())
+                    .select_from(MediaObject)
+                    .where(
+                        MediaObject.storage_target_id == target.storage_target_id,
+                        MediaObject.availability == MediaAvailability.AVAILABLE,
+                    )
+                )
+                or 0,
+            )
+            for target in targets
+        ]
+        staging_roots = [
+            _health_response(
+                target,
+                observe_storage(target),
+                role="media",
+                path=f"{target.root_path.rstrip('/')}/.ingestion-staging",
+                owned_bytes=session.scalar(
+                    select(func.coalesce(func.sum(MediaObject.size_bytes), 0)).where(
+                        MediaObject.storage_target_id == target.storage_target_id,
+                        MediaObject.availability.in_(
+                            [MediaAvailability.STAGING, MediaAvailability.FINALIZING]
+                        ),
+                    )
+                )
+                or 0,
+                object_count=session.scalar(
+                    select(func.count())
+                    .select_from(MediaObject)
+                    .where(
+                        MediaObject.storage_target_id == target.storage_target_id,
+                        MediaObject.availability.in_(
+                            [MediaAvailability.STAGING, MediaAvailability.FINALIZING]
+                        ),
+                    )
+                )
+                or 0,
+            ).model_copy(update={"role": "staging", "display_name": "Temporary / Staging Storage"})
+            for target in targets
+            if target.primary_media
+        ]
+        return staging_roots + media_roots
+
+    @app.post(
+        "/api/v1/storage-targets/{storage_target_id}/test",
+        response_model=StorageHealthResponse,
+        tags=["storage"],
+    )
+    def test_storage(
+        storage_target_id: UUID, session: Annotated[Session, Depends(get_session)]
+    ) -> StorageHealthResponse:
+        target = session.get(StorageTarget, storage_target_id)
+        if target is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "storage target not found")
+        return _health_response(target, observe_storage(target))
 
     @app.get("/api/v1/central-registration", tags=["synchronization"])
     def registration_status(session: Annotated[Session, Depends(transaction)]) -> dict[str, object]:

@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -925,6 +926,30 @@ class MediaObjectReplica(CentralRecordMixin, CentralBase):
     source_revision: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class StorageRoot(CentralRecordMixin, CentralBase):
+    """Deployment-local configurable filesystem backend; paths are not media identity."""
+
+    __tablename__ = "storage_roots"
+    __table_args__ = (
+        Index(
+            "uq_central_active_storage_role", "role", unique=True, postgresql_where=text("enabled")
+        ),
+        CheckConstraint("role IN ('staging', 'media')", name="storage_root_role"),
+        CheckConstraint("backend_type = 'filesystem'", name="storage_root_backend"),
+        CheckConstraint("path LIKE '/%'", name="storage_root_path_absolute"),
+    )
+
+    storage_root_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    backend_type: Mapped[str] = mapped_column(String(32), default="filesystem", nullable=False)
+    path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_successful_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class PresentationMediaImport(CentralRecordMixin, CentralBase):
     """Durable Central staging metadata; ``staging_key`` is relative to configured storage."""
 
@@ -961,6 +986,9 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     source_relative_path: Mapped[str | None] = mapped_column(String(2048))
     canonical_filename: Mapped[str | None] = mapped_column(String(1024))
     staging_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    staging_storage_root_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
+    )
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(255))
     sha256: Mapped[str | None] = mapped_column(String(64))

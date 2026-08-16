@@ -15,6 +15,7 @@ const centralNav = [
   ["/admin/media", "Presentation Media"],
   ["/admin/imports", "Imports"],
   ["/admin/room-mappings", "Room Mapping"],
+  ["/admin/storage", "Storage"],
 ];
 const siteNav = [
   ["/admin", "Overview"],

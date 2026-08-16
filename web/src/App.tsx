@@ -16,12 +16,12 @@ import { People } from "./pages/central/People";
 import { Sites } from "./pages/central/Sites";
 import { RoomMappings } from "./pages/central/RoomMappings";
 import { PresentationMedia } from "./pages/PresentationMedia";
+import { StoragePage } from "./pages/Storage";
 import {
   SiteOverview,
   SiteProgram,
   SiteRoomDetail,
   SiteRooms,
-  SiteStorage,
 } from "./pages/site/SitePages";
 
 export function App({ deployment }: { deployment: Deployment }) {
@@ -67,6 +67,7 @@ function CentralApp() {
         <Route path="/admin/media" element={<PresentationMedia mode="central" />} />
         <Route path="/admin/imports" element={<Imports />} />
         <Route path="/admin/room-mappings" element={<RoomMappings />} />
+        <Route path="/admin/storage" element={<StoragePage mode="central" />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
           </Routes>
         </Shell>
@@ -101,7 +102,7 @@ function SiteApp() {
         <Route path="/admin/program" element={<SiteProgram />} />
         <Route path="/admin/rooms" element={<SiteRooms />} />
         <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
-        <Route path="/admin/storage" element={<SiteStorage />} />
+        <Route path="/admin/storage" element={<StoragePage mode="site" />} />
         <Route path="/admin/media" element={<PresentationMedia mode="site" />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>
