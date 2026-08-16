@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import io
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -59,27 +60,92 @@ from upm_shared.enums import (
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
+
+def _header_key(value: str) -> str:
+    """Normalize source headings without losing the original heading in row evidence."""
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().casefold()).strip("_")
+
+
+# This is the single importer vocabulary.  More-specific headings intentionally have
+# their own entries; notably professional title and date-added can never fall through
+# to the broad program title/date concepts.
 COLUMN_ALIASES = {
+    "presentation_date_added": "presentation_date_added",
+    "presentation_id": "session_code",
+    "presentationid": "session_code",
+    "session_id": "session_code",
+    "sessionid": "session_code",
+    "presentation_title": "session_title",
+    "session_title": "session_title",
+    "session_name": "session_title",
+    "presenterid": "external_id",
+    "presenter_id": "external_id",
+    "speakerid": "external_id",
+    "speaker_id": "external_id",
+    "personid": "external_id",
+    "person_id": "external_id",
     "first_name": "given_name",
     "firstname": "given_name",
     "last_name": "family_name",
     "lastname": "family_name",
+    "given_name": "given_name",
+    "givenname": "given_name",
+    "family_name": "family_name",
+    "familyname": "family_name",
+    "surname": "family_name",
     "company": "organization",
+    "company_name": "organization",
+    "employer": "organization",
+    "position_title": "professional_title",
+    "position": "professional_title",
+    "job_title": "professional_title",
+    "title_position": "professional_title",
+    "presenter_role": "presenter_role",
+    "speaker_role": "presenter_role",
+    "role": "presenter_role",
+    "presenter_roster_order": "presenter_order",
+    "roster_order": "presenter_order",
+    "presenter_order": "presenter_order",
+    "speaker_order": "presenter_order",
+    "display_order": "presenter_order",
     "type": "entity_type",
     "session": "session_code",
     "presentation": "presentation_code",
     "start": "starts_at",
+    "start_time": "starts_at",
     "session_start": "starts_at",
+    "presentation_start": "starts_at",
+    "starttime": "starts_at",
     "end": "ends_at",
+    "end_time": "ends_at",
     "session_end": "ends_at",
+    "presentation_end": "ends_at",
+    "endtime": "ends_at",
+    "date": "session_date",
+    "session_date": "session_date",
+    "presentation_date": "session_date",
+    "event_date": "session_date",
     "room": "location_name",
     "room_name": "location_name",
     "location": "location_name",
+    "location_name": "location_name",
+    "venue_room": "location_name",
     "speaker": "display_name",
     "speaker_name": "display_name",
     "presenter": "display_name",
     "presenter_name": "display_name",
     "speaker_email": "presenter_email",
+    "presenter_email": "presenter_email",
+    "email_address": "email",
+    "e_mail": "email",
+    "track": "track",
+    "session_track": "track",
+    "program_track": "track",
+    "session_format": "session_format",
+    "presentation_format": "session_format",
+    "format": "session_format",
+    "session_type": "session_format",
+    "presentation_type": "session_format",
 }
 
 
@@ -112,10 +178,14 @@ def _parse_xlsx(content: bytes) -> list[dict[str, object]]:
         sheet = workbook.active
         values = sheet.iter_rows(values_only=True)
         headers = [str(value).strip() if value is not None else "" for value in next(values)]
-        rows = [
-            {header: _cell(value) for header, value in zip(headers, row, strict=False) if header}
-            for row in values
-        ]
+        rows = []
+        for row in values:
+            raw = {
+                header: _cell(value) for header, value in zip(headers, row, strict=False) if header
+            }
+            if any(value not in (None, "") for value in raw.values()):
+                raw["__worksheet"] = sheet.title
+                rows.append(raw)
         workbook.close()
         return rows
     except (
@@ -135,9 +205,11 @@ def _parse_xlsx(content: bytes) -> list[dict[str, object]]:
 def _normalized(raw: dict[str, object]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in raw.items():
-        normalized_key = COLUMN_ALIASES.get(
-            key.strip().casefold().replace(" ", "_"), key.strip().casefold().replace(" ", "_")
-        )
+        if key == "__worksheet":
+            result["_source_worksheet"] = value
+            continue
+        key_value = _header_key(key)
+        normalized_key = COLUMN_ALIASES.get(key_value, key_value)
         if isinstance(value, str):
             value = " ".join(value.strip().split())
         result[normalized_key] = value
@@ -152,6 +224,13 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
     if display:
         result["display_name"] = display
         result["normalized_name"] = normalize_text(str(display))
+    if result.get("external_id") and not result.get("external_namespace"):
+        result["external_namespace"] = "program_import_presenter"
+    date = result.get("session_date")
+    if date:
+        for source, target in (("starts_at", "starts_at"), ("ends_at", "ends_at")):
+            if result.get(source) and "T" not in str(result[source]):
+                result[target] = f"{date}T{result[source]}"
     return result
 
 
@@ -159,7 +238,9 @@ def detect_columns(headers: list[str]) -> dict[str, str]:
     """Return the importer field selected by the existing normalization rules."""
     result = {}
     for header in headers:
-        normalized = header.strip().casefold().replace(" ", "_")
+        if not header.strip() or header == "__worksheet":
+            continue
+        normalized = _header_key(header)
         result[header] = COLUMN_ALIASES.get(normalized, normalized)
     return result
 
@@ -372,9 +453,8 @@ def create_batch(
     )
     session.add(batch)
     session.flush()
-    seen_session_codes: set[str] = set()
+    grouped_sessions: dict[str, tuple[tuple[object, ...], ImportRow]] = {}
     seen_presentation_codes: set[str] = set()
-    seen_external_ids: set[tuple[str, str]] = set()
     normalized_rows = [_normalized(raw) for raw in parsed]
     imported_emails = {
         email
@@ -426,8 +506,8 @@ def create_batch(
                 )
             )
         code_sets = []
-        if row.entity_type == ImportEntityType.SESSION:
-            code_sets.append(("session_code", seen_session_codes, "duplicate_session_code"))
+        # Repeated session codes are roster evidence, not duplicate entities.  Only
+        # disagreements in authoritative program fields are blocking conflicts.
         if row.entity_type == ImportEntityType.PRESENTATION:
             code_sets.append(
                 ("presentation_code", seen_presentation_codes, "duplicate_presentation_code")
@@ -440,21 +520,8 @@ def create_batch(
                 )
             elif value:
                 seen.add(value)
-        if values.get("external_namespace") and values.get("external_id"):
-            key = (
-                normalize_text(str(values["external_namespace"])) or "",
-                normalize_text(str(values["external_id"])) or "",
-            )
-            if key in seen_external_ids:
-                row.issues.append(
-                    _issue(
-                        row,
-                        ValidationSeverity.ERROR,
-                        "duplicate_external_id",
-                        "Duplicate external identifier in import",
-                    )
-                )
-            seen_external_ids.add(key)
+        # Repeated person identifiers are expected roster evidence.  The identity
+        # resolver reuses their permanent Person rather than rejecting later rows.
         if row.entity_type in {ImportEntityType.PERSON, ImportEntityType.PARTICIPANT}:
             if not values.get("display_name"):
                 row.issues.append(
@@ -503,7 +570,11 @@ def create_batch(
                 )
             row.proposed_action = ImportProposedAction.CREATE_OR_UPDATE
         elif row.entity_type == ImportEntityType.PRESENTATION:
-            if not (values.get("title") or values.get("presentation_title")):
+            if not (
+                values.get("title")
+                or values.get("presentation_title")
+                or values.get("session_title")
+            ):
                 row.issues.append(
                     _issue(
                         row,
@@ -539,6 +610,44 @@ def create_batch(
                             row.match_reason or "Presenter identity requires review",
                         )
                     )
+        if row.entity_type == ImportEntityType.SESSION and values.get("session_code"):
+            group_key = normalize_text(str(values["session_code"])) or ""
+            signature = tuple(
+                values.get(field)
+                for field in (
+                    "session_title",
+                    "session_date",
+                    "starts_at",
+                    "ends_at",
+                    "location_name",
+                    "track",
+                    "session_format",
+                )
+            )
+            previous = grouped_sessions.get(group_key)
+            if previous and previous[0] != signature:
+                message = "Rows with this program identifier disagree on authoritative session data"
+                row.issues.append(
+                    _issue(
+                        row,
+                        ValidationSeverity.ERROR,
+                        "grouped_session_conflict",
+                        message,
+                        "session_code",
+                    )
+                )
+                previous[1].issues.append(
+                    _issue(
+                        previous[1],
+                        ValidationSeverity.ERROR,
+                        "grouped_session_conflict",
+                        message,
+                        "session_code",
+                    )
+                )
+                row.conflict_state = previous[1].conflict_state = "operator_review_required"
+            elif previous is None:
+                grouped_sessions[group_key] = (signature, row)
             for email in _presenter_emails(values):
                 if email not in imported_emails and email not in known_event_emails:
                     row.issues.append(
@@ -577,6 +686,14 @@ def create_batch(
     rows = session.scalars(
         select(ImportRow).where(ImportRow.import_batch_id == batch.import_batch_id)
     ).all()
+    for row in rows:
+        row.validation_state = (
+            ImportValidationState.ERROR
+            if any(issue.severity == ValidationSeverity.ERROR for issue in row.issues)
+            else ImportValidationState.WARNING
+            if row.issues
+            else ImportValidationState.VALID
+        )
     batch.row_count = len(rows)
     batch.valid_count = sum(row.validation_state == ImportValidationState.VALID for row in rows)
     batch.warning_count = sum(row.validation_state == ImportValidationState.WARNING for row in rows)
@@ -771,6 +888,16 @@ def _ensure_wide_row_participant(
             after={"display_name": display_name},
             actor=actor,
         )
+    if values.get("external_id"):
+        external_identifier(
+            session,
+            entity_type=ExternalEntityType.PERSON,
+            entity_id=person.person_id,
+            namespace=str(values.get("external_namespace") or "program_import_presenter"),
+            value=str(values["external_id"]),
+            event_id=None,
+            source="import",
+        )
     participant = EventParticipation(
         event_id=event.event_id,
         person_id=person.person_id,
@@ -945,11 +1072,30 @@ def commit_batch(
                     "normalized_imported_label": normalize_text(imported_room),
                     "mapping_state": "unmapped" if imported_room else "unassigned",
                     "import_batch_id": str(batch.import_batch_id),
+                    "source_row_numbers": sorted(
+                        set((item.location_metadata or {}).get("source_row_numbers", []))
+                        | {row.source_row_number}
+                    ),
+                }
+                item.session_type = str(values.get("session_format") or "").strip() or None
+                item.source_metadata = {
+                    **(item.source_metadata or {}),
+                    "import_batch_id": str(batch.import_batch_id),
+                    "program_external_id": code,
+                    "track": values.get("track") or None,
+                    "presentation_date_added": values.get("presentation_date_added") or None,
+                    "source_row_ids": sorted(
+                        set((item.source_metadata or {}).get("source_row_ids", []))
+                        | {str(row.import_row_id)}
+                    ),
                 }
                 session.flush()
                 participant_ids: list[str] = []
                 person_ids: list[str] = []
-                for order, email in enumerate(_presenter_emails(values)):
+                relationship_ids: list[str] = []
+                supplied_order = int(float(values.get("presenter_order") or 0))
+                supplied_role = str(values.get("presenter_role") or "presenter").strip()
+                for offset, email in enumerate(_presenter_emails(values)):
                     participant = _ensure_wide_row_participant(
                         session, event, row, values, email, actor
                     )
@@ -961,25 +1107,37 @@ def commit_batch(
                                 SessionParticipant.session_id == item.session_id,
                                 SessionParticipant.event_participation_id
                                 == participant.event_participation_id,
-                                SessionParticipant.role == "presenter",
+                                SessionParticipant.role == supplied_role,
                             )
                         )
                         is None
                     ):
-                        session.add(
-                            SessionParticipant(
-                                session_id=item.session_id,
-                                event_participation_id=participant.event_participation_id,
-                                role="presenter",
-                                presenter_order=order,
-                                primary_presenter=order == 0,
-                                source="import",
+                        relationship = SessionParticipant(
+                            session_id=item.session_id,
+                            event_participation_id=participant.event_participation_id,
+                            role=supplied_role,
+                            presenter_order=supplied_order + offset,
+                            primary_presenter=(supplied_order + offset) == 0,
+                            external_relationship_id=str(row.import_row_id),
+                            source="import",
+                        )
+                        session.add(relationship)
+                        session.flush()
+                    else:
+                        relationship = session.scalar(
+                            select(SessionParticipant).where(
+                                SessionParticipant.session_id == item.session_id,
+                                SessionParticipant.event_participation_id
+                                == participant.event_participation_id,
+                                SessionParticipant.role == supplied_role,
                             )
                         )
+                    relationship_ids.append(str(relationship.session_participant_id))
                 row.committed_entity_ids = {
                     "session_id": str(item.session_id),
                     "person_ids": person_ids,
                     "event_participation_ids": participant_ids,
+                    "session_participant_ids": relationship_ids,
                 }
                 audit(
                     session,
@@ -992,7 +1150,11 @@ def commit_batch(
                 )
                 changed = True
             elif row.entity_type == ImportEntityType.PRESENTATION:
-                title = str(values.get("title") or values.get("presentation_title"))
+                title = str(
+                    values.get("title")
+                    or values.get("presentation_title")
+                    or values.get("session_title")
+                )
                 code = values.get("presentation_code") or None
                 item = (
                     session.scalar(

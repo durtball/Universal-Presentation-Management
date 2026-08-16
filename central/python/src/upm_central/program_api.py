@@ -41,6 +41,7 @@ from upm_central.program import (
 from upm_shared.enums import (
     ExternalEntityType,
     ImportEntityType,
+    ImportValidationState,
     ParticipantStatus,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
@@ -1030,6 +1031,7 @@ def register_program_routes(
             {
                 "import_row_id": row.import_row_id,
                 "source_row_number": row.source_row_number,
+                "worksheet": row.normalized_values.get("_source_worksheet"),
                 "raw_values": row.raw_values,
                 "normalized_values": row.normalized_values,
                 "corrected_values": row.corrected_values,
@@ -1056,23 +1058,46 @@ def register_program_routes(
             }
             for row in rows
         ]
-        headers = list(dict.fromkeys(key for row in rows for key in row.raw_values))
+        headers = list(
+            dict.fromkeys(key for row in rows for key in row.raw_values if not key.startswith("__"))
+        )
         result["source_headers"] = headers
         result["detected_mapping"] = detect_columns(headers)
         result["sample_rows"] = [row.raw_values for row in rows[:5]]
         result["preview_counts"] = {
             "source_rows": len(rows),
-            "people_or_presenters": sum(
-                row.entity_type in {ImportEntityType.PERSON, ImportEntityType.PARTICIPANT}
-                or bool(row.normalized_values.get("presenter_email"))
-                or bool(row.normalized_values.get("presenter_emails"))
-                or bool(row.normalized_values.get("email"))
-                for row in rows
+            "total_populated_source_rows": len(rows),
+            "accepted_rows": sum(
+                row.validation_state != ImportValidationState.ERROR for row in rows
             ),
-            "sessions": sum(
-                row.entity_type == ImportEntityType.SESSION
-                or bool(row.normalized_values.get("session_title"))
-                for row in rows
+            "rows_with_warnings": sum(
+                row.validation_state == ImportValidationState.WARNING for row in rows
+            ),
+            "rows_with_blocking_errors": sum(
+                row.validation_state == ImportValidationState.ERROR for row in rows
+            ),
+            "unique_presenters": len(
+                {
+                    str(
+                        row.normalized_values.get("external_id")
+                        or row.normalized_values.get("normalized_email")
+                    )
+                    for row in rows
+                    if row.normalized_values.get("external_id")
+                    or row.normalized_values.get("normalized_email")
+                }
+            ),
+            "existing_identity_matches": sum(
+                str(row.match_outcome or "") == "exact" for row in rows
+            ),
+            "new_people": sum(str(row.match_outcome or "") == "no_match" for row in rows),
+            "ambiguous_identities": sum(bool(row.conflict_state) for row in rows),
+            "sessions_or_program_items": len(
+                {
+                    str(row.normalized_values.get("session_code"))
+                    for row in rows
+                    if row.normalized_values.get("session_code")
+                }
             ),
             "presentations": sum(row.entity_type == ImportEntityType.PRESENTATION for row in rows),
             "warnings": sum(
@@ -1082,15 +1107,24 @@ def register_program_routes(
                 issue.severity == ValidationSeverity.ERROR for row in rows for issue in row.issues
             ),
             "identity_conflicts": sum(bool(row.conflict_state) for row in rows),
-            "unresolved_room_mappings": sum(
-                bool(
-                    row.normalized_values.get("location_name") or row.normalized_values.get("room")
-                )
-                and (
-                    row.entity_type == ImportEntityType.SESSION
-                    or bool(row.normalized_values.get("session_title"))
-                )
+            "unique_room_labels": len(
+                {
+                    normalize_text(str(row.normalized_values.get("location_name")))
+                    for row in rows
+                    if row.normalized_values.get("location_name")
+                }
+            ),
+            "presenter_relationships": sum(
+                bool(row.normalized_values.get("email"))
                 for row in rows
+                if row.normalized_values.get("session_code")
+            ),
+            "unresolved_room_mappings": len(
+                {
+                    normalize_text(str(row.normalized_values.get("location_name")))
+                    for row in rows
+                    if row.normalized_values.get("location_name")
+                }
             ),
         }
         return result

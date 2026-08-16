@@ -65,6 +65,16 @@ The importer recognizes common aliases such as `first_name`, `last_name`, `compa
 schedules, missing required fields, unresolved references and duplicate identifiers produce
 operator-visible errors. Files over 25 MiB receive HTTP 413; they are not silently truncated.
 
+Production roster-shaped workbooks also recognize Presentation/Session IDs, Presenter/Speaker/Person
+IDs, split names, professional title, role and roster order, event-local date/start/end, track,
+format, and room aliases through the same centralized vocabulary. A Presentation ID in this schema
+groups roster rows into one Session; it does not manufacture a logical Presentation or discard the
+contributing rows. Every populated worksheet row remains an `ImportRow`, including its original
+headers/values, worksheet, row number, canonical values, reconciliation state, issues, and committed
+Person/Session/relationship lineage. Repeated presenter identifiers are valid identity evidence;
+conflicting authoritative values on a repeated program identifier block commit without deleting
+either row. Blank trailing XLSX columns and completely blank rows do not participate in review.
+
 ## Room reconciliation
 
 Imported `room`, `room_name` or `location` values remain logical labels on Central sessions. Central

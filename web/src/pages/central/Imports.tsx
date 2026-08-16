@@ -273,10 +273,14 @@ function ImportReview({
         rows={batch.rows ?? []}
         columns={[
           { key: "row", label: "Source row", value: (row) => row.source_row_number, numeric: true },
-          { key: "entity", label: "Entity", value: (row) => row.entity_type },
+          { key: "program", label: "Program ID", value: (row) => String(row.normalized_values.session_code ?? "—") },
+          { key: "presenter", label: "Presenter", value: (row) => String(row.normalized_values.display_name ?? "—") },
+          { key: "presenterId", label: "Presenter ID", value: (row) => String(row.normalized_values.external_id ?? "—") },
+          { key: "role", label: "Role / order", value: (row) => `${String(row.normalized_values.presenter_role ?? "—")} / ${String(row.normalized_values.presenter_order ?? "—")}` },
+          { key: "room", label: "Room", value: (row) => String(row.normalized_values.location_name ?? "—") },
           { key: "state", label: "Validation", value: (row) => row.validation_state,
             render: (row) => <StatusBadge value={row.validation_state} /> },
-          { key: "match", label: "Identity", value: (row) => row.match_outcome || "—" },
+          { key: "match", label: "Identity", value: (row) => ({ exact: "Existing person", no_match: "New person", ambiguous: "Ambiguous", conflict: "Conflict", strong_candidate: "Review candidate" }[row.match_outcome ?? ""] ?? row.match_outcome ?? "—") },
           { key: "issues", label: "Warnings / errors", value: (row) => row.issues.map((issue) => issue.message).join("; ") || "—" },
         ]}
         rowKey={(row) => row.import_row_id}
