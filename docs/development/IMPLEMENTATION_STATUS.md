@@ -103,15 +103,23 @@
 
 - **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
-- **Transfer execution:** TransferJob persistence exists, but no resumable/chunked protocol, bandwidth controller, sender/receiver handler, or progress UI exists.
+- **Transfer execution:** Central-to-Site Site-pull has a resumable offset reader and Site worker;
+  reverse replication, progress projection, cleanup execution, bandwidth control, and progress UI
+  remain absent.
 - **Transfer architecture:** ADR-0011 now fixes Site-initiated Central pull, Site-initiated reverse
   push, durable byte-offset resume, Site-scoped authorization, SHA-256 finalization, partial
-  ownership, retry/replay, and separate replication/readiness semantics. Network handlers and
-  workers remain unimplemented.
+  ownership, retry/replay, and separate replication/readiness semantics. Runtime coverage remains
+  partial as described below.
+- **Central-to-Site media pull:** Central now publishes authenticated Site-scoped manifests through
+  the existing outbox, exposes bounded offset reads, and Site persists sessions and pulls real
+  blocks into private partial storage. Each block is fsynced before its offset transaction commits;
+  restart truncates unacknowledged tail bytes, full SHA-256 gates idempotent existing Site ingestion,
+  and the default block is configurable at 4 MiB. Site progress events, Central progress projection,
+  reverse Site-to-Central replication, and partial-expiry execution remain incomplete.
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
   ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
-  durable staging/match/version/transfer-queue APIs are implemented foundations. Bidirectional
-  binary transfer, resumable receiver execution, concurrent revision reconciliation, complete
+  durable staging/match/version/transfer-queue APIs are implemented foundations. Reverse binary
+  replication, concurrent revision reconciliation, complete
   Site audit/outbox handlers, Site RBAC, and equivalent Central/Site Event Media workspaces remain
   incomplete. This milestone must not be represented as production-complete until those paths and
   running-stack end-to-end verification exist.

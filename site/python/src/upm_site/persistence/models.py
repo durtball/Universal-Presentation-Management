@@ -35,6 +35,7 @@ from upm_shared.enums import (
     JobStatus,
     MediaAvailability,
     MediaCategory,
+    MediaTransferState,
     ParticipantStatus,
     PresentationIdentifierSource,
     PresentationProcessingStatus,
@@ -831,6 +832,52 @@ class TransferJob(SiteRecordMixin, SiteBase):
     error_metadata: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MediaTransferSession(SiteRecordMixin, SiteBase):
+    __tablename__ = "media_transfer_sessions"
+    __table_args__ = (
+        CheckConstraint("expected_size >= 0", name="expected_size_nonnegative"),
+        CheckConstraint(
+            "confirmed_offset >= 0 AND confirmed_offset <= expected_size",
+            name="confirmed_offset_range",
+        ),
+        Index("ix_site_media_transfer_state_progress", "state", "last_progress_at"),
+        Index("ix_site_media_transfer_presentation_version", "presentation_version_id"),
+    )
+
+    transfer_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), nullable=False
+    )
+    presentation_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    canonical_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    expected_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_type: Mapped[str | None] = mapped_column(String(255))
+    partial_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    confirmed_offset: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    state: Mapped[MediaTransferState] = mapped_column(
+        upm_enum(MediaTransferState, length=16),
+        default=MediaTransferState.QUEUED,
+        nullable=False,
+    )
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_detail: Mapped[str | None] = mapped_column(String(2048))
+    media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
+    )
 
 
 class ProcessingJob(SiteRecordMixin, SiteBase):

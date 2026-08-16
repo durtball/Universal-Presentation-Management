@@ -25,6 +25,10 @@ class SiteSettings(BaseSettings):
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
     heartbeat_interval_seconds: Annotated[float, Field(gt=0)] = 30.0
+    transfer_block_bytes: Annotated[int, Field(ge=65_536, le=67_108_864)] = 4_194_304
+    transfer_pull_concurrency: Annotated[int, Field(ge=1, le=16)] = 1
+    transfer_push_concurrency: Annotated[int, Field(ge=1, le=16)] = 1
+    transfer_partial_retention_seconds: Annotated[int, Field(ge=3600)] = 604_800
 
     @field_validator("database_url")
     @classmethod

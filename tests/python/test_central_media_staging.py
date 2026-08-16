@@ -34,3 +34,5 @@ def test_central_media_routes_are_authenticated_and_versioned() -> None:
     assert expected <= routes.keys()
     for key in expected:
         assert routes[key].dependencies, f"{key} must require Central administrator authorization"
+    assert ("GET", "/api/v1/media-transfers/{transfer_session_id}") in routes
+    assert ("GET", "/api/v1/media-transfers/{transfer_session_id}/content") in routes

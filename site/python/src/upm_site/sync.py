@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import EVENT_DEPLOYMENT_SCHEMA_VERSION, SiteDeploymentStatus
+from upm_shared.contracts.media_transfer import MediaTransferManifest
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
     EventAcknowledgement,
@@ -20,6 +21,7 @@ from upm_shared.enums import (
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
+    MediaTransferState,
     SourceSystem,
 )
 from upm_shared.jobs import OutboxPayload
@@ -35,11 +37,13 @@ from upm_site.persistence.models import (
     Event,
     LocalSiteIdentity,
     ManagedSetting,
+    MediaTransferSession,
     OutboxEvent,
     Site,
     SyncCursor,
     SyncReceipt,
     SyncSequence,
+    TransferJob,
 )
 from upm_site.persistence.queue import SiteQueue
 
@@ -222,6 +226,63 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         try:
             apply_people_deletion(session, event)
         except (KeyError, TypeError, ValueError) as exc:
+            application_error = str(exc)[:2048]
+    elif event.event_type == "central.media_transfer.available":
+        try:
+            manifest = MediaTransferManifest.model_validate(event.payload)
+            site_id = _local_site_id(session)
+            if manifest.destination_site_id != site_id:
+                return EventAcknowledgement(
+                    event_id=event.event_id,
+                    accepted=False,
+                    error_code="invalid_transfer_destination",
+                )
+            transfer = session.get(TransferJob, manifest.transfer_session_id)
+            if transfer is None:
+                transfer = TransferJob(
+                    transfer_job_id=manifest.transfer_session_id,
+                    site_id=site_id,
+                    transfer_type="presentation_media.central_pull",
+                    payload=manifest.model_dump(mode="json"),
+                    required_capabilities=["transfer"],
+                    idempotency_key=f"central-pull:{manifest.transfer_session_id}",
+                )
+                session.add(transfer)
+            elif transfer.payload != manifest.model_dump(mode="json"):
+                return EventAcknowledgement(
+                    event_id=event.event_id,
+                    accepted=False,
+                    error_code="transfer_manifest_conflict",
+                )
+            local_session = session.get(MediaTransferSession, manifest.transfer_session_id)
+            if local_session is None:
+                session.add(
+                    MediaTransferSession(
+                        transfer_session_id=manifest.transfer_session_id,
+                        site_id=site_id,
+                        event_id=manifest.event_id,
+                        presentation_id=manifest.presentation_id,
+                        presentation_version_id=manifest.presentation_version_id,
+                        original_filename=manifest.original_filename,
+                        canonical_filename=manifest.canonical_filename,
+                        expected_size=manifest.expected_size,
+                        sha256=manifest.sha256,
+                        media_type=manifest.media_type,
+                        partial_key=f"transfers/{manifest.transfer_session_id}.partial",
+                        state=MediaTransferState.AVAILABLE,
+                    )
+                )
+            elif (
+                local_session.expected_size != manifest.expected_size
+                or local_session.sha256 != manifest.sha256
+                or local_session.presentation_version_id != manifest.presentation_version_id
+            ):
+                return EventAcknowledgement(
+                    event_id=event.event_id,
+                    accepted=False,
+                    error_code="transfer_manifest_conflict",
+                )
+        except (TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:
         return EventAcknowledgement(

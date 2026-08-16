@@ -5,18 +5,25 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.config import CentralDatabaseSettings
 from upm_central.persistence.models import (
     AuditRecord,
+    EventDeployment,
     Presentation,
     PresentationMediaImport,
     PresentationVersion,
     TransferJob,
 )
-from upm_central.presentation_media import CentralMediaStagingService, MediaStagingError
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    MediaStagingError,
+    _safe_staging_path,
+)
+from upm_central.sync import authenticate_site
 from upm_shared.enums import JobStatus, MediaImportState
 
 
@@ -243,3 +250,97 @@ def register_presentation_media_routes(
             raise HTTPException(409, "assigned or delivered media cannot be cancelled")
         item.import_state = MediaImportState.CANCELLED
         return _view(item)
+
+    def machine_transfer(
+        transfer_session_id: UUID,
+        session: Session,
+        authorization: str | None,
+        site_id: UUID | None,
+    ) -> tuple[TransferJob, PresentationMediaImport]:
+        token = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+        if site_id is None:
+            raise HTTPException(401, "missing site identity")
+        authenticate_site(session, site_id, token)
+        transfer = session.get(TransferJob, transfer_session_id)
+        item = session.scalar(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.transfer_job_id == transfer_session_id
+            )
+        )
+        if transfer is None or item is None or transfer.owning_site_id != site_id:
+            raise HTTPException(404, "transfer not found")
+        deployment = session.scalar(
+            select(EventDeployment).where(
+                EventDeployment.site_id == site_id,
+                EventDeployment.event_id == item.event_id,
+                EventDeployment.status != "revoked",
+            )
+        )
+        if deployment is None:
+            raise HTTPException(404, "transfer not found")
+        return transfer, item
+
+    @app.get("/api/v1/media-transfers/{transfer_session_id}", tags=["media-transfer"])
+    def transfer_status(
+        transfer_session_id: UUID,
+        session: DbSession,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, object]:
+        transfer, item = machine_transfer(
+            transfer_session_id, session, authorization, x_upm_site_id
+        )
+        return {
+            "transfer_session_id": transfer.transfer_job_id,
+            "event_id": item.event_id,
+            "presentation_id": item.presentation_id,
+            "presentation_version_id": item.presentation_version_id,
+            "presentation_identifier": item.presentation_identifier,
+            "original_filename": item.original_filename,
+            "canonical_filename": item.canonical_filename,
+            "expected_size": item.size_bytes,
+            "sha256": item.sha256,
+            "media_type": item.mime_type,
+            "state": item.import_state,
+        }
+
+    @app.get("/api/v1/media-transfers/{transfer_session_id}/content", tags=["media-transfer"])
+    def transfer_content(
+        transfer_session_id: UUID,
+        session: DbSession,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> StreamingResponse:
+        _, item = machine_transfer(transfer_session_id, session, authorization, x_upm_site_id)
+        expected_size = item.size_bytes or 0
+        if offset > expected_size:
+            raise HTTPException(416, "offset exceeds expected size")
+        path = _safe_staging_path(
+            CentralMediaStagingService(
+                factory(), settings().media_staging_path, settings().max_upload_bytes
+            ).root,
+            item.staging_key,
+        )
+        if not path.is_file() or path.stat().st_size != expected_size:
+            raise HTTPException(409, "staged transfer source is unavailable")
+        count = min(settings().transfer_block_bytes, expected_size - offset)
+
+        def content():
+            with path.open("rb") as source:
+                source.seek(offset)
+                remaining = count
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        headers = {
+            "X-UPM-Transfer-Offset": str(offset),
+            "X-UPM-Transfer-Next-Offset": str(offset + count),
+            "X-UPM-Transfer-Size": str(expected_size),
+            "X-UPM-Transfer-SHA256": item.sha256 or "",
+        }
+        return StreamingResponse(content(), media_type="application/octet-stream", headers=headers)

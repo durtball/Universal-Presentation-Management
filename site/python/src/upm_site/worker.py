@@ -10,10 +10,13 @@ from datetime import timedelta
 from pathlib import Path
 from threading import Event
 
+import httpx
 from sqlalchemy import text
 
+from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
+from upm_site.media.transfer import execute_central_pull
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import bootstrap_identity
@@ -81,6 +84,32 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
+                    completed = True
+                    if (
+                        kind == "transfer"
+                        and work.transfer_type == "presentation_media.central_pull"
+                    ):
+                        try:
+                            with httpx.Client(timeout=30.0) as client:
+                                completed = execute_central_pull(
+                                    session, factory, settings, work, client
+                                )
+                        except Exception as error:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="media_pull_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            log("media_pull_failed", work_id=work_id, detail=str(error)[:2048])
+                            continue
+                    if not completed:
+                        work.status = JobStatus.PENDING
+                        work.claimed_by_worker_id = None
+                        work.lease_expires_at = None
+                        continue
                     queue.complete(work, worker_id)
                     log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if sync:
