@@ -40,8 +40,8 @@ def _origin_component(origin_code: str) -> str:
 def generate_presentation_identifier(origin_code: str, identity: UUID | None = None) -> str:
     """Create an offline-safe identifier from origin identity and UUID-derived entropy."""
     identity = identity or new_uuid7()
-    # 60 UUID bits yields 12 stable hexadecimal characters without timestamp-only allocation.
-    return f"UPM-{_origin_component(origin_code)}-{identity.hex[-12:].upper()}"
+    # 64 UUID-derived bits provide compact, collision-resistant disconnected allocation.
+    return f"UPM-{_origin_component(origin_code)}-{identity.hex[-16:].upper()}"
 
 
 def allocate_presentation_identifier(

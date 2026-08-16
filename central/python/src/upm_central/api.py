@@ -52,6 +52,7 @@ from upm_central.persistence.models import (
     utc_now,
 )
 from upm_central.persistence.models import Session as ProgramSession
+from upm_central.presentation_media_api import register_presentation_media_routes
 from upm_central.program import (
     normalize_text,
     require_aware,
@@ -1057,5 +1058,6 @@ body:JSON.stringify({name:document.querySelector('#event-name').value})});load()
 </script></body></html>"""
 
     register_program_routes(app, db, require_admin)
+    register_presentation_media_routes(app, db, require_admin, get_factory, get_settings)
     register_lifecycle_routes(app, db, require_admin)
     return app

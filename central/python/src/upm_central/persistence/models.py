@@ -41,6 +41,8 @@ from upm_shared.enums import (
     JobPriority,
     JobStatus,
     MediaCategory,
+    MediaImportState,
+    MediaMatchState,
     ParticipantStatus,
     PresentationIdentifierSource,
     PresentationProcessingStatus,
@@ -919,6 +921,68 @@ class MediaObjectReplica(CentralRecordMixin, CentralBase):
     content_hash: Mapped[str | None] = mapped_column(String(255))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     source_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PresentationMediaImport(CentralRecordMixin, CentralBase):
+    """Durable Central staging metadata; ``staging_key`` is relative to configured storage."""
+
+    __tablename__ = "presentation_media_imports"
+    __table_args__ = (
+        enum_check("match_state", MediaMatchState),
+        enum_check("import_state", MediaImportState),
+        enum_check("sync_state", SyncState),
+        CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="size_nonnegative"),
+        CheckConstraint("retry_count >= 0", name="retry_count_nonnegative"),
+        UniqueConstraint("idempotency_key"),
+        Index("ix_central_media_import_event_state", "event_id", "import_state"),
+        Index("ix_central_media_import_presentation", "presentation_id"),
+    )
+
+    media_import_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    destination_site_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT")
+    )
+    presentation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT")
+    )
+    presentation_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT")
+    )
+    presentation_identifier: Mapped[str | None] = mapped_column(String(128))
+    external_presentation_id: Mapped[str | None] = mapped_column(String(512))
+    original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    canonical_filename: Mapped[str | None] = mapped_column(String(1024))
+    staging_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    mime_type: Mapped[str | None] = mapped_column(String(255))
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    match_state: Mapped[MediaMatchState] = mapped_column(
+        domain_enum(MediaMatchState, length=24), default=MediaMatchState.UNMATCHED, nullable=False
+    )
+    match_reason: Mapped[str | None] = mapped_column(String(1024))
+    match_candidates: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    import_state: Mapped[MediaImportState] = mapped_column(
+        domain_enum(MediaImportState, length=24),
+        default=MediaImportState.UPLOADING,
+        nullable=False,
+    )
+    sync_state: Mapped[SyncState] = mapped_column(
+        domain_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
+    transfer_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("transfer_jobs.transfer_job_id", ondelete="RESTRICT")
+    )
+    site_media_object_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    origin: Mapped[str] = mapped_column(String(32), default="central", nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_detail: Mapped[str | None] = mapped_column(String(2048))
 
 
 class PresentationAsset(CentralRecordMixin, CentralBase):

@@ -20,7 +20,7 @@ def test_imported_and_offline_generated_identifiers_are_stable_and_distinct() ->
     identity = UUID("018f0000-0000-7000-8000-000000abcdef")
     imported = allocate_presentation_identifier("A4-827", "STL01", identity)
     assert imported == ("A4-827", PresentationIdentifierSource.IMPORTED)
-    assert generate_presentation_identifier("STL 01", identity) == "UPM-STL01-000000ABCDEF"
+    assert generate_presentation_identifier("STL 01", identity) == "UPM-STL01-8000000000ABCDEF"
     assert generate_presentation_identifier("NYC01", identity) != generate_presentation_identifier(
         "STL01", identity
     )

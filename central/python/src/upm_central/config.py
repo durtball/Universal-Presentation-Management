@@ -24,6 +24,8 @@ class CentralDatabaseSettings(BaseSettings):
     public_url: str = "http://upm-central:8080"
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
+    media_staging_path: str = "/var/lib/upm/central-media"
+    max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888
 
     @field_validator("database_url")
     @classmethod

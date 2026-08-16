@@ -32,6 +32,19 @@ class MediaMatchState(StrEnum):
     MANUAL = "manual"
 
 
+class MediaImportState(StrEnum):
+    UPLOADING = "uploading"
+    STAGED = "staged"
+    NEEDS_REVIEW = "needs_review"
+    ASSIGNED = "assigned"
+    TRANSFER_QUEUED = "transfer_queued"
+    TRANSFERRING = "transferring"
+    SITE_READY = "site_ready"
+    RETRY_WAIT = "retry_wait"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class EnrollmentState(StrEnum):
     UNREGISTERED = "unregistered"
     PENDING = "pending"

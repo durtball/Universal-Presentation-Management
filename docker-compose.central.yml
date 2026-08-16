@@ -37,6 +37,8 @@ services:
       UPM_CENTRAL_ADMIN_COOKIE_SECURE: ${UPM_CENTRAL_ADMIN_COOKIE_SECURE:-false}
       UPM_CENTRAL_CREDENTIAL_ISSUER_KEY: ${UPM_CENTRAL_CREDENTIAL_ISSUER_KEY:?Set UPM_CENTRAL_CREDENTIAL_ISSUER_KEY}
       UPM_CENTRAL_PUBLIC_URL: ${UPM_CENTRAL_PUBLIC_URL:-http://upm-central}
+      UPM_CENTRAL_MEDIA_STAGING_PATH: ${UPM_CENTRAL_MEDIA_STAGING_PATH:-/var/lib/upm/central-media}
+      UPM_CENTRAL_MAX_UPLOAD_BYTES: ${UPM_CENTRAL_MAX_UPLOAD_BYTES:-549755813888}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -51,6 +53,8 @@ services:
     networks:
       - central-edge
       - central-internal
+    volumes:
+      - central-media-data:/var/lib/upm/central-media
 
   central-web:
     build:
@@ -96,6 +100,7 @@ services:
       UPM_CENTRAL_WORKER_CAPABILITIES: ${UPM_CENTRAL_WORKER_CAPABILITIES:-cpu,pdf-conversion,transfer}
       UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS: ${UPM_CENTRAL_WORKER_POLL_INTERVAL_SECONDS:-1}
       UPM_CENTRAL_WORKER_LEASE_SECONDS: ${UPM_CENTRAL_WORKER_LEASE_SECONDS:-60}
+      UPM_CENTRAL_MEDIA_STAGING_PATH: ${UPM_CENTRAL_MEDIA_STAGING_PATH:-/var/lib/upm/central-media}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -103,6 +108,8 @@ services:
         condition: service_completed_successfully
     networks:
       - central-internal
+    volumes:
+      - central-media-data:/var/lib/upm/central-media
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/upm-central-worker-ready"]
       interval: 10s
@@ -164,3 +171,4 @@ volumes:
   central-caddy-data:
   central-caddy-config:
   central-postgres-data:
+  central-media-data:

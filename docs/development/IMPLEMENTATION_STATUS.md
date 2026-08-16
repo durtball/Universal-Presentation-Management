@@ -40,6 +40,11 @@
   operational-sort primitives. Site-linked ingestion persists both original and canonical names;
   Site APIs expose expected/missing media, search, deterministic match preview, local presentation
   creation, and serialized local version allocation.
+- Central now has an authenticated streaming upload API backed by a persistent media-import row and
+  an explicitly mounted staging volume. It hashes while streaming, persists exact/ambiguous/
+  unmatched evidence, supports audited manual reassignment, allocates versions transactionally,
+  and queues the existing durable TransferJob with an idempotency key. Transfer execution and
+  reverse replication are not yet implemented, so queued media does not yet reach a Site.
 
 ### Central/Site registration and synchronization
 
@@ -100,10 +105,10 @@
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
 - **Transfer execution:** TransferJob persistence exists, but no resumable/chunked protocol, bandwidth controller, sender/receiver handler, or progress UI exists.
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
-  ID matching, Site-local creation/version APIs, and canonical metadata at Site ingestion are
-  implemented foundations. Central durable binary staging/upload, automatic/manual match records,
-  bidirectional binary replication, concurrent revision reconciliation, complete audit/outbox
-  handlers, retry/resume execution, and equivalent Central/Site Event Media workspaces remain
+  ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
+  durable staging/match/version/transfer-queue APIs are implemented foundations. Bidirectional
+  binary transfer, resumable receiver execution, concurrent revision reconciliation, complete
+  Site audit/outbox handlers, Site RBAC, and equivalent Central/Site Event Media workspaces remain
   incomplete. This milestone must not be represented as production-complete until those paths and
   running-stack end-to-end verification exist.
 - **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
