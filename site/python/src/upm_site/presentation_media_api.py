@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
 from upm_shared.enums import (
+    JobStatus,
+    MediaReplicationState,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     SourceSystem,
@@ -27,9 +29,11 @@ from upm_site.persistence.models import (
     Event,
     LocalSiteIdentity,
     MediaObject,
+    MediaReplicationSession,
     Presentation,
     PresentationAsset,
     PresentationVersion,
+    TransferJob,
 )
 from upm_site.persistence.models import Session as ProgramSession
 from upm_site.persistence.queue import SiteQueue
@@ -229,8 +233,29 @@ def register_presentation_media_routes(
                             "availability": media.availability,
                             "failure_reason": media.failure_reason,
                         },
+                        "replication": None,
                     }
                 )
+                if media is not None:
+                    replication = session.scalar(
+                        select(MediaReplicationSession).where(
+                            MediaReplicationSession.media_object_id == media.media_object_id,
+                            MediaReplicationSession.presentation_version_id
+                            == version.presentation_version_id,
+                        )
+                    )
+                    if replication is not None:
+                        transfer = session.get(TransferJob, replication.replication_session_id)
+                        history[-1]["replication"] = {
+                            "replication_session_id": replication.replication_session_id,
+                            "state": replication.state,
+                            "confirmed_offset": replication.confirmed_offset,
+                            "expected_size": replication.expected_size,
+                            "retry_count": replication.retry_count,
+                            "last_progress_at": replication.last_progress_at,
+                            "last_error": replication.last_error,
+                            "job_status": transfer.status if transfer else None,
+                        }
             rows.append(
                 {
                     "presentation_id": item.presentation_id,
@@ -272,3 +297,27 @@ def register_presentation_media_routes(
             )
         ]
         return match_presentation(filename, candidates)
+
+    @app.post("/api/v1/media-replications/{replication_session_id}/retry", tags=["media"])
+    def retry_replication(replication_session_id: UUID, session: WriteSession) -> dict[str, object]:
+        replication = session.get(
+            MediaReplicationSession, replication_session_id, with_for_update=True
+        )
+        transfer = session.get(TransferJob, replication_session_id, with_for_update=True)
+        if replication is None or transfer is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "replication not found")
+        if transfer.status not in {JobStatus.FAILED, JobStatus.EXHAUSTED, JobStatus.RETRY_WAIT}:
+            raise HTTPException(status.HTTP_409_CONFLICT, "replication is not retryable")
+        transfer.status = JobStatus.RETRY_WAIT
+        transfer.claimed_by_worker_id = None
+        transfer.lease_expires_at = None
+        transfer.error_code = None
+        transfer.last_error = None
+        replication.state = MediaReplicationState.RETRY_WAIT
+        replication.retry_count += 1
+        replication.last_error = None
+        return {
+            "replication_session_id": replication.replication_session_id,
+            "state": replication.state,
+            "retry_count": replication.retry_count,
+        }

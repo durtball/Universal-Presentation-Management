@@ -274,3 +274,73 @@ export interface OperationsDashboard extends Row {
   failed_processing_jobs: number;
   failed_transfer_jobs: number;
 }
+
+export interface MediaReplication extends Row {
+  replication_session_id: string;
+  state: string;
+  confirmed_offset: number;
+  expected_size: number;
+  retry_count: number;
+  last_progress_at?: string | null;
+  last_error?: string | null;
+  job_status?: string | null;
+}
+export interface PresentationMediaVersion extends Row {
+  presentation_version_id: string;
+  version_number: number;
+  sync_state?: string;
+  media?: {
+    media_object_id: string;
+    original_filename: string;
+    canonical_filename?: string | null;
+    size_bytes?: number | null;
+    sha256?: string | null;
+    availability: string;
+    failure_reason?: string | null;
+  } | null;
+  replication?: MediaReplication | null;
+}
+export interface PresentationMediaRow extends Row {
+  presentation_id: string;
+  presentation_identifier?: string | null;
+  title: string;
+  scheduled_at?: string | null;
+  media_state: string;
+  sync_state?: string;
+  presenters?: string;
+  session?: string;
+  room?: string;
+  versions: PresentationMediaVersion[];
+}
+export interface SiteMediaWorkspace extends Row {
+  summary: { expected: number; missing: number; ready: number; sync_pending: number };
+  presentations: PresentationMediaRow[];
+}
+export interface CentralMediaImport extends Row {
+  media_import_id: string;
+  event_id: string;
+  destination_site_id?: string | null;
+  presentation_id?: string | null;
+  presentation_version_id?: string | null;
+  presentation_identifier?: string | null;
+  original_filename: string;
+  canonical_filename?: string | null;
+  size_bytes?: number | null;
+  mime_type?: string | null;
+  sha256?: string | null;
+  match_state: string;
+  match_reason?: string | null;
+  match_candidates: string[];
+  import_state: string;
+  sync_state: string;
+  origin: string;
+  retry_count: number;
+  error_code?: string | null;
+  error_detail?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface CentralMediaWorkspace extends Row {
+  summary: Record<string, number>;
+  imports: CentralMediaImport[];
+}

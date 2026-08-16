@@ -12,6 +12,7 @@ const centralNav = [
   ["/admin/sessions", "Sessions"],
   ["/admin/presenters", "Presenters"],
   ["/admin/presentations", "Presentations"],
+  ["/admin/media", "Presentation Media"],
   ["/admin/imports", "Imports"],
   ["/admin/room-mappings", "Room Mapping"],
 ];
@@ -20,6 +21,7 @@ const siteNav = [
   ["/admin/program", "Program"],
   ["/admin/rooms", "Rooms"],
   ["/admin/storage", "Storage"],
+  ["/admin/media", "Presentation Media"],
 ];
 
 export function Shell({

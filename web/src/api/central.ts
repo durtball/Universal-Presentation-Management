@@ -12,6 +12,8 @@ import type {
   Row,
   RoomMapping,
   SiteRecord,
+  CentralMediaImport,
+  CentralMediaWorkspace,
 } from "./types";
 
 export function centralApi(csrfToken: string | null = null) {
@@ -97,6 +99,20 @@ export function centralApi(csrfToken: string | null = null) {
       get<Row[]>(`/api/v1/admin/events/${eventId}/sessions`, signal),
     presentations: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/presentations`, signal),
+    mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
+      get<CentralMediaWorkspace>(`/api/v1/admin/events/${eventId}/media-imports`, signal),
+    uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void) =>
+      xhrUpload<CentralMediaImport>(
+        `/api/v1/admin/events/${eventId}/media-imports`, file, onProgress, csrfToken,
+      ),
+    assignMedia: (importId: string, presentationId: string) =>
+      client.request<CentralMediaImport>(
+        `/api/v1/admin/media-imports/${importId}/assignment/${presentationId}`,
+        { method: "PUT" },
+      ),
+    retryMedia: (importId: string) => client.request<CentralMediaImport>(
+      `/api/v1/admin/media-imports/${importId}/retry`, { method: "POST" },
+    ),
     roomMappings: (eventId: string, siteId: string, signal?: AbortSignal) =>
       client.request<RoomMapping[]>(`/api/v1/admin/events/${eventId}/room-mappings`, {
         signal,
@@ -147,4 +163,22 @@ export function centralApi(csrfToken: string | null = null) {
         body: "{}",
       }),
   };
+}
+
+function xhrUpload<T>(path: string, file: File, progress: (value: number) => void, csrf: string | null) {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", path);
+    request.responseType = "json";
+    request.setRequestHeader("X-UPM-Original-Filename", file.name);
+    request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    request.setRequestHeader("Idempotency-Key", crypto.randomUUID());
+    if (csrf) request.setRequestHeader("X-CSRF-Token", csrf);
+    request.upload.onprogress = (event) => progress(event.lengthComputable ? event.loaded / event.total * 100 : 0);
+    request.onerror = () => reject(new Error("Upload interrupted. Check the network and retry."));
+    request.onload = () => request.status >= 200 && request.status < 300
+      ? resolve(request.response as T)
+      : reject(new Error(request.response?.detail?.message || request.response?.detail || "Upload failed."));
+    request.send(file);
+  });
 }

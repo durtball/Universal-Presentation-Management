@@ -11,6 +11,8 @@ import type {
   RoomDetail,
   SiteRoom,
   StorageTarget,
+  SiteMediaWorkspace,
+  PresentationMediaVersion,
 } from "./types";
 const get = <T>(path: string, signal?: AbortSignal) =>
   siteClient.request<T>(path, { signal, retry: true });
@@ -67,8 +69,46 @@ export const siteApi = {
       },
     ),
   media: (signal?: AbortSignal) => get<SiteMedia[]>("/api/v1/media", signal),
+  mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
+    get<SiteMediaWorkspace>(`/api/v1/events/${eventId}/media`, signal),
+  matchMedia: (eventId: string, filename: string, signal?: AbortSignal) =>
+    siteClient.request<Row>(`/api/v1/events/${eventId}/media/match`, {
+      signal, retry: true, query: { filename },
+    }),
+  createVersion: (presentationId: string) =>
+    siteClient.request<PresentationMediaVersion>(`/api/v1/presentations/${presentationId}/versions`, { method: "POST" }),
+  uploadMedia: (
+    siteId: string, eventId: string, file: File, versionId: string | null,
+    onProgress: (value: number) => void,
+  ) => xhrUpload<SiteMedia>("/api/v1/media/ingestions", file, onProgress, {
+    site_id: siteId, event_id: eventId,
+    category: versionId ? "presentation_version" : "open_file",
+    presentation_version_id: versionId ?? undefined,
+    expected_size: file.size,
+  }),
+  retryReplication: (replicationId: string) =>
+    siteClient.request<Row>(`/api/v1/media-replications/${replicationId}/retry`, { method: "POST" }),
   operations: (signal?: AbortSignal) =>
     get<OperationsDashboard>("/api/v1/operations/dashboard", signal),
   retrySync: () =>
     siteClient.request<Row>("/api/v1/sync/retry-failed", { method: "POST" }),
 };
+
+function xhrUpload<T>(path: string, file: File, progress: (value: number) => void, query: Record<string, string | number | undefined>) {
+  return new Promise<T>((resolve, reject) => {
+    const url = new URL(path, window.location.origin);
+    Object.entries(query).forEach(([key, value]) => value !== undefined && url.searchParams.set(key, String(value)));
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.responseType = "json";
+    request.setRequestHeader("X-UPM-Original-Filename", file.name);
+    request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    request.setRequestHeader("Idempotency-Key", crypto.randomUUID());
+    request.upload.onprogress = (event) => progress(event.lengthComputable ? event.loaded / event.total * 100 : 0);
+    request.onerror = () => reject(new Error("Upload interrupted. The local Site remains available; retry this file."));
+    request.onload = () => request.status >= 200 && request.status < 300
+      ? resolve(request.response as T)
+      : reject(new Error(request.response?.detail || "Upload failed."));
+    request.send(file);
+  });
+}

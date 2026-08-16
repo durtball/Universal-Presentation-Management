@@ -15,6 +15,7 @@ import { Login } from "./pages/central/Login";
 import { People } from "./pages/central/People";
 import { Sites } from "./pages/central/Sites";
 import { RoomMappings } from "./pages/central/RoomMappings";
+import { PresentationMedia } from "./pages/PresentationMedia";
 import {
   SiteOverview,
   SiteProgram,
@@ -63,6 +64,7 @@ function CentralApp() {
           path="/admin/presentations"
           element={<EventScoped type="presentations" />}
         />
+        <Route path="/admin/media" element={<PresentationMedia mode="central" />} />
         <Route path="/admin/imports" element={<Imports />} />
         <Route path="/admin/room-mappings" element={<RoomMappings />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
@@ -100,6 +102,7 @@ function SiteApp() {
         <Route path="/admin/rooms" element={<SiteRooms />} />
         <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
         <Route path="/admin/storage" element={<SiteStorage />} />
+        <Route path="/admin/media" element={<PresentationMedia mode="site" />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>
     </Shell>

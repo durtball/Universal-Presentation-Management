@@ -106,8 +106,9 @@
 - **Transfer execution:** Central-to-Site Site-pull has a resumable offset reader, Site worker, and
   Site-to-Central progress projection. Site-local presentation ingestion now queues durable reverse
   replication; the Site push worker resumes at Central's receiver-owned offset, and Central fsyncs,
-  verifies, and publishes the replica against the same PresentationVersion UUID. Bandwidth control
-  and progress UI remain absent.
+  verifies, and publishes the replica against the same PresentationVersion UUID. The Site media
+  workspace now exposes byte progress, retry state, failure detail, and an operator retry action;
+  bandwidth control remains absent.
 - **Transfer architecture:** ADR-0011 now fixes Site-initiated Central pull, Site-initiated reverse
   push, durable byte-offset resume, Site-scoped authorization, SHA-256 finalization, partial
   ownership, retry/replay, and separate replication/readiness semantics. Runtime coverage remains
@@ -127,10 +128,13 @@
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
   ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
   durable staging/match/version/transfer-queue APIs and bidirectional binary movement are implemented
-  foundations. Concurrent revision reconciliation, complete
-  Site audit/outbox handlers, Site RBAC, and equivalent Central/Site Event Media workspaces remain
-  incomplete. This milestone must not be represented as production-complete until those paths and
-  running-stack end-to-end verification exist.
+  foundations. Shared Central/Site Event Media workspaces now provide streamed multi-file upload,
+  deterministic and explicitly confirmed manual matching, unmatched-media retention, paginated
+  presentation lists, version history, local readiness, and Site-to-Central replication progress.
+  Concurrent revision reconciliation, complete Site audit/outbox handlers, Site RBAC, guarded
+  unmatched deletion/rename, and complete bulk Central-to-Site deployment controls remain incomplete.
+  Running-stack end-to-end verification is still required before calling the overall workflow
+  production-complete.
 - **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
 - **PDF conversion:** derivative data structures and job primitives exist, but no converter, retry handler, status surface, preview, or room delivery workflow exists.
 - **Storage administration:** health/capacity is visible, but browser create/edit/disable/primary-target configuration and media-placement policy are not implemented.
