@@ -5,6 +5,7 @@ Revises: b32d8e0f5a21
 """
 
 from collections.abc import Sequence
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
