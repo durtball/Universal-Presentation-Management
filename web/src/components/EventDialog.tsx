@@ -1,12 +1,8 @@
 import { useState, type FormEvent } from "react";
 import type { EventRecord, EventWrite } from "../api/types";
+import { DEFAULT_EVENT_TIMEZONE } from "../config/timezones";
 import { ErrorSurface } from "./Feedback";
-
-const fallbackTimezones = [
-  "UTC", "America/Chicago", "America/New_York", "America/Denver",
-  "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Tokyo",
-  "Australia/Sydney",
-];
+import { TimezoneSelect } from "./TimezoneSelect";
 
 const dateValue = (value?: string) => value?.slice(0, 10) ?? "";
 
@@ -18,11 +14,10 @@ export function EventDialog({ event, save, close }: {
   const [name, setName] = useState(event?.name ?? "");
   const [startDate, setStartDate] = useState(dateValue(event?.starts_at));
   const [endDate, setEndDate] = useState(dateValue(event?.ends_at));
-  const [timezone, setTimezone] = useState(event?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC");
+  const [timezone, setTimezone] = useState(event?.timezone ?? DEFAULT_EVENT_TIMEZONE);
   const [error, setError] = useState<unknown>();
   const [validation, setValidation] = useState("");
   const [saving, setSaving] = useState(false);
-  const timezones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : fallbackTimezones;
 
   const submit = async (submitEvent: FormEvent) => {
     submitEvent.preventDefault();
@@ -51,8 +46,7 @@ export function EventDialog({ event, save, close }: {
         <label className="field">Event Name<input className="input" autoFocus required value={name} onChange={e=>setName(e.target.value)} /></label>
         <label className="field">Start Date<input className="input" type="date" value={startDate} onChange={e=>setStartDate(e.target.value)} /></label>
         <label className="field">End Date<input className="input" type="date" min={startDate||undefined} value={endDate} onChange={e=>setEndDate(e.target.value)} /></label>
-        <label className="field">Timezone<input className="input" list="iana-timezones" required value={timezone} onChange={e=>setTimezone(e.target.value)} /></label>
-        <datalist id="iana-timezones">{timezones.map(zone=><option value={zone} key={zone}/>)}</datalist>
+        <label className="field">Timezone<TimezoneSelect value={timezone} onChange={setTimezone}/></label>
         {validation ? <p className="danger-text" role="alert">{validation}</p> : null}
         {error != null ? <ErrorSurface error={error}/> : null}
         <footer><button className="button" type="button" onClick={close}>Cancel</button><button className="button button--primary" disabled={saving}>{event ? "Save Changes" : "Create"}</button></footer>
