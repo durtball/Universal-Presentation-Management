@@ -2,6 +2,7 @@ import { createCentralClient } from "./client";
 import type {
   AuthSession,
   EventRecord,
+  EventDeploymentPreview,
   Health,
   ImportBatch,
   PersonRecord,
@@ -51,8 +52,17 @@ export function centralApi(csrfToken: string | null = null) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ site_id: siteId }),
       }),
+    deploymentPreview: (eventId: string, siteId: string, signal?: AbortSignal) =>
+      client.request<EventDeploymentPreview>(
+        `/api/v1/admin/events/${eventId}/deployment-preview`,
+        { signal, retry: true, query: { site_id: siteId } },
+      ),
     pushDeployment: (deploymentId: string) =>
       client.request<Row>(`/api/v1/admin/event-deployments/${deploymentId}/push`, {
+        method: "POST",
+      }),
+    retryDeployment: (deploymentId: string) =>
+      client.request<Row>(`/api/v1/admin/event-deployments/${deploymentId}/retry`, {
         method: "POST",
       }),
     people: (signal?: AbortSignal) =>

@@ -3,7 +3,7 @@
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from upm_central.persistence.models import (
@@ -153,6 +153,7 @@ def build_snapshot(
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
+        central_event_revision=event.revision,
         event_id=event.event_id,
         site_id=deployment.site_id,
         event_name=event.name,
@@ -283,6 +284,110 @@ def build_snapshot(
     )
 
 
+def deployment_preview(session: Session, event_id: UUID, site_id: UUID) -> dict[str, object]:
+    """Summarize committed program state and deterministic pre-deployment validation."""
+    event = load_event(session, event_id)
+    site = session.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="site not found")
+    sessions = list(event.sessions)
+    presentations = session.scalars(
+        select(Presentation)
+        .where(Presentation.event_id == event_id)
+        .options(
+            selectinload(Presentation.session_links),
+            selectinload(Presentation.presenter_links),
+        )
+    ).all()
+    room_labels = {
+        " ".join(item.location_name.split()).casefold()
+        for item in sessions
+        if item.location_name and item.location_name.strip()
+    }
+    warnings: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    missing_rooms = [
+        item for item in sessions if not item.location_name or not item.location_name.strip()
+    ]
+    if missing_rooms:
+        warnings.append(
+            {
+                "code": "session_without_room",
+                "message": f"{len(missing_rooms)} session(s) have no imported room label.",
+            }
+        )
+    declared_presenter_ids = {
+        item.event_participation_id for item in event.participations if item.is_presenter
+    }
+    assigned_presenter_ids = {
+        link.event_participation_id for item in sessions for link in item.participants
+    }
+    presenter_ids = declared_presenter_ids | assigned_presenter_ids
+    unresolved_presenters = declared_presenter_ids - assigned_presenter_ids
+    if unresolved_presenters:
+        warnings.append(
+            {
+                "code": "presenter_without_session",
+                "message": (
+                    f"{len(unresolved_presenters)} presenter(s) are not assigned to a session."
+                ),
+            }
+        )
+    unlinked_presentations = [
+        item for item in presentations if item.session_id is None and not item.session_links
+    ]
+    if unlinked_presentations:
+        warnings.append(
+            {
+                "code": "presentation_without_session",
+                "message": (
+                    f"{len(unlinked_presentations)} presentation(s) are not linked to a session."
+                ),
+            }
+        )
+    conflicts = (
+        session.scalar(
+            select(func.count())
+            .select_from(SiteRoomMapping)
+            .where(
+                SiteRoomMapping.site_id == site_id,
+                SiteRoomMapping.normalized_imported_label.in_(room_labels),
+                SiteRoomMapping.mapping_status == "conflict",
+            )
+        )
+        or 0
+    )
+    if conflicts:
+        errors.append(
+            {
+                "code": "ambiguous_room_mapping",
+                "message": f"{conflicts} imported room mapping(s) are ambiguous.",
+            }
+        )
+    existing = session.scalar(
+        select(EventDeployment).where(
+            EventDeployment.event_id == event_id, EventDeployment.site_id == site_id
+        )
+    )
+    return {
+        "event_id": event_id,
+        "event_name": event.name,
+        "site_id": site_id,
+        "site_name": site.display_name,
+        "counts": {
+            "rooms": len(room_labels),
+            "sessions": len(sessions),
+            "presenters": len(presenter_ids),
+            "presentations": len(presentations),
+        },
+        "warnings": warnings,
+        "errors": errors,
+        "deployable": not errors,
+        "existing_deployment_id": existing.deployment_id if existing else None,
+        "next_revision": (existing.desired_revision + 1) if existing else 1,
+    }
+
+
 def _enqueue(
     session: Session,
     deployment: EventDeployment,
@@ -320,6 +425,11 @@ def push_deployment(
 ) -> EventDeployment:
     if deployment.status not in DEPLOYABLE_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="deployment cannot be pushed")
+    session.scalar(
+        select(Event.event_id)
+        .where(Event.event_id == deployment.event_id)
+        .with_for_update()
+    )
     revision = deployment.desired_revision + 1
     snapshot = build_snapshot(session, deployment, revision)
     event_type = (
@@ -369,6 +479,14 @@ def create_deployment(session: Session, event_id: UUID, site_id: UUID) -> EventD
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="site not found")
     if not site.enabled or site.enrollment_state != EnrollmentState.ACTIVE:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="site is not active")
+    # Serialize creation for an Event so concurrent requests cannot race the unique Event/Site row.
+    session.scalar(select(Event.event_id).where(Event.event_id == event_id).with_for_update())
+    preview = deployment_preview(session, event_id, site_id)
+    if not preview["deployable"]:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"message": "event deployment validation failed", **preview},
+        )
     existing = session.scalar(
         select(EventDeployment).where(
             EventDeployment.event_id == event_id, EventDeployment.site_id == site_id

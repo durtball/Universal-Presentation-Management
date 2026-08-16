@@ -22,7 +22,20 @@ export interface EventRecord extends Row {
   timezone: string;
   starts_at?: string;
   ends_at?: string;
-  deployments: Row[];
+  deployments: EventDeployment[];
+}
+export interface EventDeployment extends Row {
+  deployment_id: string; event_id: string; site_id: string; site_name: string;
+  status: string; synchronization_state: string; desired_revision: number;
+  applied_revision: number; update_available: boolean; failure_reason?: string | null;
+  successfully_deployed_at?: string | null; summary_counts: Row;
+}
+export interface EventDeploymentPreview extends Row {
+  event_id: string; event_name: string; site_id: string; site_name: string;
+  counts: { rooms:number; sessions:number; presenters:number; presentations:number };
+  warnings: Array<{code:string;message:string}>;
+  errors: Array<{code:string;message:string}>;
+  deployable: boolean; existing_deployment_id?: string | null; next_revision:number;
 }
 export interface SiteRecord extends Row {
   site_id: string;

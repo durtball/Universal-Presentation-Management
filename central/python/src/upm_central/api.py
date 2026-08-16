@@ -27,6 +27,7 @@ from upm_central.auth import (
 from upm_central.config import CentralDatabaseSettings
 from upm_central.event_deployments import (
     create_deployment,
+    deployment_preview,
     push_deployment,
     retry_deployment,
     revoke_deployment,
@@ -38,6 +39,7 @@ from upm_central.persistence.models import (
     AuditRecord,
     Event,
     EventDeployment,
+    EventDeploymentRevision,
     OutboxEvent,
     Site,
     SiteCredential,
@@ -528,7 +530,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                     "inbound_site_sequence": site_to_central.last_sequence
                     if site_to_central
                     else 0,
-                    "deployments": [deployment_view(item) for item in deployments],
+                    "deployments": [deployment_view(item, session) for item in deployments],
                 }
             )
         return result
@@ -564,18 +566,32 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             "event_id": event.outbox_event_id,
         }
 
-    def deployment_view(deployment: EventDeployment) -> dict[str, object]:
+    def deployment_view(deployment: EventDeployment, session: Session) -> dict[str, object]:
+        event = session.get(Event, deployment.event_id)
+        latest = session.scalar(
+            select(EventDeploymentRevision)
+            .where(EventDeploymentRevision.deployment_id == deployment.deployment_id)
+            .order_by(EventDeploymentRevision.deployment_revision.desc())
+            .limit(1)
+        )
+        deployed_event_revision = int(
+            (latest.snapshot if latest else {}).get("central_event_revision", 1)
+        )
+        update_available = bool(event and event.revision > deployed_event_revision)
         synchronization_state = (
             "failed"
             if deployment.status == EventDeploymentStatus.FAILED
-            else "current"
+            else "update_available"
+            if update_available
+            else "applied"
             if deployment.acknowledged_revision == deployment.desired_revision
-            else "synchronizing"
+            else "sending"
         )
         return {
             "deployment_id": deployment.deployment_id,
             "event_id": deployment.event_id,
             "site_id": deployment.site_id,
+            "site_name": session.get(Site, deployment.site_id).display_name,
             "status": deployment.status,
             "desired_revision": deployment.desired_revision,
             "applied_revision": deployment.acknowledged_revision,
@@ -586,6 +602,8 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             "failure_at": deployment.failure_at,
             "failure_reason": deployment.failure_reason,
             "summary_counts": deployment.summary_counts,
+            "update_available": update_available,
+            "deployed_event_revision": deployed_event_revision,
         }
 
     @app.post("/api/v1/admin/events", status_code=201, dependencies=[Depends(require_admin)])
@@ -616,7 +634,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                     "starts_at": event.starts_at,
                     "ends_at": event.ends_at,
                     "revision": event.revision,
-                    "deployments": [deployment_view(item) for item in deployments],
+                    "deployments": [deployment_view(item, session) for item in deployments],
                 }
             )
         return result
@@ -637,19 +655,16 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         event.starts_at = payload.starts_at
         event.ends_at = payload.ends_at
         event.revision += 1
-        pushed = []
-        deployments = session.scalars(
-            select(EventDeployment).where(
-                EventDeployment.event_id == event_id,
-                EventDeployment.status.notin_(
-                    [EventDeploymentStatus.REVOKED, EventDeploymentStatus.ARCHIVED]
-                ),
-            )
-        ).all()
-        for deployment in deployments:
-            push_deployment(session, deployment)
-            pushed.append(deployment.deployment_id)
-        return {"event_id": event_id, "revision": event.revision, "deployments_pushed": pushed}
+        return {"event_id": event_id, "revision": event.revision, "update_available": True}
+
+    @app.get(
+        "/api/v1/admin/events/{event_id}/deployment-preview",
+        dependencies=[Depends(require_admin)],
+    )
+    def preview_event_deployment(
+        event_id: UUID, site_id: UUID, session: DbSession
+    ) -> dict[str, object]:
+        return deployment_preview(session, event_id, site_id)
 
     @app.get(
         "/api/v1/admin/events/{event_id}/deployments",
@@ -659,7 +674,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         if session.get(Event, event_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
         return [
-            deployment_view(item)
+            deployment_view(item, session)
             for item in session.scalars(
                 select(EventDeployment)
                 .where(EventDeployment.event_id == event_id)
@@ -774,10 +789,14 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     def deploy_event(
         event_id: UUID, payload: DeploymentCreate, session: DbSession
     ) -> dict[str, object]:
-        return deployment_view(create_deployment(session, event_id, payload.site_id))
+        return deployment_view(create_deployment(session, event_id, payload.site_id), session)
 
     def required_deployment(session: Session, deployment_id: UUID) -> EventDeployment:
-        deployment = session.get(EventDeployment, deployment_id)
+        deployment = session.scalar(
+            select(EventDeployment)
+            .where(EventDeployment.deployment_id == deployment_id)
+            .with_for_update()
+        )
         if deployment is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="deployment not found")
         return deployment
@@ -788,7 +807,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     )
     def push_event_deployment(deployment_id: UUID, session: DbSession) -> dict[str, object]:
         return deployment_view(
-            push_deployment(session, required_deployment(session, deployment_id))
+            push_deployment(session, required_deployment(session, deployment_id)), session
         )
 
     @app.post(
@@ -797,7 +816,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     )
     def retry_event_deployment(deployment_id: UUID, session: DbSession) -> dict[str, object]:
         return deployment_view(
-            retry_deployment(session, required_deployment(session, deployment_id))
+            retry_deployment(session, required_deployment(session, deployment_id)), session
         )
 
     @app.post(
@@ -808,7 +827,8 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         deployment_id: UUID, change: StateChange, session: DbSession
     ) -> dict[str, object]:
         return deployment_view(
-            revoke_deployment(session, required_deployment(session, deployment_id), change.reason)
+            revoke_deployment(session, required_deployment(session, deployment_id), change.reason),
+            session,
         )
 
     @app.post("/api/v1/sync/site-events", response_model=SyncBatchResponse)

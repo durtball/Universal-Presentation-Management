@@ -49,7 +49,7 @@ export function Events() {
   const [error, setError] = useState<unknown>();
   const [deleting, setDeleting] = useState<EventRecord>();
   const columns = useMemo<Column<EventRecord>[]>(()=>[...baseColumns, {key:"actions",label:"Actions",value:()=>"",
-    render:(row)=><button className="button button--danger" type="button" onClick={()=>setDeleting(row)}>Delete Event</button>}],[]);
+    render:(row)=><div className="button-row"><Link className="button button--primary" to={`/admin/events/${row.event_id}#deploy`}>Deploy to Site</Link><button className="button button--danger" type="button" onClick={()=>setDeleting(row)}>Delete Event</button></div>}],[]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(undefined);
     try { await api.createEvent(name, timezone); setName(""); result.refresh(); }

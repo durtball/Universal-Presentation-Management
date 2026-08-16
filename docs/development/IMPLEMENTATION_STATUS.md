@@ -47,6 +47,9 @@
 - Snapshot v1 projects event metadata, event-scoped people, participation, sessions, session presenters, logical presentations, presentation relationships, versions, external identifiers, and relevant room mapping.
 - New snapshots deactivate omitted Central-owned program rows without deleting Site-owned media or operational history.
 - Central and Site browser pages expose deployment and locally retained program state. Site reads continue without Central.
+- Central Event detail provides a Site selector and committed-program deployment preview with counts,
+  warnings, blocking conflicts, explicit deploy/update/retry controls, Site names, revisions, and
+  applied/update-available status. Program changes no longer publish silently.
 
 ### Event program, permanent identity, and imports
 

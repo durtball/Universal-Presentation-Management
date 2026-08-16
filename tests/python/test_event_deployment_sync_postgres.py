@@ -183,6 +183,20 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
         )
         assert created.status_code == 201
         event_id = created.json()["event_id"]
+        preview = central_client.get(
+            f"/api/v1/admin/events/{event_id}/deployment-preview",
+            headers=headers,
+            params={"site_id": str(site_id)},
+        )
+        assert preview.status_code == 200
+        assert preview.json()["site_name"]
+        assert preview.json()["counts"] == {
+            "rooms": 0,
+            "sessions": 0,
+            "presenters": 0,
+            "presentations": 0,
+        }
+        assert preview.json()["deployable"] is True
         deployed = central_client.post(
             f"/api/v1/admin/events/{event_id}/deployments",
             headers=headers,
@@ -238,6 +252,15 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
             json={"name": "UPM Expo Updated"},
         )
         assert updated.status_code == 200
+        update_status = central_client.get(
+            f"/api/v1/admin/events/{event_id}/deployments", headers=headers
+        ).json()[0]
+        assert update_status["update_available"] is True
+        assert update_status["desired_revision"] == 1
+        pushed = central_client.post(
+            f"/api/v1/admin/event-deployments/{deployment_id}/push", headers=headers
+        )
+        assert pushed.status_code == 200
         synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
         synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
         with site_factory() as session:
@@ -259,7 +282,7 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
                 duplicate.status = JobStatus.PENDING
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
 
-            # Simulate a disconnected Site while Central generates three complete revisions.
+            # Central changes remain explicit update availability while the Site is disconnected.
             for revision in range(3, 6):
                 response = central_client.put(
                     f"/api/v1/admin/events/{event_id}",
@@ -267,15 +290,24 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
                     json={"name": f"Offline revision {revision}"},
                 )
                 assert response.status_code == 200
+            pending_update = central_client.get(
+                f"/api/v1/admin/events/{event_id}/deployments", headers=headers
+            ).json()[0]
+            assert pending_update["update_available"] is True
+            assert pending_update["desired_revision"] == 2
+            pushed = central_client.post(
+                f"/api/v1/admin/event-deployments/{deployment_id}/push", headers=headers
+            )
+            assert pushed.status_code == 200
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
             with site_factory() as session:
                 projection = session.get(EventDeploymentProjection, deployment_id)
-                assert projection.applied_revision == 5
+                assert projection.applied_revision == 3
                 assert session.get(SiteEvent, event_id).name == "Offline revision 5"
             with Session(central_engine) as session:
                 deployment = session.get(CentralDeployment, deployment_id)
-                assert deployment.desired_revision == deployment.acknowledged_revision == 5
+                assert deployment.desired_revision == deployment.acknowledged_revision == 3
                 assert deployment.status == EventDeploymentStatus.DEPLOYED
         finally:
             central_engine.dispose()

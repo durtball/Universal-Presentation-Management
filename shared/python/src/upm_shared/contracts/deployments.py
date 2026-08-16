@@ -115,6 +115,7 @@ class EventDeploymentSnapshot(DeploymentModel):
     schema_version: Literal[1] = EVENT_DEPLOYMENT_SCHEMA_VERSION
     deployment_id: UUID
     deployment_revision: Annotated[int, Field(ge=1)]
+    central_event_revision: Annotated[int, Field(ge=1)] = 1
     event_id: UUID
     site_id: UUID
     event_name: Annotated[str, Field(min_length=1, max_length=255)]

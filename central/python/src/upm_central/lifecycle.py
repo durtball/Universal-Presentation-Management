@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from upm_central.event_deployments import push_deployment
 from upm_central.persistence.models import (
     AuditRecord,
     DeletionOperation,
@@ -367,7 +368,12 @@ def run_bulk_people_deletion(
     for event_id in sorted(affected_event_ids, key=str):
         event = session.get(Event, event_id)
         if event is not None:
-            deployment_ids.extend(str(value) for value in touch_event_program(session, event))
+            active_deployment_ids = touch_event_program(session, event)
+            for deployment_id in active_deployment_ids:
+                deployment = session.get(EventDeployment, deployment_id)
+                if deployment is not None:
+                    push_deployment(session, deployment)
+                    deployment_ids.append(str(deployment_id))
     operation.media_results = {"eligible_removed": 0, "shared_preserved": 0}
     operation.status = "completed"
     operation.stage = "completed"

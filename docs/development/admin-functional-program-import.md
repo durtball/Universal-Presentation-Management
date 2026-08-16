@@ -70,14 +70,16 @@ operator-visible errors. Files over 25 MiB receive HTTP 413; they are not silent
 Imported `room`, `room_name` or `location` values remain logical labels on Central sessions. Central
 does not create physical Site rooms from these strings.
 
-The **Room Mapping** page scopes mappings by Site. A confirmed mapping records the existing
-Site-owned room UUID and label. Mappings are reusable for future imports with the same normalized
-label and may differ between Sites. Leaving a value unassigned is explicit.
+The **Room Mapping** page scopes optional operator overrides by Site. A confirmed mapping records an
+existing Site-owned room UUID and label and may differ between Sites. It is not a prerequisite for
+deployment: ADR-0009 automatically reuses a deterministic Site-room match or creates an Event-owned
+UUID-backed room when no match exists. Ambiguous normalized matches remain unresolved rather than
+being guessed, and explicit operator mappings/unmaps remain authoritative on redeployment.
 
 Sites expose `GET /api/v1/rooms` and `POST /api/v1/rooms` for their local room catalog. A deployment
-snapshot carries only mappings for its destination Site. During apply, the Site assigns a session
-only when that UUID already identifies a local room. A missing room remains `unmapped`; a different
-existing local assignment becomes `conflict` and is not overwritten.
+snapshot carries mappings for its destination Site. During apply, the Site materializes missing
+rooms and creates event-scoped mappings and authoritative `RoomAssignment` rows transactionally.
+Stable mappings and room UUIDs are reused across complete-snapshot revisions.
 
 ## Deployment and offline behavior
 
@@ -104,6 +106,7 @@ the WAN is unavailable.
 - `GET /api/v1/admin/events/{event_id}/room-mappings?site_id=...`
 - `PUT /api/v1/admin/room-mappings`
 - `POST /api/v1/admin/events/{event_id}/deployments`
+- `GET /api/v1/admin/events/{event_id}/deployment-preview?site_id=...`
 - `POST /api/v1/admin/event-deployments/{deployment_id}/push|retry|revoke`
 - `GET|POST /api/v1/rooms` (Site-local)
 - `GET /api/v1/events/{event_id}/program` (Site-local)

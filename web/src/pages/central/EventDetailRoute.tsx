@@ -19,7 +19,7 @@ export function EventDetailRoute() {
   return (
     <AdminBoundary>
       <PageState {...result} onRetry={result.refresh}>
-        {(event) => <EventDetail event={event} />}
+        {(event) => <EventDetail event={event} onChanged={result.refresh} />}
       </PageState>
     </AdminBoundary>
   );

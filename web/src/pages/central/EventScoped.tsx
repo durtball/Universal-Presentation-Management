@@ -1,8 +1,9 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { centralApi } from "../../api/central";
-import type { EventRecord, Row } from "../../api/types";
+import type { EventDeployment, EventRecord, Row } from "../../api/types";
 import { DataTable, type Column } from "../../components/DataTable";
 import { EventPicker } from "../../components/EventPicker";
+import { EventDeploymentDialog } from "../../components/EventDeploymentDialog";
 import { Empty, ErrorSurface, Loading } from "../../components/Feedback";
 import { Page, Panel } from "../../components/Page";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -201,12 +202,12 @@ export function EventScoped({ type }: { type: keyof typeof definitions }) {
   );
 }
 
-export function EventDetail({ event }: { event: EventRecord }) {
+export function EventDetail({ event, onChanged }: { event: EventRecord; onChanged?:()=>void }) {
   const { csrfToken } = useSession();
   const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const sites = useApi((signal) => api.sites(signal), [api]);
-  const [siteId, setSiteId] = useState("");
-  const [message, setMessage] = useState("");
+  const [deploying,setDeploying]=useState(false); const [error,setError]=useState<unknown>();
+  const loadPreview=useCallback((siteId:string)=>api.deploymentPreview(event.event_id,siteId),[api,event.event_id]);
   return (
     <Page
       eyebrow="Event detail"
@@ -231,28 +232,19 @@ export function EventDetail({ event }: { event: EventRecord }) {
           <strong>{event.deployments.length}</strong>
         </div>
       </div>
-      <Panel title="Deploy program" description="Publishes a complete versioned ADR-0007 snapshot through the existing synchronization outbox.">
-        {sites.data?.length ? <div className="inline-form">
-          <label className="field">Site<select className="input" value={siteId || sites.data[0].site_id} onChange={(e) => setSiteId(e.target.value)}>
-            {sites.data.filter((site) => site.enrollment_state === "active").map((site) =>
-              <option key={site.site_id} value={site.site_id}>{site.display_name}</option>)}
-          </select></label>
-          <button className="button button--primary" onClick={async () => {
-            const selected = siteId || sites.data?.[0]?.site_id;
-            if (!selected) return;
-            try { await api.deployEvent(event.event_id, selected); setMessage("Deployment snapshot queued."); }
-            catch (error) { setMessage(error instanceof Error ? error.message : "Deployment failed"); }
-          }}>Deploy to Site</button>
-        </div> : <p>No active enrolled Site is available.</p>}
-        {message ? <p role="status">{message}</p> : null}
-        <DataTable rows={event.deployments as Row[]} columns={[
-          { key: "site", label: "Site", value: (row) => row.site_id },
+      <Panel title="Deploy program" description="Review and publish a complete ADR-0007 snapshot. Missing Site rooms are created automatically and stable room UUIDs are reused on updates.">
+        {sites.data?.some(site=>site.enrollment_state==="active")?<button className="button button--primary" type="button" onClick={()=>setDeploying(true)}>Deploy to Site</button>:<p>No active enrolled Site is available.</p>}
+        {error?<ErrorSurface error={error}/>:null}
+        <DataTable rows={event.deployments as EventDeployment[]} columns={[
+          { key: "site", label: "Site", value: (row) => row.site_name||row.site_id },
           { key: "status", label: "Status", value: (row) => row.status,
             render: (row) => <StatusBadge value={row.synchronization_state || row.status} /> },
           { key: "revision", label: "Revision", value: (row) => `${row.applied_revision || 0} / ${row.desired_revision || 0}` },
           { key: "failure", label: "Failure", value: (row) => row.failure_reason || "—" },
+          {key:"action",label:"Action",value:()=>"",render:(row)=><button className="button" type="button" onClick={async()=>{setError(undefined);try{if(row.status==="failed")await api.retryDeployment(row.deployment_id);else await api.pushDeployment(row.deployment_id);onChanged?.();}catch(reason){setError(reason);}}}>{row.status==="failed"?"Retry":row.update_available?"Deploy Update":"Redeploy"}</button>},
         ]} rowKey={(row) => String(row.deployment_id)} label="Site deployments" />
       </Panel>
+      {deploying&&sites.data?<EventDeploymentDialog eventName={event.name} sites={sites.data} loadPreview={loadPreview} deploy={siteId=>api.deployEvent(event.event_id,siteId)} push={deploymentId=>api.pushDeployment(deploymentId)} close={()=>setDeploying(false)} completed={()=>{setDeploying(false);onChanged?.();}}/>:null}
     </Page>
   );
 }

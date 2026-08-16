@@ -345,6 +345,11 @@ function ProgramTables({ program }: { program: Row }) {
 const roomColumns: Column<SiteRoom>[] = [
   { key: "label", label: "Physical room", value: (row) => row.label },
   {
+    key: "origin",
+    label: "Origin",
+    value: (row) => row.event_id ? "Event deployment" : "Reusable Site room",
+  },
+  {
     key: "health",
     label: "Health",
     value: (row) => row.summary.health,
@@ -416,7 +421,7 @@ export function SiteRooms() {
   return (
     <Page eyebrow="Site operations" title="Rooms"
       description="Room-centered program, media, endpoint, and readiness state from this Site.">
-      <Panel title="Create a Site room" description="Spreadsheet labels do not create physical rooms automatically.">
+      <Panel title="Create a Site room" description="Deployment automatically creates missing Event rooms; use this form for reusable Site infrastructure.">
         <form className="inline-form" onSubmit={submit}>
           <label className="field">Room label<input className="input" required value={label}
             onChange={(event) => setLabel(event.target.value)} /></label>

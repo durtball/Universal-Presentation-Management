@@ -1,9 +1,10 @@
 # Event deployment synchronization
 
 Central administrators manage events at `/admin/events`. The authenticated APIs support creating and
-editing an Event, deploying it independently to active Sites, pushing a new revision, retrying a
-failed application, and non-destructive revocation. Editing deployable Event fields automatically
-creates a new complete revision for every active deployment.
+editing an Event, previewing and deploying it independently to active Sites, explicitly pushing a
+new revision, retrying a failed application, and non-destructive revocation. Program edits advance
+the Central Event revision and display **Update available**; they do not silently publish. The
+operator reviews and explicitly deploys the next complete revision.
 
 Event types are:
 
@@ -28,6 +29,12 @@ or uniquely normalized Site room match; otherwise it creates a new UUIDv7 Room a
 program-room mapping. Ambiguous normalized matches remain unresolved. Existing mappings, including
 deliberate operator unmaps, are never overwritten by later snapshots. See
 [ADR-0009](../architecture/decisions/ADR-0009-site-room-materialization.md).
+
+`GET /api/v1/admin/events/{event_id}/deployment-preview?site_id=...` summarizes committed rooms,
+sessions, presenters, and presentations and reports non-blocking relationship warnings plus blocking
+mapping conflicts. Deployment consumes the committed Event Program state, never the source workbook.
+The Site Rooms catalog identifies UUID-backed rooms created for an Event deployment separately from
+reusable Site infrastructure.
 
 ## Revision and recovery semantics
 

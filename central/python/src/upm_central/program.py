@@ -10,7 +10,6 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from upm_central.event_deployments import push_deployment
 from upm_central.persistence.models import (
     AuditRecord,
     Event,
@@ -85,23 +84,20 @@ def audit(
 
 
 def touch_event_program(session: Session, event: Event) -> list[UUID]:
-    """Advance the event domain revision and every active ADR-0007 deployment once."""
+    """Advance Central program revision without silently publishing a deployment."""
     event.revision += 1
     event.updated_at = utc_now()
     session.flush()
-    deployment_ids: list[UUID] = []
-    deployments = session.scalars(
-        select(EventDeployment).where(
-            EventDeployment.event_id == event.event_id,
-            EventDeployment.status.notin_(
-                [EventDeploymentStatus.REVOKED, EventDeploymentStatus.ARCHIVED]
-            ),
+    return list(
+        session.scalars(
+            select(EventDeployment.deployment_id).where(
+                EventDeployment.event_id == event.event_id,
+                EventDeployment.status.notin_(
+                    [EventDeploymentStatus.REVOKED, EventDeploymentStatus.ARCHIVED]
+                ),
+            )
         )
-    ).all()
-    for deployment in deployments:
-        push_deployment(session, deployment)
-        deployment_ids.append(deployment.deployment_id)
-    return deployment_ids
+    )
 
 
 def external_identifier(
