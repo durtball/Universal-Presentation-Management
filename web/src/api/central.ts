@@ -64,6 +64,17 @@ export function centralApi(csrfToken: string | null = null) {
         method: "DELETE", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirmation }),
       }),
+    bulkPeopleDeletionImpact: () =>
+      get<DeletionPreview>("/api/v1/admin/people-bulk-deletion/impact"),
+    deleteAllPeople: (confirmation: string) =>
+      client.request<DeletionOperation>("/api/v1/admin/people-bulk-deletion", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      }),
+    currentBulkPeopleDeletion: () =>
+      get<DeletionOperation | null>("/api/v1/admin/people-bulk-deletion/current"),
+    deletionStatus: (operationId: string) =>
+      get<DeletionOperation>(`/api/v1/admin/deletions/${operationId}`),
     participants: (eventId: string, signal?: AbortSignal) =>
       get<Row[]>(`/api/v1/admin/events/${eventId}/participants`, signal),
     sessions: (eventId: string, signal?: AbortSignal) =>

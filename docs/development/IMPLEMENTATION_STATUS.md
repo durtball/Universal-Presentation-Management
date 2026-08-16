@@ -59,6 +59,10 @@
   confirmation, durable processing, progress/error state, and target-independent audit evidence.
   Event cleanup retains person-owned participation history and propagates Site purge tombstones
   through protocol v1; archive and deployment revocation remain non-destructive retention states.
+- Permanent People administration also supports one authorized, exact-phrase bulk deletion. The
+  request snapshots all targeted Person UUIDs into a validated durable-job payload, reuses the
+  individual Person cleanup rules, and publishes ordered person tombstones plus updated ADR-0007
+  snapshots for affected deployments so offline Sites converge through the existing outbox transport.
 
 ### Rooms
 

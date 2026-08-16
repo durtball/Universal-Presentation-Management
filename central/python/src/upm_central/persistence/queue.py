@@ -16,6 +16,7 @@ from upm_central.persistence.models import (
 )
 from upm_shared.enums import JobStatus
 from upm_shared.jobs import (
+    BulkPeopleDeletionJobPayload,
     JobPayload,
     LifecycleDeletionJobPayload,
     OutboxPayload,
@@ -34,11 +35,12 @@ class CentralQueue:
         self.session = session
 
     def enqueue_processing(self, **values: Any) -> ProcessingJob:
-        payload_model = (
-            LifecycleDeletionJobPayload
-            if values.get("job_type") in {"lifecycle.delete_event", "lifecycle.delete_person"}
-            else JobPayload
-        )
+        payload_models = {
+            "lifecycle.delete_event": LifecycleDeletionJobPayload,
+            "lifecycle.delete_person": LifecycleDeletionJobPayload,
+            "lifecycle.delete_people_bulk": BulkPeopleDeletionJobPayload,
+        }
+        payload_model = payload_models.get(values.get("job_type"), JobPayload)
         values["payload"] = payload_model.model_validate(values.get("payload", {})).model_dump(
             mode="json"
         )

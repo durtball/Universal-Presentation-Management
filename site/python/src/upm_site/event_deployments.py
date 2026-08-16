@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import (
@@ -595,4 +595,28 @@ def apply_event_deletion(session: Session, event: SyncEventEnvelope) -> str:
     ]
     for statement in statements:
         session.execute(text(statement), params)
+    return "deleted"
+
+
+def apply_people_deletion(session: Session, event: SyncEventEnvelope) -> str:
+    """Remove projected relationships for Central-deleted permanent identities."""
+    raw_ids = event.payload.get("person_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ValueError("person deletion requires a nonempty person_ids list")
+    person_ids = [UUID(str(value)) for value in raw_ids]
+    participation_ids = select(EventParticipation.event_participation_id).where(
+        EventParticipation.person_id.in_(person_ids)
+    )
+    session.execute(
+        delete(SessionParticipant).where(
+            SessionParticipant.event_participation_id.in_(participation_ids)
+        )
+    )
+    session.execute(
+        delete(PresentationPresenter).where(
+            PresentationPresenter.event_participation_id.in_(participation_ids)
+        )
+    )
+    session.execute(delete(EventParticipation).where(EventParticipation.person_id.in_(person_ids)))
+    session.execute(delete(PersonProjection).where(PersonProjection.person_id.in_(person_ids)))
     return "deleted"

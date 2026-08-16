@@ -40,6 +40,21 @@ class LifecycleDeletionJobPayload(JobPayload):
     data: LifecycleDeletionJobData
 
 
+class BulkPeopleDeletionJobData(BaseModel):
+    """Immutable target snapshot for one bulk permanent-person deletion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    deletion_operation_id: UUID
+    person_ids: Annotated[list[UUID], Field(min_length=1)]
+
+
+class BulkPeopleDeletionJobPayload(JobPayload):
+    """Versioned payload for the Central lifecycle.delete_people_bulk job."""
+
+    data: BulkPeopleDeletionJobData
+
+
 class OutboxPayload(BaseModel):
     """Validated, versioned JSON outbox payload."""
 

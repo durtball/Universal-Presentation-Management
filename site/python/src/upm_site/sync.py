@@ -26,6 +26,7 @@ from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
 from upm_site.event_deployments import (
     apply_event_deletion,
+    apply_people_deletion,
     apply_revocation_event,
     apply_snapshot_event,
 )
@@ -215,6 +216,11 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
     elif event.event_type == "central.event.deleted":
         try:
             apply_event_deletion(session, event)
+        except (KeyError, TypeError, ValueError) as exc:
+            application_error = str(exc)[:2048]
+    elif event.event_type == "central.people.deleted":
+        try:
+            apply_people_deletion(session, event)
         except (KeyError, TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:

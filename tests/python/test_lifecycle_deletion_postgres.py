@@ -15,12 +15,27 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from upm_central.api import create_app
 from upm_central.config import CentralDatabaseSettings
+from upm_central.lifecycle import run_bulk_people_deletion
 from upm_central.persistence.base import CentralBase
-from upm_central.persistence.models import DeletionOperation, Event, Person, ProcessingJob
+from upm_central.persistence.models import (
+    AuditRecord,
+    DeletionOperation,
+    Event,
+    EventDeployment,
+    EventParticipation,
+    MediaObjectReplica,
+    OutboxEvent,
+    Person,
+    PersonIdentityLink,
+    PersonIdentitySignal,
+    ProcessingJob,
+    RetainedPersonHistory,
+    Site,
+)
 from upm_central.persistence.queue import CentralQueue
 from upm_central.worker import execute_processing_job
-from upm_shared.enums import JobStatus
-from upm_shared.jobs import LifecycleDeletionJobPayload
+from upm_shared.enums import EnrollmentState, EventDeploymentStatus, JobStatus, MediaCategory
+from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
 
 CENTRAL_URL = os.getenv("UPM_CENTRAL_DATABASE_URL")
 
@@ -80,7 +95,11 @@ def _claim_and_execute(engine, expected_type: str) -> tuple[UUID, UUID]:
         job = queue.claim_processing(worker_id, set(), timedelta(seconds=30))
         assert job is not None
         assert job.job_type == expected_type
-        payload = LifecycleDeletionJobPayload.model_validate(job.payload)
+        payload = (
+            BulkPeopleDeletionJobPayload.model_validate(job.payload)
+            if expected_type == "lifecycle.delete_people_bulk"
+            else LifecycleDeletionJobPayload.model_validate(job.payload)
+        )
         operation_id = payload.data.deletion_operation_id
         target_id = session.get(DeletionOperation, operation_id).target_id
         assert execute_processing_job(session, queue, job, worker_id)
@@ -173,4 +192,171 @@ def test_queue_rejects_malformed_lifecycle_payload_but_accepts_unrelated_job(
             required_capabilities=[],
         )
         assert job.payload["data"] == {"existing": "payload"}
+    engine.dispose()
+
+
+def test_bulk_people_deletion_targets_snapshot_and_preserves_audit(
+    lifecycle_database: str,
+) -> None:
+    settings = _settings(lifecycle_database)
+    headers = {"X-UPM-Admin-Token": settings.admin_token}
+    engine = create_engine(lifecycle_database)
+    with Session(engine) as session, session.begin():
+        people = [
+            Person(display_name=f"Bulk Person {number}", normalized_name=f"bulk person {number}")
+            for number in range(3)
+        ]
+        session.add_all(people)
+        session.flush()
+        person_ids = {person.person_id for person in people}
+        session.add(
+            PersonIdentitySignal(
+                person_id=people[0].person_id,
+                signal_type="email",
+                value="bulk@example.test",
+                normalized_value="bulk@example.test",
+            )
+        )
+        site = Site(
+            display_name="Offline Site",
+            enabled=True,
+            enrollment_state=EnrollmentState.ACTIVE,
+        )
+        event = Event(name="Projected Event", timezone="UTC")
+        session.add_all([site, event])
+        session.flush()
+        session.add(
+            EventParticipation(
+                event_id=event.event_id,
+                person_id=people[0].person_id,
+                display_name=people[0].display_name,
+            )
+        )
+        session.add(
+            EventDeployment(
+                event_id=event.event_id,
+                site_id=site.site_id,
+                status=EventDeploymentStatus.DRAFT,
+                desired_revision=0,
+                acknowledged_revision=0,
+            )
+        )
+        shared_media_id = uuid4()
+        session.add(
+            MediaObjectReplica(
+                media_object_id=shared_media_id,
+                authoritative_site_id=site.site_id,
+                event_id=None,
+                category=MediaCategory.OPEN_FILE,
+                object_key="shared/unrelated.pdf",
+                source_revision=1,
+            )
+        )
+        event_id = event.event_id
+        session.add(
+            PersonIdentityLink(
+                person_id=people[0].person_id,
+                linked_person_id=people[1].person_id,
+                link_type="related",
+            )
+        )
+        session.add(
+            RetainedPersonHistory(
+                person_id=people[2].person_id,
+                source_event_id=uuid4(),
+                event_name="Retained Event",
+                participation_summary={"role": "presenter"},
+            )
+        )
+    with TestClient(create_app(settings)) as client:
+        assert (
+            client.post(
+                "/api/v1/admin/people-bulk-deletion",
+                json={"confirmation": "delete all"},
+            ).status_code
+            == 401
+        )
+        preview = client.get("/api/v1/admin/people-bulk-deletion/impact", headers=headers)
+        assert preview.status_code == 200
+        assert preview.json()["impact"]["people"] == 3
+        assert (
+            client.post(
+                "/api/v1/admin/people-bulk-deletion",
+                headers=headers,
+                json={"confirmation": "DELETE ALL"},
+            ).status_code
+            == 422
+        )
+        response = client.post(
+            "/api/v1/admin/people-bulk-deletion",
+            headers=headers,
+            json={"confirmation": "delete all"},
+        )
+        assert response.status_code == 202
+        operation_id = UUID(response.json()["deletion_operation_id"])
+        # Repeated submission resolves to the same active durable operation.
+        repeated = client.post(
+            "/api/v1/admin/people-bulk-deletion",
+            headers=headers,
+            json={"confirmation": "delete all"},
+        )
+        assert UUID(repeated.json()["deletion_operation_id"]) == operation_id
+
+    with Session(engine) as session:
+        jobs = session.scalars(
+            select(ProcessingJob).where(ProcessingJob.job_type == "lifecycle.delete_people_bulk")
+        ).all()
+        assert len(jobs) == 1
+        payload = BulkPeopleDeletionJobPayload.model_validate(jobs[0].payload)
+        assert set(payload.data.person_ids) == person_ids
+    executed_operation_id, _ = _claim_and_execute(engine, "lifecycle.delete_people_bulk")
+    assert executed_operation_id == operation_id
+    with Session(engine) as session:
+        assert session.scalars(select(Person)).all() == []
+        assert session.scalars(select(PersonIdentitySignal)).all() == []
+        assert session.scalars(select(PersonIdentityLink)).all() == []
+        assert session.scalars(select(RetainedPersonHistory)).all() == []
+        assert session.get(Event, event_id) is not None
+        assert session.get(MediaObjectReplica, shared_media_id) is not None
+        assert session.scalars(select(EventParticipation)).all() == []
+        # No Site acknowledgement is needed: the ADR-0007 update remains durable for offline poll.
+        assert (
+            session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type == "central.event_deployment.requested"
+                )
+            )
+            is not None
+        )
+        assert (
+            session.scalar(
+                select(OutboxEvent).where(OutboxEvent.event_type == "central.people.deleted")
+            )
+            is not None
+        )
+        operation = session.get(DeletionOperation, operation_id)
+        assert operation.status == "completed"
+        run_bulk_people_deletion(session, operation, list(person_ids))
+        assert operation.attempt_count == 1
+        assert (
+            session.scalar(
+                select(AuditRecord).where(AuditRecord.action == "central.people_bulk.deleted")
+            )
+            is not None
+        )
+    with TestClient(create_app(settings)) as client:
+        assert (
+            client.get("/api/v1/admin/people-bulk-deletion/impact", headers=headers).json()[
+                "impact"
+            ]["people"]
+            == 0
+        )
+        assert (
+            client.post(
+                "/api/v1/admin/people-bulk-deletion",
+                headers=headers,
+                json={"confirmation": "delete all"},
+            ).status_code
+            == 409
+        )
     engine.dispose()

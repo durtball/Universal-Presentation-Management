@@ -40,10 +40,14 @@ from upm_central.persistence.models import (
     Session as ProgramSession,
 )
 from upm_central.persistence.queue import CentralQueue
+from upm_central.program import touch_event_program
 from upm_central.sync import next_sequence
 from upm_shared.enums import JobPriority, SourceSystem
+from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import (
     PRIORITY_VALUES,
+    BulkPeopleDeletionJobData,
+    BulkPeopleDeletionJobPayload,
     LifecycleDeletionJobData,
     LifecycleDeletionJobPayload,
     OutboxPayload,
@@ -116,6 +120,108 @@ def person_deletion_impact(session: Session, person_id: UUID) -> dict[str, int]:
         ),
         "media_files": 0,
     }
+
+
+def bulk_people_impact(session: Session) -> dict[str, int]:
+    """Return an aggregate preview for every currently active permanent identity."""
+    person_ids = select(Person.person_id).where(Person.deleted_at.is_(None))
+    participation_ids = select(EventParticipation.event_participation_id).where(
+        EventParticipation.person_id.in_(person_ids)
+    )
+    return {
+        "people": _count(session, Person, Person.deleted_at.is_(None)),
+        "event_participations": _count(
+            session, EventParticipation, EventParticipation.person_id.in_(person_ids)
+        ),
+        "session_participations": _count(
+            session,
+            SessionParticipant,
+            SessionParticipant.event_participation_id.in_(participation_ids),
+        ),
+        "presentation_relationships": _count(
+            session,
+            PresentationPresenter,
+            PresentationPresenter.event_participation_id.in_(participation_ids),
+        ),
+        "retained_history": _count(
+            session, RetainedPersonHistory, RetainedPersonHistory.person_id.in_(person_ids)
+        ),
+        "identity_signals": _count(
+            session, PersonIdentitySignal, PersonIdentitySignal.person_id.in_(person_ids)
+        ),
+        "identity_links": _count(
+            session,
+            PersonIdentityLink,
+            (PersonIdentityLink.person_id.in_(person_ids))
+            | (PersonIdentityLink.linked_person_id.in_(person_ids)),
+        ),
+        "media_files": 0,
+    }
+
+
+def request_bulk_people_deletion(
+    session: Session, *, confirmation: str, actor: str
+) -> DeletionOperation:
+    if confirmation != "delete all":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="type delete all exactly to confirm",
+        )
+    existing = session.scalar(
+        select(DeletionOperation)
+        .where(
+            DeletionOperation.target_type == "people_bulk",
+            DeletionOperation.status.in_(["pending", "running", "retry_wait"]),
+        )
+        .order_by(DeletionOperation.created_at.desc())
+        .limit(1)
+    )
+    if existing is not None:
+        return existing
+    person_ids = list(
+        session.scalars(
+            select(Person.person_id).where(Person.deleted_at.is_(None)).order_by(Person.person_id)
+        )
+    )
+    if not person_ids:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="there are no people to delete")
+    operation = DeletionOperation(
+        target_type="people_bulk",
+        target_id=new_uuid7(),
+        target_display_name="All Permanent People",
+        initiated_by=actor,
+        dependency_counts=bulk_people_impact(session),
+        site_statuses=[],
+    )
+    session.add(operation)
+    session.flush()
+    CentralQueue(session).enqueue_processing(
+        job_type="lifecycle.delete_people_bulk",
+        payload=BulkPeopleDeletionJobPayload(
+            data=BulkPeopleDeletionJobData(
+                deletion_operation_id=operation.deletion_operation_id,
+                person_ids=person_ids,
+            )
+        ),
+        idempotency_key=str(operation.deletion_operation_id),
+        max_attempts=10,
+        priority=PRIORITY_VALUES[JobPriority.HIGH],
+        required_capabilities=[],
+    )
+    session.add(
+        AuditRecord(
+            actor_id=actor,
+            action="central.people_bulk.deletion_requested",
+            target_type="people_bulk",
+            target_id=operation.target_id,
+            before_context={"person_count": len(person_ids)},
+            after_context={
+                "operation_id": str(operation.deletion_operation_id),
+                "counts": operation.dependency_counts,
+            },
+        )
+    )
+    return operation
 
 
 def request_deletion(
@@ -199,7 +305,17 @@ def run_deletion(session: Session, operation: DeletionOperation) -> None:
     if operation.target_type == "event":
         _delete_event(session, operation)
     else:
+        affected_event_ids = set(
+            session.scalars(
+                select(EventParticipation.event_id).where(
+                    EventParticipation.person_id == operation.target_id
+                )
+            )
+        )
         _delete_person(session, operation)
+        operation.site_statuses = _publish_people_deletion(
+            session, operation, [operation.target_id], affected_event_ids
+        )
     operation.status = "completed"
     operation.stage = "completed"
     operation.completed_at = utc_now()
@@ -219,6 +335,97 @@ def run_deletion(session: Session, operation: DeletionOperation) -> None:
             },
         )
     )
+
+
+def run_bulk_people_deletion(
+    session: Session, operation: DeletionOperation, person_ids: list[UUID]
+) -> None:
+    """Delete the request-time identity snapshot and republish affected Event projections."""
+    if operation.status == "completed":
+        return
+    operation.status = "running"
+    operation.stage = "central_cleanup"
+    operation.attempt_count += 1
+    affected_event_ids = set(
+        session.scalars(
+            select(EventParticipation.event_id).where(EventParticipation.person_id.in_(person_ids))
+        )
+    )
+    deleted_count = 0
+    for person_id in person_ids:
+        person = session.get(Person, person_id)
+        if person is None:
+            continue
+        _delete_person(session, operation, person=person)
+        deleted_count += 1
+    session.flush()
+    operation.stage = "publishing_site_updates"
+    operation.site_statuses = _publish_people_deletion(
+        session, operation, person_ids, affected_event_ids
+    )
+    deployment_ids: list[str] = []
+    for event_id in sorted(affected_event_ids, key=str):
+        event = session.get(Event, event_id)
+        if event is not None:
+            deployment_ids.extend(str(value) for value in touch_event_program(session, event))
+    operation.media_results = {"eligible_removed": 0, "shared_preserved": 0}
+    operation.status = "completed"
+    operation.stage = "completed"
+    operation.completed_at = utc_now()
+    session.add(
+        AuditRecord(
+            actor_id=operation.initiated_by,
+            action="central.people_bulk.deleted",
+            target_type="people_bulk",
+            target_id=operation.target_id,
+            before_context={"person_count": len(person_ids)},
+            after_context={
+                "operation_id": str(operation.deletion_operation_id),
+                "requested_count": len(person_ids),
+                "deleted_count": deleted_count,
+                "counts": operation.dependency_counts,
+                "deployments_published": deployment_ids,
+                "state": "completed",
+            },
+        )
+    )
+
+
+def _publish_people_deletion(
+    session: Session,
+    operation: DeletionOperation,
+    person_ids: list[UUID],
+    affected_event_ids: set[UUID],
+) -> list[dict[str, object]]:
+    """Publish one ordered tombstone per Site through the existing protocol-v1 outbox."""
+    if not affected_event_ids:
+        return []
+    site_ids = set(
+        session.scalars(
+            select(EventDeployment.site_id).where(EventDeployment.event_id.in_(affected_event_ids))
+        )
+    )
+    statuses: list[dict[str, object]] = []
+    for site_id in sorted(site_ids, key=str):
+        CentralQueue(session).enqueue_outbox(
+            event_type="central.people.deleted",
+            aggregate_type="people_bulk",
+            aggregate_id=operation.target_id,
+            owning_site_id=site_id,
+            event_id=None,
+            source_sequence=next_sequence(session, site_id),
+            idempotency_key=f"people-delete:{operation.deletion_operation_id}:{site_id}",
+            payload=OutboxPayload(
+                source_system=SourceSystem.CENTRAL,
+                schema_version=1,
+                data={
+                    "deletion_operation_id": str(operation.deletion_operation_id),
+                    "person_ids": [str(person_id) for person_id in person_ids],
+                },
+            ),
+        )
+        statuses.append({"site_id": str(site_id), "status": "pending"})
+    return statuses
 
 
 def _delete_event(session: Session, op: DeletionOperation) -> None:
@@ -375,8 +582,10 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
     session.delete(event)
 
 
-def _delete_person(session: Session, op: DeletionOperation) -> None:
-    person = session.get(Person, op.target_id)
+def _delete_person(
+    session: Session, op: DeletionOperation, *, person: Person | None = None
+) -> None:
+    person = person or session.get(Person, op.target_id)
     if person is None:
         return
     epids = select(EventParticipation.event_participation_id).where(
@@ -420,4 +629,5 @@ def _delete_person(session: Session, op: DeletionOperation) -> None:
         .values(selected_person_id=None)
     )
     session.delete(person)
-    op.media_results = {"eligible_removed": 0, "shared_preserved": 0}
+    if op.target_type == "person":
+        op.media_results = {"eligible_removed": 0, "shared_preserved": 0}

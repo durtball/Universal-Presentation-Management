@@ -9,7 +9,13 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from upm_central.lifecycle import event_impact, person_deletion_impact, request_deletion
+from upm_central.lifecycle import (
+    bulk_people_impact,
+    event_impact,
+    person_deletion_impact,
+    request_bulk_people_deletion,
+    request_deletion,
+)
 from upm_central.persistence.models import DeletionOperation, Event, Person
 
 
@@ -41,6 +47,33 @@ def register_lifecycle_routes(
 ) -> None:
     admin = [Depends(require_admin)]
     Db = Annotated[Session, Depends(db)]
+
+    @app.get("/api/v1/admin/people-bulk-deletion/impact", dependencies=admin)
+    def bulk_people_preview(session: Db):
+        return {
+            "confirmation": "delete all",
+            "impact": bulk_people_impact(session),
+        }
+
+    @app.post("/api/v1/admin/people-bulk-deletion", status_code=202, dependencies=admin)
+    def delete_all_people(payload: Confirmation, request: Request, session: Db):
+        return _view(
+            request_bulk_people_deletion(
+                session,
+                confirmation=payload.confirmation,
+                actor=getattr(request.state, "admin_actor", "central-admin"),
+            )
+        )
+
+    @app.get("/api/v1/admin/people-bulk-deletion/current", dependencies=admin)
+    def current_bulk_people_deletion(session: Db):
+        item = session.scalar(
+            select(DeletionOperation)
+            .where(DeletionOperation.target_type == "people_bulk")
+            .order_by(DeletionOperation.created_at.desc())
+            .limit(1)
+        )
+        return _view(item) if item is not None else None
 
     @app.get("/api/v1/admin/events/{event_id}/deletion-impact", dependencies=admin)
     def event_preview(event_id: UUID, session: Db):

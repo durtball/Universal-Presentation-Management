@@ -13,12 +13,13 @@ from threading import Event
 from sqlalchemy import text
 
 from upm_central.config import CentralDatabaseSettings
-from upm_central.lifecycle import run_deletion
+from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import DeletionOperation
 from upm_central.persistence.queue import CentralQueue
+from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
-from upm_shared.jobs import LifecycleDeletionJobPayload
+from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
 
 
 def log(event: str, **context: object) -> None:
@@ -28,6 +29,21 @@ def log(event: str, **context: object) -> None:
 def execute_processing_job(session, queue: CentralQueue, work, worker_id: str) -> bool:
     """Dispatch one claimed Central processing job; return false when it was failed."""
     if work.job_type not in {"lifecycle.delete_event", "lifecycle.delete_person"}:
+        if work.job_type != "lifecycle.delete_people_bulk":
+            return True
+        payload = BulkPeopleDeletionJobPayload.model_validate(work.payload)
+        operation = session.get(DeletionOperation, payload.data.deletion_operation_id)
+        if operation is None:
+            queue.fail(
+                work,
+                worker_id,
+                error_code="deletion_missing",
+                message="bulk deletion operation does not exist",
+                retryable=False,
+                base_delay_seconds=1,
+            )
+            return False
+        run_bulk_people_deletion(session, operation, payload.data.person_ids)
         return True
     payload = LifecycleDeletionJobPayload.model_validate(work.payload)
     operation = session.get(DeletionOperation, payload.data.deletion_operation_id)
@@ -43,6 +59,14 @@ def execute_processing_job(session, queue: CentralQueue, work, worker_id: str) -
         return False
     run_deletion(session, operation)
     return True
+
+
+def processing_deletion_operation_id(work):
+    if work.job_type == "lifecycle.delete_people_bulk":
+        return BulkPeopleDeletionJobPayload.model_validate(work.payload).data.deletion_operation_id
+    if work.job_type in {"lifecycle.delete_event", "lifecycle.delete_person"}:
+        return LifecycleDeletionJobPayload.model_validate(work.payload).data.deletion_operation_id
+    return None
 
 
 def run(*, sync: bool = False, once: bool = False) -> int:
@@ -103,10 +127,43 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if kind == "processing" and not execute_processing_job(
-                        session, queue, work, worker_id
-                    ):
-                        continue
+                    if kind == "processing":
+                        try:
+                            with session.begin_nested():
+                                executed = execute_processing_job(session, queue, work, worker_id)
+                        except Exception as exc:
+                            operation_id = processing_deletion_operation_id(work)
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="deletion_execution_failed",
+                                message=str(exc),
+                                retryable=True,
+                                base_delay_seconds=5,
+                            )
+                            if operation_id is not None:
+                                operation = session.get(DeletionOperation, operation_id)
+                                if operation is not None:
+                                    operation.status = (
+                                        "failed"
+                                        if work.status in {JobStatus.FAILED, JobStatus.EXHAUSTED}
+                                        else "retry_wait"
+                                    )
+                                    operation.stage = operation.status
+                                    operation.last_error = (
+                                        "Deletion processing failed and will be retried."
+                                        if operation.status == "retry_wait"
+                                        else "Deletion processing failed after all retry attempts."
+                                    )
+                            log(
+                                "deletion_execution_failed",
+                                worker_id=worker_id,
+                                work_id=work_id,
+                                error_type=type(exc).__name__,
+                            )
+                            continue
+                        if not executed:
+                            continue
                     queue.complete(work, worker_id)
                     log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if once:

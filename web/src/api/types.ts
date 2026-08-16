@@ -43,13 +43,13 @@ export interface PersonRecord extends Row {
   professional_title?: string;
 }
 export interface DeletionPreview extends Row {
-  target_id: string;
+  target_id?: string;
   confirmation: string;
   impact: Record<string, number>;
 }
 export interface DeletionOperation extends Row {
   deletion_operation_id: string;
-  target_type: "event" | "person";
+  target_type: "event" | "person" | "people_bulk";
   target_display_name: string;
   status: string;
   stage: string;
