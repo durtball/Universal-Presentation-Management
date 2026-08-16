@@ -56,6 +56,14 @@
 - Central models permanent Person separately from EventParticipation, Session, SessionParticipant, Presentation, PresentationSession, PresentationPresenter, PresentationVersion, PresentationAsset, and ExternalIdentifier.
 - API services support people, protected deletion impact/delete, participants, sessions, presenters, presentations, explicit relationships, external identifiers, and concurrency revisions.
 - CSV/XLSX imports preserve source bytes/hash, raw/normalized/corrected rows, issues, identity evidence, decisions, candidates, counts, and entity lineage.
+- Row-oriented program imports reconcile repeated session identifiers into one Session, allowing
+  separate presenter rows and multi-presenter sessions without false duplicate-session errors.
+  Wide session/presentation rows can create or reuse reviewed presenter identities even when email
+  is absent; name-only candidates still require review. Common Session, Presenter, Presentation,
+  and presentation-filename headers feed the established identity and expected-media metadata paths.
+- Import review reports unique rooms, unique sessions, and deduplicated presenter/session links in
+  addition to row, identity, warning, and error counts, so repeated roster rows do not inflate the
+  materialization preview.
 - Reconciliation uses explicit UUID, unique external identifier, and normalized email evidence; name-only evidence requires review. Commit is transactional and guarded against stale program/person revisions.
 - Central browser administration supports Event creation, functional upload/review/reconciliation/commit, relationship lists, Site enrollment approval, deployment, Site room mapping, and useful failure states.
 - Central Event and permanent Person administration provide lifecycle deletion previews, exact-name

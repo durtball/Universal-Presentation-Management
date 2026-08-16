@@ -80,6 +80,13 @@ COLUMN_ALIASES = {
     "presenter": "display_name",
     "presenter_name": "display_name",
     "speaker_email": "presenter_email",
+    "speaker_id": "presenter_external_id",
+    "presenter_id": "presenter_external_id",
+    "session_id": "session_external_id",
+    "presentation_id": "presentation_external_id",
+    "file": "presentation_filename",
+    "filename": "presentation_filename",
+    "presentation_file": "presentation_filename",
 }
 
 
@@ -145,6 +152,15 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
         result["email"] = result["presenter_email"]
     if result.get("email"):
         result["normalized_email"] = normalize_text(str(result["email"]))
+    # Common ID headers feed the existing deterministic code/external-identifier
+    # paths rather than introducing another identity mechanism.
+    if result.get("session_external_id") and not result.get("session_code"):
+        result["session_code"] = result["session_external_id"]
+    if result.get("presentation_external_id") and not result.get("presentation_code"):
+        result["presentation_code"] = result["presentation_external_id"]
+    if result.get("presenter_external_id") and not result.get("external_id"):
+        result["external_id"] = result["presenter_external_id"]
+        result["external_namespace"] = "presenter"
     display = (
         result.get("display_name")
         or " ".join(str(result.get(key) or "") for key in ("given_name", "family_name")).strip()
@@ -372,9 +388,6 @@ def create_batch(
     )
     session.add(batch)
     session.flush()
-    seen_session_codes: set[str] = set()
-    seen_presentation_codes: set[str] = set()
-    seen_external_ids: set[tuple[str, str]] = set()
     normalized_rows = [_normalized(raw) for raw in parsed]
     imported_emails = {
         email
@@ -425,36 +438,8 @@ def create_batch(
                     message,
                 )
             )
-        code_sets = []
-        if row.entity_type == ImportEntityType.SESSION:
-            code_sets.append(("session_code", seen_session_codes, "duplicate_session_code"))
-        if row.entity_type == ImportEntityType.PRESENTATION:
-            code_sets.append(
-                ("presentation_code", seen_presentation_codes, "duplicate_presentation_code")
-            )
-        for field, seen, issue_code in code_sets:
-            value = normalize_text(str(values.get(field) or ""))
-            if value and value in seen:
-                row.issues.append(
-                    _issue(row, ValidationSeverity.ERROR, issue_code, f"Duplicate {field}", field)
-                )
-            elif value:
-                seen.add(value)
-        if values.get("external_namespace") and values.get("external_id"):
-            key = (
-                normalize_text(str(values["external_namespace"])) or "",
-                normalize_text(str(values["external_id"])) or "",
-            )
-            if key in seen_external_ids:
-                row.issues.append(
-                    _issue(
-                        row,
-                        ValidationSeverity.ERROR,
-                        "duplicate_external_id",
-                        "Duplicate external identifier in import",
-                    )
-                )
-            seen_external_ids.add(key)
+        # Repeated session/presentation codes are a normal representation of
+        # multi-presenter relationships. Commit reconciles them to stable entities.
         if row.entity_type in {ImportEntityType.PERSON, ImportEntityType.PARTICIPANT}:
             if not values.get("display_name"):
                 row.issues.append(
@@ -524,7 +509,7 @@ def create_batch(
                 )
             )
         if row.entity_type in {ImportEntityType.SESSION, ImportEntityType.PRESENTATION}:
-            if _presenter_emails(values) and values.get("display_name"):
+            if values.get("display_name"):
                 _match_person(session, row, values)
                 if row.match_outcome in {
                     IdentityMatchOutcome.AMBIGUOUS,
@@ -710,6 +695,107 @@ def _presenter_emails(values: dict[str, object]) -> list[str]:
         for item in str(supplied).replace(";", ",").split(",")
         if (email := normalize_email(item))
     ]
+
+
+def _resolved_row_participant(
+    session: Session,
+    event: Event,
+    row: ImportRow,
+    values: dict[str, object],
+    actor: str,
+) -> EventParticipation | None:
+    """Resolve a presenter on a wide session/presentation row without requiring email.
+
+    Identity review has already happened in staging.  This deliberately consumes only
+    an authoritative/reconciled Person UUID; a name by itself is never used as a key.
+    """
+    person_id = row.resolved_person_id or row.proposed_person_id
+    if person_id is None:
+        if not values.get("display_name") or row.match_outcome not in {
+            IdentityMatchOutcome.NO_MATCH,
+            None,
+        }:
+            return None
+        identifier = None
+        if values.get("external_namespace") and values.get("external_id"):
+            identifier = session.scalar(
+                select(ExternalIdentifier).where(
+                    ExternalIdentifier.namespace
+                    == normalize_text(str(values["external_namespace"])),
+                    ExternalIdentifier.normalized_external_id
+                    == normalize_text(str(values["external_id"])),
+                    ExternalIdentifier.entity_type == ExternalEntityType.PERSON,
+                )
+            )
+        person = session.get(Person, identifier.entity_id) if identifier else None
+        if person is None:
+            person = _person_for_row(session, row, values, actor)
+        if person is None:
+            return None
+        person_id = person.person_id
+    person = session.get(Person, person_id)
+    if person is None or person.deleted_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="resolved presenter no longer exists")
+    participant = session.scalar(
+        select(EventParticipation).where(
+            EventParticipation.event_id == event.event_id,
+            EventParticipation.person_id == person.person_id,
+        )
+    )
+    if participant is None:
+        participant = EventParticipation(
+            event_id=event.event_id,
+            person_id=person.person_id,
+            professional_title=values.get("professional_title") or None,
+            organization=values.get("organization") or None,
+            participant_status=ParticipantStatus.ACTIVE,
+            is_presenter=True,
+            source="import",
+            source_metadata={"import_batch_id": str(row.import_batch_id)},
+        )
+        session.add(participant)
+        session.flush()
+        audit(
+            session,
+            action="central.event_participant.created",
+            target_type="event_participation",
+            target_id=participant.event_participation_id,
+            event_id=event.event_id,
+            after={"person_id": str(person.person_id)},
+            actor=actor,
+        )
+    participant.is_presenter = True
+    if values.get("external_namespace") and values.get("external_id"):
+        external_identifier(
+            session,
+            entity_type=ExternalEntityType.PERSON,
+            entity_id=person.person_id,
+            namespace=str(values["external_namespace"]),
+            value=str(values["external_id"]),
+            event_id=None,
+            source="import",
+        )
+    return participant
+
+
+def _wide_row_participants(
+    session: Session,
+    event: Event,
+    row: ImportRow,
+    values: dict[str, object],
+    actor: str,
+) -> list[EventParticipation]:
+    participants = [
+        _ensure_wide_row_participant(session, event, row, values, email, actor)
+        for email in _presenter_emails(values)
+    ]
+    if not participants:
+        resolved = _resolved_row_participant(session, event, row, values, actor)
+        if resolved is not None:
+            participants.append(resolved)
+    # Delimited email columns can repeat the same address. Preserve source order but
+    # never propose duplicate relationship rows.
+    return list(dict.fromkeys(participants))
 
 
 def _participant_by_email(
@@ -949,10 +1035,9 @@ def commit_batch(
                 session.flush()
                 participant_ids: list[str] = []
                 person_ids: list[str] = []
-                for order, email in enumerate(_presenter_emails(values)):
-                    participant = _ensure_wide_row_participant(
-                        session, event, row, values, email, actor
-                    )
+                for order, participant in enumerate(
+                    _wide_row_participants(session, event, row, values, actor)
+                ):
                     participant_ids.append(str(participant.event_participation_id))
                     person_ids.append(str(participant.person_id))
                     if (
@@ -1018,6 +1103,13 @@ def commit_batch(
                 else:
                     item.title = title
                     item.revision += 1
+                expected_filename = str(values.get("presentation_filename") or "").strip()
+                item.source_metadata = {
+                    **(item.source_metadata or {}),
+                    "import_batch_id": str(batch.import_batch_id),
+                    "expected_filename": expected_filename or None,
+                    "presentation_external_id": values.get("presentation_external_id") or None,
+                }
                 item.scheduled_at = (
                     datetime.fromisoformat(str(values["scheduled_at"]))
                     if values.get("scheduled_at")
@@ -1091,10 +1183,9 @@ def commit_batch(
                         )
                 participant_ids = []
                 person_ids = []
-                for order, email in enumerate(_presenter_emails(values)):
-                    participant = _ensure_wide_row_participant(
-                        session, event, row, values, email, actor
-                    )
+                for order, participant in enumerate(
+                    _wide_row_participants(session, event, row, values, actor)
+                ):
                     participant_ids.append(str(participant.event_participation_id))
                     person_ids.append(str(participant.person_id))
                     if (

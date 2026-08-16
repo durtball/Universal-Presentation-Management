@@ -1060,8 +1060,54 @@ def register_program_routes(
         result["source_headers"] = headers
         result["detected_mapping"] = detect_columns(headers)
         result["sample_rows"] = [row.raw_values for row in rows[:5]]
+        unique_rooms = {
+            normalize_text(str(row.normalized_values.get("location_name") or ""))
+            for row in rows
+            if row.normalized_values.get("location_name")
+        }
+        unique_sessions = {
+            normalize_text(
+                str(
+                    row.normalized_values.get("session_external_id")
+                    or row.normalized_values.get("session_code")
+                    or row.normalized_values.get("session_title")
+                    or row.normalized_values.get("title")
+                    or ""
+                )
+            )
+            for row in rows
+            if row.entity_type == ImportEntityType.SESSION
+            or row.normalized_values.get("session_title")
+        }
+        presenter_session_links = {
+            (
+                normalize_text(
+                    str(
+                        row.normalized_values.get("session_external_id")
+                        or row.normalized_values.get("session_code")
+                        or row.normalized_values.get("session_title")
+                        or row.normalized_values.get("title")
+                        or ""
+                    )
+                ),
+                str(row.proposed_person_id or row.resolved_person_id or "")
+                or normalize_text(str(row.normalized_values.get("email") or ""))
+                or f"unresolved-row-{row.source_row_number}",
+            )
+            for row in rows
+            if (
+                row.entity_type == ImportEntityType.SESSION
+                or row.normalized_values.get("session_title")
+            )
+            and (
+                row.normalized_values.get("display_name")
+                or row.normalized_values.get("presenter_email")
+                or row.normalized_values.get("presenter_emails")
+            )
+        }
         result["preview_counts"] = {
             "source_rows": len(rows),
+            "rooms": len(unique_rooms - {None}),
             "people_or_presenters": sum(
                 row.entity_type in {ImportEntityType.PERSON, ImportEntityType.PARTICIPANT}
                 or bool(row.normalized_values.get("presenter_email"))
@@ -1069,11 +1115,8 @@ def register_program_routes(
                 or bool(row.normalized_values.get("email"))
                 for row in rows
             ),
-            "sessions": sum(
-                row.entity_type == ImportEntityType.SESSION
-                or bool(row.normalized_values.get("session_title"))
-                for row in rows
-            ),
+            "sessions": len(unique_sessions - {None}),
+            "presenter_session_links": len(presenter_session_links),
             "presentations": sum(row.entity_type == ImportEntityType.PRESENTATION for row in rows),
             "warnings": sum(
                 issue.severity == ValidationSeverity.WARNING for row in rows for issue in row.issues
