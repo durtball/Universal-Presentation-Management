@@ -57,6 +57,8 @@ from upm_shared.enums import (
     SessionStatus,
     ValidationSeverity,
 )
+from upm_shared.identifiers import new_uuid7
+from upm_shared.presentation_media import allocate_presentation_identifier
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
@@ -1244,10 +1246,18 @@ def commit_batch(
                 )
                 created = item is None
                 if item is None:
+                    presentation_id = new_uuid7()
+                    identifier, identifier_source = allocate_presentation_identifier(
+                        str(code) if code else None, "CENTRAL", presentation_id
+                    )
                     item = Presentation(
+                        presentation_id=presentation_id,
                         event_id=event.event_id,
                         title=title,
                         presentation_code=code,
+                        presentation_identifier=identifier,
+                        presentation_identifier_source=identifier_source,
+                        external_presentation_id=code,
                         workflow_status=PresentationWorkflowStatus.EXPECTED,
                         source="import",
                         source_metadata={"import_batch_id": str(batch.import_batch_id)},
@@ -1255,6 +1265,8 @@ def commit_batch(
                     session.add(item)
                 else:
                     item.title = title
+                    if item.external_presentation_id is None and code:
+                        item.external_presentation_id = code
                     item.revision += 1
                 item.scheduled_at = (
                     datetime.fromisoformat(str(values["scheduled_at"]))

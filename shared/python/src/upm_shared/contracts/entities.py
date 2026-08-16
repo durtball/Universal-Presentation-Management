@@ -17,6 +17,7 @@ from upm_shared.enums import (
     MediaAvailability,
     MediaCategory,
     ParticipantStatus,
+    PresentationIdentifierSource,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     SessionStatus,
@@ -121,6 +122,9 @@ class PresentationContract(ContractModel):
     session_id: SessionId | None = None
     title: NonEmptyText
     presentation_code: str | None = Field(default=None, max_length=255)
+    presentation_identifier: str = Field(min_length=1, max_length=128)
+    presentation_identifier_source: PresentationIdentifierSource
+    external_presentation_id: str | None = Field(default=None, max_length=512)
     workflow_status: PresentationWorkflowStatus = PresentationWorkflowStatus.EXPECTED
     processing_status: PresentationProcessingStatus = PresentationProcessingStatus.NOT_STARTED
     metadata: SyncMetadata
@@ -251,6 +255,7 @@ class MediaObjectContract(ContractModel):
     object_key: str = Field(min_length=1, max_length=2048)
     category: MediaCategory
     original_filename: str = Field(min_length=1, max_length=1024)
+    canonical_filename: str | None = Field(default=None, max_length=1024)
     size_bytes: int | None = Field(default=None, ge=0)
     content_hash: str | None = Field(default=None, max_length=255)
     hash_algorithm: str | None = Field(default=None, max_length=32)

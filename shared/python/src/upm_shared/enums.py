@@ -19,6 +19,19 @@ class SyncState(StrEnum):
     FAILED = "failed"
 
 
+class PresentationIdentifierSource(StrEnum):
+    IMPORTED = "imported"
+    GENERATED = "generated"
+
+
+class MediaMatchState(StrEnum):
+    EXACT = "exact"
+    HIGH_CONFIDENCE = "high_confidence"
+    AMBIGUOUS = "ambiguous"
+    UNMATCHED = "unmatched"
+    MANUAL = "manual"
+
+
 class EnrollmentState(StrEnum):
     UNREGISTERED = "unregistered"
     PENDING = "pending"

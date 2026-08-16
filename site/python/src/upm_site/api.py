@@ -53,6 +53,7 @@ from upm_site.persistence.models import (
     SyncCursor,
     utc_now,
 )
+from upm_site.presentation_media_api import register_presentation_media_routes
 from upm_site.program_api import register_program_routes
 from upm_site.sync import (
     apply_central_event,
@@ -79,6 +80,7 @@ class MediaResponse(BaseModel):
     object_key: str
     category: MediaCategory
     original_filename: str
+    canonical_filename: str | None
     mime_type: str | None
     size_bytes: int | None = Field(ge=0)
     hash_algorithm: str | None
@@ -143,6 +145,7 @@ def _media_response(session: Session, media: MediaObject) -> MediaResponse:
         object_key=media.object_key,
         category=media.category,
         original_filename=media.original_filename,
+        canonical_filename=media.canonical_filename,
         mime_type=media.mime_type,
         size_bytes=media.size_bytes,
         hash_algorithm=media.hash_algorithm,
@@ -509,4 +512,5 @@ pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></bo
 
     register_program_routes(app, get_session)
     register_operations_routes(app, get_session, transaction)
+    register_presentation_media_routes(app, get_session, transaction)
     return app

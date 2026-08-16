@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from upm_shared.enums import (
     ExternalEntityType,
     ParticipantStatus,
+    PresentationIdentifierSource,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     SessionStatus,
@@ -101,6 +102,9 @@ class PresentationSnapshot(DeploymentModel):
     title: Annotated[str, Field(min_length=1, max_length=255)]
     description: str | None = None
     presentation_code: Annotated[str | None, Field(max_length=255)] = None
+    presentation_identifier: Annotated[str | None, Field(max_length=128)] = None
+    presentation_identifier_source: PresentationIdentifierSource | None = None
+    external_presentation_id: Annotated[str | None, Field(max_length=512)] = None
     workflow_status: PresentationWorkflowStatus = PresentationWorkflowStatus.EXPECTED
     processing_status: PresentationProcessingStatus = PresentationProcessingStatus.NOT_STARTED
     scheduled_at: datetime | None = None

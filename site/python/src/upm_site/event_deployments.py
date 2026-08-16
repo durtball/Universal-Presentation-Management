@@ -17,6 +17,7 @@ from upm_shared.contracts.deployments import (
 from upm_shared.contracts.sync import SyncEventEnvelope
 from upm_shared.enums import EventDeploymentStatus, SourceSystem, SyncState
 from upm_shared.jobs import OutboxPayload
+from upm_shared.presentation_media import allocate_presentation_identifier
 from upm_site.persistence.models import (
     Event,
     EventDeploymentProjection,
@@ -345,6 +346,11 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 local.revision = max(local.revision, participant.central_revision)
                 local.sync_state = SyncState.SYNCHRONIZED
     for item in snapshot.presentations:
+        identifier, identifier_source = allocate_presentation_identifier(
+            item.presentation_identifier or item.presentation_code, "SITE", item.presentation_id
+        )
+        if item.presentation_identifier_source is not None:
+            identifier_source = item.presentation_identifier_source
         presentation = session.get(Presentation, item.presentation_id)
         if presentation is None:
             presentation = Presentation(
@@ -354,6 +360,9 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
                 title=item.title,
                 description=item.description,
                 presentation_code=item.presentation_code,
+                presentation_identifier=identifier,
+                presentation_identifier_source=identifier_source,
+                external_presentation_id=item.external_presentation_id or item.presentation_code,
                 workflow_status=item.workflow_status,
                 processing_status=item.processing_status,
                 scheduled_at=item.scheduled_at,
@@ -367,6 +376,13 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             presentation.title = item.title
             presentation.description = item.description
             presentation.presentation_code = item.presentation_code
+            if item.presentation_identifier:
+                presentation.presentation_identifier = identifier
+                presentation.presentation_identifier_source = identifier_source
+            if item.external_presentation_id or item.presentation_code:
+                presentation.external_presentation_id = (
+                    item.external_presentation_id or item.presentation_code
+                )
             presentation.workflow_status = item.workflow_status
             presentation.processing_status = item.processing_status
             presentation.scheduled_at = item.scheduled_at

@@ -42,6 +42,7 @@ from upm_shared.enums import (
     JobStatus,
     MediaCategory,
     ParticipantStatus,
+    PresentationIdentifierSource,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     ReconciliationAction,
@@ -52,6 +53,7 @@ from upm_shared.enums import (
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import PRIORITY_VALUES
+from upm_shared.presentation_media import generate_presentation_identifier
 
 
 def utc_now() -> datetime:
@@ -601,7 +603,15 @@ class Presentation(CentralRecordMixin, CentralBase):
     __table_args__ = (
         enum_check("workflow_status", PresentationWorkflowStatus),
         enum_check("processing_status", PresentationProcessingStatus),
+        enum_check("presentation_identifier_source", PresentationIdentifierSource),
         UniqueConstraint("event_id", "presentation_code"),
+        Index(
+            "uq_central_presentations_event_identifier",
+            "event_id",
+            "presentation_identifier",
+            unique=True,
+        ),
+        Index("ix_central_presentations_external_identifier", "external_presentation_id"),
     )
 
     presentation_id: Mapped[UUID] = mapped_column(
@@ -616,6 +626,15 @@ class Presentation(CentralRecordMixin, CentralBase):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     presentation_code: Mapped[str | None] = mapped_column(String(255))
+    presentation_identifier: Mapped[str] = mapped_column(
+        String(128), default=lambda: generate_presentation_identifier("CENTRAL"), nullable=False
+    )
+    presentation_identifier_source: Mapped[PresentationIdentifierSource] = mapped_column(
+        domain_enum(PresentationIdentifierSource, length=16),
+        default=PresentationIdentifierSource.GENERATED,
+        nullable=False,
+    )
+    external_presentation_id: Mapped[str | None] = mapped_column(String(512))
     workflow_status: Mapped[PresentationWorkflowStatus] = mapped_column(
         domain_enum(PresentationWorkflowStatus, length=24),
         default=PresentationWorkflowStatus.EXPECTED,

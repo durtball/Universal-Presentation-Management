@@ -32,6 +32,14 @@
 - Original metadata is preserved; equal filenames/hashes do not collapse identity; open-file and presentation-linked ingestion remain distinct.
 - Cleanup and reconciliation cover interrupted upload and publication/database failure windows. APIs expose metadata, status, and storage-target health.
 - The Site UI lists target capacity/health and a read-only managed-media catalog with presentation/version links, size/type, availability, ingestion, processing, and checksum state. It does not expose filesystem-browser or mutation actions.
+- Presentation records now carry a stable operator-facing identifier and its imported/generated
+  provenance. Central program creation/import allocates identifiers, ADR-0007 snapshots transport
+  them unchanged, and a disconnected Site can allocate UUID-derived `UPM-{origin}-{token}`
+  identifiers and version UUIDs without contacting Central.
+- Central and Site share deterministic, event-timezone-aware canonical filename, matching, and
+  operational-sort primitives. Site-linked ingestion persists both original and canonical names;
+  Site APIs expose expected/missing media, search, deterministic match preview, local presentation
+  creation, and serialized local version allocation.
 
 ### Central/Site registration and synchronization
 
@@ -91,6 +99,13 @@
 - **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
 - **Transfer execution:** TransferJob persistence exists, but no resumable/chunked protocol, bandwidth controller, sender/receiver handler, or progress UI exists.
+- **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
+  ID matching, Site-local creation/version APIs, and canonical metadata at Site ingestion are
+  implemented foundations. Central durable binary staging/upload, automatic/manual match records,
+  bidirectional binary replication, concurrent revision reconciliation, complete audit/outbox
+  handlers, retry/resume execution, and equivalent Central/Site Event Media workspaces remain
+  incomplete. This milestone must not be represented as production-complete until those paths and
+  running-stack end-to-end verification exist.
 - **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
 - **PDF conversion:** derivative data structures and job primitives exist, but no converter, retry handler, status surface, preview, or room delivery workflow exists.
 - **Storage administration:** health/capacity is visible, but browser create/edit/disable/primary-target configuration and media-placement policy are not implemented.

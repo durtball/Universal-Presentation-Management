@@ -49,6 +49,8 @@ from upm_shared.enums import (
     SessionStatus,
     ValidationSeverity,
 )
+from upm_shared.identifiers import new_uuid7
+from upm_shared.presentation_media import allocate_presentation_identifier
 
 
 class ApiModel(BaseModel):
@@ -237,6 +239,9 @@ def _presentation_view(item: Presentation) -> dict[str, object]:
         "title": item.title,
         "description": item.description,
         "presentation_code": item.presentation_code,
+        "presentation_identifier": item.presentation_identifier,
+        "presentation_identifier_source": item.presentation_identifier_source,
+        "external_presentation_id": item.external_presentation_id,
         "workflow_status": item.workflow_status,
         "processing_status": item.processing_status,
         "scheduled_at": item.scheduled_at,
@@ -747,7 +752,18 @@ def register_program_routes(
         require_aware(payload.scheduled_at, "scheduled_at")
         values = payload.model_dump()
         values["session_id"] = values.pop("preferred_session_id")
-        item = Presentation(event_id=event_id, **values)
+        presentation_id = new_uuid7()
+        identifier, identifier_source = allocate_presentation_identifier(
+            payload.presentation_code, "CENTRAL", presentation_id
+        )
+        item = Presentation(
+            presentation_id=presentation_id,
+            event_id=event_id,
+            presentation_identifier=identifier,
+            presentation_identifier_source=identifier_source,
+            external_presentation_id=payload.presentation_code,
+            **values,
+        )
         session.add(item)
         session.flush()
         if item.session_id:
@@ -791,6 +807,8 @@ def register_program_routes(
         values["session_id"] = values.pop("preferred_session_id")
         for key, value in values.items():
             setattr(item, key, value)
+        if item.external_presentation_id is None and payload.presentation_code:
+            item.external_presentation_id = payload.presentation_code
         item.revision += 1
         audit(
             session,

@@ -19,6 +19,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from upm_shared.enums import AssetKind, JobPriority, MediaAvailability, MediaCategory
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import PRIORITY_VALUES
+from upm_shared.presentation_media import (
+    CanonicalPresentationMetadata,
+    canonical_presentation_filename,
+)
 from upm_site.media.storage import (
     StorageError,
     atomic_finalize,
@@ -31,11 +35,16 @@ from upm_site.media.storage import (
 )
 from upm_site.persistence.models import (
     Event,
+    EventParticipation,
     MediaObject,
+    PersonProjection,
     Presentation,
     PresentationAsset,
+    PresentationPresenter,
     PresentationVersion,
     ProcessingJob,
+    Room,
+    RoomAssignment,
     StorageTarget,
 )
 from upm_site.persistence.queue import SiteQueue
@@ -408,6 +417,72 @@ class MediaIngestionService:
         event_id: UUID | None,
     ) -> UUID | None:
         with self.session_factory.begin() as session:
+            canonical_filename = None
+            if request.presentation_version_id is not None:
+                row = session.execute(
+                    select(PresentationVersion, Presentation, Event)
+                    .join(
+                        Presentation,
+                        Presentation.presentation_id == PresentationVersion.presentation_id,
+                    )
+                    .join(Event, Event.event_id == Presentation.event_id)
+                    .where(
+                        PresentationVersion.presentation_version_id
+                        == request.presentation_version_id
+                    )
+                ).one()
+                version, presentation, event = row
+                program_session = presentation.session
+                room_label = (
+                    session.scalar(
+                        select(Room.label)
+                        .join(RoomAssignment, RoomAssignment.room_id == Room.room_id)
+                        .where(
+                            RoomAssignment.session_id == presentation.session_id,
+                            RoomAssignment.active.is_(True),
+                        )
+                    )
+                    if presentation.session_id
+                    else None
+                )
+                presenter = session.execute(
+                    select(PersonProjection.family_name, PersonProjection.given_name)
+                    .join(
+                        EventParticipation,
+                        EventParticipation.person_id == PersonProjection.person_id,
+                    )
+                    .join(
+                        PresentationPresenter,
+                        PresentationPresenter.event_participation_id
+                        == EventParticipation.event_participation_id,
+                    )
+                    .where(
+                        PresentationPresenter.presentation_id == presentation.presentation_id,
+                        PresentationPresenter.active.is_(True),
+                    )
+                    .order_by(
+                        PresentationPresenter.primary_presenter.desc(),
+                        PresentationPresenter.presenter_order,
+                        PresentationPresenter.presentation_presenter_id,
+                    )
+                    .limit(1)
+                ).one_or_none()
+                canonical_filename = canonical_presentation_filename(
+                    CanonicalPresentationMetadata(
+                        presentation_identifier=presentation.presentation_identifier,
+                        event_timezone=event.timezone,
+                        starts_at=(
+                            presentation.scheduled_at
+                            or (program_session.starts_at if program_session else None)
+                        ),
+                        room_label=room_label,
+                        presenter_family_name=presenter[0] if presenter else None,
+                        presenter_given_name=presenter[1] if presenter else None,
+                        title=presentation.title,
+                        version_number=version.version_number,
+                        original_filename=filename,
+                    )
+                )
             media = MediaObject(
                 media_object_id=media_id,
                 site_id=request.site_id,
@@ -416,6 +491,7 @@ class MediaIngestionService:
                 object_key=object_key,
                 category=request.category,
                 original_filename=filename,
+                canonical_filename=canonical_filename,
                 mime_type=request.client_mime_type,
                 availability=MediaAvailability.STAGING,
                 ingestion_idempotency_key=request.idempotency_key,
