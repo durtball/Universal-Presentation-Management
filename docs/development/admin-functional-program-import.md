@@ -75,6 +75,13 @@ Person/Session/relationship lineage. Repeated presenter identifiers are valid id
 conflicting authoritative values on a repeated program identifier block commit without deleting
 either row. Blank trailing XLSX columns and completely blank rows do not participate in review.
 
+Schedule normalization retains the source Date, Start Time, and End Time cells while interpreting
+their canonical values separately. Native Excel date/time cells, ISO values, US month/day/year
+dates, 12-hour AM/PM times, and 24-hour times converge to ISO date/time values. Only the Event's IANA
+timezone is applied when those local values are combined into the timezone-aware Session schedule;
+Excel values never supply or imply timezone authority. Invalid values remain attached to their
+source row as field-specific blocking validation issues.
+
 ## Room reconciliation
 
 Imported `room`, `room_name` or `location` values remain logical labels on Central sessions. Central

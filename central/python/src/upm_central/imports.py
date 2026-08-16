@@ -4,7 +4,7 @@ import csv
 import hashlib
 import io
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 from zipfile import BadZipFile
@@ -112,15 +112,15 @@ COLUMN_ALIASES = {
     "session": "session_code",
     "presentation": "presentation_code",
     "start": "starts_at",
-    "start_time": "starts_at",
+    "start_time": "start_time",
     "session_start": "starts_at",
     "presentation_start": "starts_at",
-    "starttime": "starts_at",
+    "starttime": "start_time",
     "end": "ends_at",
-    "end_time": "ends_at",
+    "end_time": "end_time",
     "session_end": "ends_at",
     "presentation_end": "ends_at",
-    "endtime": "ends_at",
+    "endtime": "end_time",
     "date": "session_date",
     "session_date": "session_date",
     "presentation_date": "session_date",
@@ -150,7 +150,7 @@ COLUMN_ALIASES = {
 
 
 def _cell(value: object) -> object:
-    if isinstance(value, datetime):
+    if isinstance(value, (date, datetime, time)):
         return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -226,11 +226,6 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
         result["normalized_name"] = normalize_text(str(display))
     if result.get("external_id") and not result.get("external_namespace"):
         result["external_namespace"] = "program_import_presenter"
-    date = result.get("session_date")
-    if date:
-        for source, target in (("starts_at", "starts_at"), ("ends_at", "ends_at")):
-            if result.get(source) and "T" not in str(result[source]):
-                result[target] = f"{date}T{result[source]}"
     return result
 
 
@@ -266,11 +261,92 @@ def _entity(values: dict[str, object]) -> ImportEntityType:
     return ImportEntityType.UNKNOWN
 
 
+def parse_source_date(value: object) -> date:
+    """Interpret a source-local calendar date without assigning a timezone."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    supplied = str(value).strip()
+    if "T" in supplied or " " in supplied:
+        try:
+            return datetime.fromisoformat(supplied).date()
+        except ValueError:
+            pass
+    try:
+        return date.fromisoformat(supplied)
+    except ValueError:
+        pass
+    for pattern in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(supplied, pattern).date()
+        except ValueError:
+            continue
+    raise ValueError(f"invalid source date {supplied!r}")
+
+
+def parse_source_time(value: object) -> time:
+    """Interpret a source-local wall-clock time without assigning a timezone."""
+    if isinstance(value, datetime):
+        return value.time().replace(tzinfo=None)
+    if isinstance(value, time):
+        return value.replace(tzinfo=None)
+    supplied = str(value).strip()
+    if "T" in supplied or " " in supplied and not supplied.upper().endswith(("AM", "PM")):
+        try:
+            return datetime.fromisoformat(supplied).time().replace(tzinfo=None)
+        except ValueError:
+            pass
+    try:
+        parsed = time.fromisoformat(supplied)
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        pass
+    for pattern in ("%I:%M %p", "%I:%M:%S %p"):
+        try:
+            return datetime.strptime(supplied.upper(), pattern).time()
+        except ValueError:
+            continue
+    raise ValueError(f"invalid source time {supplied!r}")
+
+
+def _event_datetime(local_date: date, local_time: time, event: Event) -> datetime:
+    """Apply Event timezone authority to a normalized source-local schedule value."""
+    value = datetime.combine(local_date, local_time)
+    zone = ZoneInfo(event.timezone)
+    first = value.replace(tzinfo=zone, fold=0)
+    second = value.replace(tzinfo=zone, fold=1)
+    if first.utcoffset() != second.utcoffset():
+        raise ValueError("ambiguous or nonexistent local time requires an explicit offset")
+    return first.astimezone(UTC)
+
+
 def _schedule(values: dict[str, object], event: Event) -> tuple[dict[str, object], list[str]]:
     result = dict(values)
     errors: list[str] = []
     parsed: dict[str, datetime] = {}
+    scheduled_date: date | None = None
+    if values.get("session_date") not in (None, ""):
+        try:
+            scheduled_date = parse_source_date(values["session_date"])
+            result["session_date"] = scheduled_date.isoformat()
+        except ValueError as exc:
+            errors.append(f"session_date: {exc}")
+    for source, target in (("start_time", "starts_at"), ("end_time", "ends_at")):
+        raw = values.get(source)
+        if raw in (None, ""):
+            continue
+        try:
+            local_time = parse_source_time(raw)
+            result[source] = local_time.isoformat()
+            if scheduled_date is not None:
+                parsed[target] = _event_datetime(scheduled_date, local_time, event)
+                result[target] = parsed[target].isoformat()
+        except ValueError as exc:
+            errors.append(f"{source}: {exc}")
     for field in ("starts_at", "ends_at", "scheduled_at"):
+        if field in parsed:
+            continue
         raw = values.get(field)
         if not raw:
             continue

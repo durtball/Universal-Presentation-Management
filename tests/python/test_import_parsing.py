@@ -1,12 +1,21 @@
 """Fast import parsing and header-detection regressions."""
 
 import io
+from datetime import date, datetime, time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from openpyxl import Workbook
 
-from upm_central.imports import _normalized, _parse_xlsx, detect_columns
+from upm_central.imports import (
+    _normalized,
+    _parse_xlsx,
+    _schedule,
+    detect_columns,
+    parse_source_date,
+    parse_source_time,
+)
 
 
 def test_invalid_xlsx_is_an_operator_visible_validation_error() -> None:
@@ -109,8 +118,9 @@ def test_production_workbook_preserves_every_populated_row_and_ignores_trailing_
     assert sum(row["session_code"] == "3468947" for row in normalized) == 3
     assert sum(row["external_id"] == "PERSON-1" for row in normalized) == 2
     assert normalized[2]["professional_title"] is None
-    assert normalized[0]["starts_at"] == "2027-04-10T09:00:00"
-    assert normalized[0]["ends_at"] == "2027-04-10T10:00:00"
+    assert normalized[0]["session_date"] == "2027-04-10"
+    assert normalized[0]["start_time"] == "09:00:00"
+    assert normalized[0]["end_time"] == "10:00:00"
 
 
 def test_alias_vocabulary_keeps_specific_titles_dates_and_identity_distinct() -> None:
@@ -136,3 +146,85 @@ def test_alias_vocabulary_keeps_specific_titles_dates_and_identity_distinct() ->
         "Speaker Order": "presenter_order",
         "Presentation Type": "session_format",
     }
+
+
+@pytest.mark.parametrize(
+    ("supplied", "expected"),
+    [
+        ("08/04/2026", "2026-08-04"),
+        ("8/4/2026", "2026-08-04"),
+        ("2026-08-04", "2026-08-04"),
+        (date(2026, 8, 4), "2026-08-04"),
+        (datetime(2026, 8, 4, 16, 15), "2026-08-04"),
+    ],
+)
+def test_source_date_normalization(supplied: object, expected: str) -> None:
+    assert parse_source_date(supplied).isoformat() == expected
+
+
+@pytest.mark.parametrize(
+    ("supplied", "expected"),
+    [
+        ("4:15 PM", "16:15:00"),
+        ("04:15 PM", "16:15:00"),
+        ("11:05 AM", "11:05:00"),
+        ("12:00 AM", "00:00:00"),
+        ("12:00 PM", "12:00:00"),
+        ("16:15", "16:15:00"),
+        ("16:15:00", "16:15:00"),
+        (time(16, 15), "16:15:00"),
+        (datetime(2026, 8, 4, 16, 15), "16:15:00"),
+    ],
+)
+def test_source_time_normalization(supplied: object, expected: str) -> None:
+    assert parse_source_time(supplied).isoformat() == expected
+
+
+def test_production_text_schedule_normalizes_with_event_timezone() -> None:
+    values = _normalized(
+        {
+            "Presentation ID": "3468947",
+            "Presentation Title": "Agents Are Not Tasks",
+            "Date": "08/04/2026",
+            "Start Time": "4:15 PM",
+            "End Time": "4:45 PM",
+            "Room": "Venetian Ballroom F",
+            "PresenterID": "PERSON-1",
+            "First Name": "Diego",
+            "Last Name": "Acosta",
+            "Email": "diego@example.test",
+        }
+    )
+    scheduled, errors = _schedule(values, SimpleNamespace(timezone="America/Los_Angeles"))
+    assert errors == []
+    assert scheduled["session_date"] == "2026-08-04"
+    assert scheduled["start_time"] == "16:15:00"
+    assert scheduled["end_time"] == "16:45:00"
+    assert scheduled["starts_at"] == "2026-08-04T23:15:00+00:00"
+    assert scheduled["ends_at"] == "2026-08-04T23:45:00+00:00"
+
+
+def test_native_excel_schedule_normalizes_like_text() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Date", "Start Time", "End Time"])
+    sheet.append([date(2026, 8, 4), time(16, 15), datetime(2026, 8, 4, 16, 45)])
+    output = io.BytesIO()
+    workbook.save(output)
+    raw = _parse_xlsx(output.getvalue())[0]
+    scheduled, errors = _schedule(_normalized(raw), SimpleNamespace(timezone="UTC"))
+    assert errors == []
+    assert scheduled["session_date"] == "2026-08-04"
+    assert scheduled["start_time"] == "16:15:00"
+    assert scheduled["end_time"] == "16:45:00"
+
+
+def test_invalid_schedule_retains_normalized_row_and_explicit_field_errors() -> None:
+    values = _normalized({"Date": "02/30/2026", "Start Time": "25:99", "End Time": "not a time"})
+    scheduled, errors = _schedule(values, SimpleNamespace(timezone="UTC"))
+    assert scheduled["session_date"] == "02/30/2026"
+    assert scheduled["start_time"] == "25:99"
+    assert scheduled["end_time"] == "not a time"
+    assert any(error.startswith("session_date:") for error in errors)
+    assert any(error.startswith("start_time:") for error in errors)
+    assert any(error.startswith("end_time:") for error in errors)

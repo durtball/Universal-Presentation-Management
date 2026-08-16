@@ -81,6 +81,9 @@ def _xlsx_bytes() -> bytes:
             "Presentation Title",
             "Presentation Code",
             "Room",
+            "Date",
+            "Start Time",
+            "End Time",
         ]
     )
     sheet.append(
@@ -93,6 +96,9 @@ def _xlsx_bytes() -> bytes:
             "Imported XLSX Presentation",
             "XLSX-P1",
             "Grand Ballroom",
+            "08/04/2026",
+            "4:15 PM",
+            "4:45 PM",
         ]
     )
     output = io.BytesIO()
@@ -320,6 +326,8 @@ def test_people_program_import_and_revision_workflow(program_database: str) -> N
             f"/api/v1/admin/events/{second_event_id}/presentations", headers=headers
         ).json()
         assert xlsx_sessions[0]["location_name"] == "Grand Ballroom"
+        assert xlsx_sessions[0]["starts_at"] == "2026-08-04T16:15:00+00:00"
+        assert xlsx_sessions[0]["ends_at"] == "2026-08-04T16:45:00+00:00"
         assert xlsx_sessions[0]["presenters"][0]["display_name"] == "XLSX Presenter"
         assert xlsx_presentations[0]["presenters"][0]["display_name"] == "XLSX Presenter"
         invalid_schedule = client.post(
