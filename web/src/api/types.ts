@@ -151,7 +151,21 @@ export interface StorageTarget extends Row {
   last_successful_check_at?: string;
   detail?: string;
 }
-export interface StorageOverview extends Row { roots: StorageTarget[] }
+export interface StorageChoice extends Row {
+  storage_target_id: string;
+  name: string;
+  internal_path: string;
+  role_compatibility: ("staging" | "media")[];
+  health: string;
+  writable: boolean;
+  free_bytes?: number;
+}
+export interface StorageOverview extends Row {
+  roots: StorageTarget[];
+  targets: StorageChoice[];
+  service_available: boolean;
+  detail?: string;
+}
 export interface SiteDeployment extends Row {
   deployment_id: string;
   central_event_id: string;

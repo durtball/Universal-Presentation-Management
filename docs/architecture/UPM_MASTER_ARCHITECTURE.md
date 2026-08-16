@@ -24,6 +24,7 @@ Accepted implementation decisions refine this specification without replacing it
 - [ADR-0008: Shared React admin frontends](decisions/ADR-0008-shared-react-admin-frontends.md)
 - [ADR-0009: Site room materialization from deployed program locations](decisions/ADR-0009-site-room-materialization.md)
 - [ADR-0011: Resumable presentation media transfer and replication](decisions/ADR-0011-resumable-media-transfer-and-replication.md)
+- [ADR-0013: Deployment-local Media Storage service boundary](decisions/ADR-0013-deployment-local-media-storage-service.md)
 
 Historical ADRs must not be rewritten to make later decisions retroactive. A significant change requires a new or superseding ADR.
 
@@ -391,6 +392,11 @@ Site media storage is administrator-configurable through Site-owned storage targ
 Media locations reference a `storage_target_id` plus a validated logical relative object key rather than treating an absolute operating-system path as media identity. Sites may configure multiple targets, but UPM does not automatically pool them or invent placement policy. Storage health, runtime capacity observations, and configurable warning/critical thresholds must be visible independently for each target.
 
 Detailed storage decisions are recorded in [ADR-0002](decisions/ADR-0002-site-media-storage.md).
+
+Central and every Site run an independent deployment-local Media Storage service as specified by
+[ADR-0013](decisions/ADR-0013-deployment-local-media-storage-service.md). Only that service receives
+explicit persistent storage mounts and owns filesystem mechanics; application services use its
+authenticated internal API and retain domain authority in their own PostgreSQL database.
 
 Site ingestion uses same-target staging, generated logical object keys, SHA-256 verification,
 explicit availability states, no-replace atomic publication, and recovery reconciliation as

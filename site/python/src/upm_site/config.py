@@ -12,6 +12,8 @@ class SiteSettings(BaseSettings):
     database_url: str
     media_mount_path: str = "/data/objects"
     staging_mount_path: str = "/data/staging"
+    media_storage_url: str = "http://site-media-storage:8080"
+    media_storage_token: str = ""
     storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
     storage_critical_free_percent: Annotated[float, Field(ge=0, le=100)] = 5.0
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888

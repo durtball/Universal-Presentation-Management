@@ -949,7 +949,7 @@ const mediaColumns: Column<SiteMedia>[] = [
 export function SiteStorage() {
   const result = useApi(async (signal) => {
     const [targets, media] = await Promise.all([
-      siteApi.storage(signal),
+      siteApi.storage(signal).then((overview) => overview.roots),
       siteApi.media(signal),
     ]);
     return { targets, media };

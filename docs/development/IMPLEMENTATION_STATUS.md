@@ -149,10 +149,12 @@
   production-complete.
 - **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
 - **PDF conversion:** derivative data structures and job primitives exist, but no converter, retry handler, status surface, preview, or room delivery workflow exists.
-- **Storage administration:** Central and Site share a themed Storage page backed by live probes,
-  capacity, durable media counts, and UPM byte totals. Central persists staging/media root roles and
-  validates staging cutovers while retaining existing import root identity. Main-media verified
-  migration/cutover and full Site target editing remain incomplete; no raw main-path edit is exposed.
+- **Storage administration:** a reusable, authenticated Media Storage service exposes explicitly
+  mounted targets, real probes/capacity, persistent role assignments, durable staging references,
+  and content-addressed SHA-256 commits. Central and Site Compose run independent instances with
+  persistent default volumes, and their shared themed page remains rendered during service outage
+  and can test/select compatible targets. Complete importer/replication client conversion and the
+  database-owned resumable main-media migration worker remain incomplete.
 - **Program editing:** backend CRUD is broader than the browser; Sessions, Presenters, Presentations, and People pages are primarily read views after import.
 - **Imports:** current CSV/XLSX parsing is synchronous and limited to 25 MiB; arbitrary operator column mapping and worker processing are deferred.
 - **Authentication/RBAC:** Site admin authentication, Operator/restricted roles, user management, recovery, rotation UI, and a complete authorization policy are absent.

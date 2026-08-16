@@ -12,6 +12,7 @@ import type {
   RoomDetail,
   SiteRoom,
   StorageTarget,
+  StorageOverview,
   SiteMediaWorkspace,
   PresentationMediaVersion,
 } from "./types";
@@ -23,10 +24,13 @@ export const siteApi = {
     get<SiteRegistration>("/api/v1/central-registration", signal),
   deployments: (signal?: AbortSignal) =>
     get<SiteDeployment[]>("/api/v1/event-deployments", signal),
-  storage: (signal?: AbortSignal) =>
-    get<StorageTarget[]>("/api/v1/storage-targets/health", signal),
+  storage: (signal?: AbortSignal) => get<StorageOverview>("/api/v1/media-storage", signal),
   testStorage: (id: string) => siteClient.request<StorageTarget>(
     `/api/v1/storage-targets/${id}/test`, { method: "POST" }),
+  testStorageRole: (role: string) => siteClient.request<StorageTarget>(
+    `/api/v1/media-storage/${role}/test`, { method: "POST" }),
+  activateStorage: (role: string, id: string) => siteClient.request<Row>(
+    `/api/v1/media-storage/${role}/${id}`, { method: "PUT" }),
   program: (eventId: string, signal?: AbortSignal) =>
     get<Row>(`/api/v1/events/${eventId}/program`, signal),
   rooms: (signal?: AbortSignal) => get<SiteRoom[]>("/api/v1/rooms", signal),

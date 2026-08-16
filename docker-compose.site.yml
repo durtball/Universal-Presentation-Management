@@ -37,11 +37,15 @@ services:
       UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
       UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}
       UPM_SITE_DEFAULT_DISPLAY_NAME: ${UPM_SITE_DEFAULT_DISPLAY_NAME:-UPM Site}
+      UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
+      UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
     depends_on:
       site-postgres:
         condition: service_healthy
       site-migrate:
         condition: service_completed_successfully
+      site-media-storage:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
       interval: 10s
@@ -103,11 +107,15 @@ services:
       UPM_SITE_TRANSFER_PUSH_CONCURRENCY: ${UPM_SITE_TRANSFER_PUSH_CONCURRENCY:-1}
       UPM_SITE_TRANSFER_PARTIAL_RETENTION_SECONDS: ${UPM_SITE_TRANSFER_PARTIAL_RETENTION_SECONDS:-604800}
       UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
+      UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
+      UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
     depends_on:
       site-postgres:
         condition: service_healthy
       site-migrate:
         condition: service_completed_successfully
+      site-media-storage:
+        condition: service_healthy
     volumes:
       - ${SITE_MEDIA_HOST_PATH:?Set SITE_MEDIA_HOST_PATH}:/data
     networks:
@@ -117,6 +125,30 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  site-media-storage:
+    build:
+      context: .
+      dockerfile: media-storage/Dockerfile
+    image: ${UPM_MEDIA_STORAGE_IMAGE:-upm-media-storage:local}
+    restart: unless-stopped
+    environment:
+      UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: site
+      UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
+      UPM_MEDIA_STORAGE_STATE_PATH: /state/assignments.json
+      UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_SITE_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Default Temporary Storage","internal_path":"/storage/temp","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Default Media Storage","internal_path":"/storage/media","roles":["media"]}]}'
+    volumes:
+      - site-storage-temp:/storage/temp
+      - site-storage-media:/storage/media
+      - site-storage-state:/state
+    networks:
+      - site-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   site-sync:
     image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
@@ -178,3 +210,6 @@ volumes:
   site-caddy-data:
   site-caddy-config:
   site-postgres-data:
+  site-storage-temp:
+  site-storage-media:
+  site-storage-state:

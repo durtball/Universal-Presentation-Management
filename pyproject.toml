@@ -21,6 +21,7 @@ members = [
   "shared/python",
   "central/python",
   "site/python",
+  "media-storage/python",
 ]
 
 [tool.pytest.ini_options]
@@ -37,6 +38,7 @@ src = [
   "shared/python/src",
   "central/python/src",
   "site/python/src",
+  "media-storage/python/src",
   "tests/python",
 ]
 

@@ -41,11 +41,15 @@ services:
       UPM_CENTRAL_MEDIA_OBJECTS_PATH: ${UPM_CENTRAL_MEDIA_OBJECTS_PATH:-/data/objects}
       UPM_CENTRAL_MAX_UPLOAD_BYTES: ${UPM_CENTRAL_MAX_UPLOAD_BYTES:-549755813888}
       UPM_CENTRAL_TRANSFER_BLOCK_BYTES: ${UPM_CENTRAL_TRANSFER_BLOCK_BYTES:-4194304}
+      UPM_CENTRAL_MEDIA_STORAGE_URL: http://central-media-storage:8080
+      UPM_CENTRAL_MEDIA_STORAGE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
     depends_on:
       central-postgres:
         condition: service_healthy
       central-migrate:
         condition: service_completed_successfully
+      central-media-storage:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
       interval: 10s
@@ -104,11 +108,15 @@ services:
       UPM_CENTRAL_WORKER_LEASE_SECONDS: ${UPM_CENTRAL_WORKER_LEASE_SECONDS:-60}
       UPM_CENTRAL_MEDIA_STAGING_PATH: ${UPM_CENTRAL_MEDIA_STAGING_PATH:-/data/staging}
       UPM_CENTRAL_MEDIA_OBJECTS_PATH: ${UPM_CENTRAL_MEDIA_OBJECTS_PATH:-/data/objects}
+      UPM_CENTRAL_MEDIA_STORAGE_URL: http://central-media-storage:8080
+      UPM_CENTRAL_MEDIA_STORAGE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
     depends_on:
       central-postgres:
         condition: service_healthy
       central-migrate:
         condition: service_completed_successfully
+      central-media-storage:
+        condition: service_healthy
     networks:
       - central-internal
     volumes:
@@ -118,6 +126,30 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  central-media-storage:
+    build:
+      context: .
+      dockerfile: media-storage/Dockerfile
+    image: ${UPM_MEDIA_STORAGE_IMAGE:-upm-media-storage:local}
+    restart: unless-stopped
+    environment:
+      UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: central
+      UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
+      UPM_MEDIA_STORAGE_STATE_PATH: /state/assignments.json
+      UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_CENTRAL_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Default Temporary Storage","internal_path":"/storage/temp","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Default Media Storage","internal_path":"/storage/media","roles":["media"]}]}'
+    volumes:
+      - central-storage-temp:/storage/temp
+      - central-storage-media:/storage/media
+      - central-storage-state:/state
+    networks:
+      - central-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   central-sync:
     image: ${UPM_CENTRAL_API_IMAGE:-upm-central-api:local}
@@ -175,3 +207,6 @@ volumes:
   central-caddy-config:
   central-postgres-data:
   central-media-data:
+  central-storage-temp:
+  central-storage-media:
+  central-storage-state:

@@ -37,6 +37,8 @@ export function centralApi(csrfToken: string | null = null) {
     health: (signal?: AbortSignal) => get<Health>("/health", signal),
     storage: (signal?: AbortSignal) => get<StorageOverview>("/api/v1/admin/storage", signal),
     testStorage: (role: string) => client.request<Row>(`/api/v1/admin/storage/${role}/test`, { method: "POST" }),
+    activateStorage: (role: string, id: string) => client.request<Row>(
+      `/api/v1/admin/storage/${role}/${id}`, { method: "PUT" }),
     changeStaging: (path: string) => client.request<Row>("/api/v1/admin/storage/staging", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
     }),

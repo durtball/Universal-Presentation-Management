@@ -26,6 +26,7 @@ from upm_shared.enums import (
     MediaCategory,
     StorageHealth,
 )
+from upm_shared.media_storage_client import MediaStorageClient, MediaStorageUnavailable
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import (
     IngestionConflictError,
@@ -394,6 +395,78 @@ def create_app(
             if target.primary_media
         ]
         return staging_roots + media_roots
+
+    @app.get("/api/v1/media-storage", tags=["storage"])
+    def media_storage_overview() -> dict:
+        storage = MediaStorageClient(
+            get_settings().media_storage_url, get_settings().media_storage_token
+        )
+        try:
+            assignments = storage.assignments()
+            roots = []
+            for role, target in assignments.items():
+                roots.append(
+                    {
+                        "storage_target_id": target["storage_target_id"],
+                        "role": role,
+                        "display_name": target["name"],
+                        "path": target["internal_path"],
+                        "available": target["health"] != "Unavailable",
+                        "writable": target["writable"],
+                        "health": target["health"],
+                        "total_bytes": target["total_bytes"],
+                        "used_bytes": target["used_bytes"],
+                        "free_bytes": target["free_bytes"],
+                        "percent_used": target["percent_used"],
+                        "last_successful_check_at": target["checked_at"],
+                        "detail": target["detail"],
+                    }
+                )
+            return {"roots": roots, "targets": storage.targets(), "service_available": True}
+        except MediaStorageUnavailable as error:
+            return {
+                "roots": [
+                    {
+                        "storage_target_id": f"unavailable-{role}",
+                        "role": role,
+                        "display_name": "Media Storage service unavailable",
+                        "path": "",
+                        "available": False,
+                        "writable": False,
+                        "health": "Unavailable",
+                        "detail": str(error),
+                    }
+                    for role in ("staging", "media")
+                ],
+                "targets": [],
+                "service_available": False,
+                "detail": str(error),
+            }
+
+    @app.post("/api/v1/media-storage/{role}/test", tags=["storage"])
+    def test_media_storage(role: str) -> dict:
+        storage = MediaStorageClient(
+            get_settings().media_storage_url, get_settings().media_storage_token
+        )
+        try:
+            return storage.test(storage.assignments()[role]["storage_target_id"])
+        except (MediaStorageUnavailable, KeyError) as error:
+            raise HTTPException(503, "Media Storage service is unavailable.") from error
+
+    @app.put("/api/v1/media-storage/{role}/{target_id}", tags=["storage"])
+    def activate_media_storage(role: str, target_id: UUID) -> dict:
+        if role not in {"staging", "media"}:
+            raise HTTPException(404, "storage role not found")
+        storage = MediaStorageClient(
+            get_settings().media_storage_url, get_settings().media_storage_token
+        )
+        try:
+            tested = storage.test(target_id)
+            if not tested["writable"] or tested["health"] in {"Unavailable", "Critical"}:
+                raise HTTPException(507, tested.get("detail") or "Storage target is not usable.")
+            return storage.activate(role, target_id)
+        except MediaStorageUnavailable as error:
+            raise HTTPException(503, str(error)) from error
 
     @app.post(
         "/api/v1/storage-targets/{storage_target_id}/test",

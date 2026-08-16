@@ -1,5 +1,27 @@
 # Deployment Documentation
 
+## Media storage targets
+
+Central and each Site run their own `*-media-storage` service on the private deployment network.
+Development uses persistent named volumes for **Default Temporary Storage** and **Default Media
+Storage**; container recreation does not remove those volumes.
+
+Production storage is mounted by Linux and explicitly exposed to only the local storage service:
+
+```yaml
+volumes:
+  - /mnt/upm-temp:/storage/temp
+  - /mnt/upm-media:/storage/media
+  - /mnt/raid/upm-media:/storage/raid
+  - /mnt/nas/upm-media:/storage/nas
+```
+
+Set `UPM_CENTRAL_STORAGE_TARGETS_JSON` or `UPM_SITE_STORAGE_TARGETS_JSON` to a JSON array containing
+a stable UUID, friendly `name`, container `internal_path`, and compatible `roles`. NAS, SMB, and NFS
+filesystems are mounted and monitored by the Linux host; UPM sees only the explicitly exposed
+target. Set a distinct random `UPM_CENTRAL_MEDIA_STORAGE_TOKEN` or
+`UPM_SITE_MEDIA_STORAGE_TOKEN`. Never publish the storage service port or proxy it through Caddy.
+
 ## MS-01 UPM Central deployment
 
 UPM Central is deployed from `/opt/upm/source` as an independent Docker Compose project. It owns
