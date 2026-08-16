@@ -27,6 +27,7 @@ class CentralDatabaseSettings(BaseSettings):
     media_staging_path: str = "/var/lib/upm/central-media"
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888
     transfer_block_bytes: Annotated[int, Field(ge=65_536, le=67_108_864)] = 4_194_304
+    transfer_partial_retention_seconds: Annotated[int, Field(ge=3600)] = 604_800
 
     @field_validator("database_url")
     @classmethod

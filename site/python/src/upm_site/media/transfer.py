@@ -1,21 +1,26 @@
 """ADR-0011 Site-pull execution with durable confirmed-offset semantics."""
 
 import hashlib
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_shared.contracts.media_transfer import MediaTransferProgress
 from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
-from upm_shared.enums import MediaCategory, MediaTransferState, SourceSystem
+from upm_shared.enums import JobStatus, MediaCategory, MediaTransferState, SourceSystem
 from upm_shared.jobs import OutboxPayload
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import IngestionRequest, MediaIngestionService
 from upm_site.persistence.models import MediaTransferSession, TransferJob, utc_now
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync_transport import auth_context, checked
+
+logger = logging.getLogger(__name__)
 
 
 def partial_path(settings: SiteSettings, transfer_session_id) -> Path:
@@ -90,6 +95,7 @@ def execute_central_pull(
                 expected_size=transfer.expected_size,
                 idempotency_key=f"transfer:{transfer.transfer_session_id}",
                 client_mime_type=transfer.media_type,
+                replicate_to_central=False,
             ),
             source,
         )
@@ -142,3 +148,28 @@ def enqueue_transfer_progress(
             data=progress.model_dump(mode="json"),
         ),
     )
+
+
+def cleanup_transfer_partials(session: Session, settings: SiteSettings, cutoff: datetime) -> int:
+    """Expire old terminal pulls while preserving active/retryable/finalized work."""
+    transfers = session.scalars(
+        select(MediaTransferSession)
+        .join(TransferJob, TransferJob.transfer_job_id == MediaTransferSession.transfer_session_id)
+        .where(
+            MediaTransferSession.media_object_id.is_(None),
+            MediaTransferSession.updated_at < cutoff,
+            MediaTransferSession.state.in_(
+                [MediaTransferState.FAILED, MediaTransferState.CANCELLED]
+            ),
+            TransferJob.lease_expires_at.is_(None),
+            TransferJob.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED, JobStatus.CANCELLED]),
+        )
+    ).all()
+    for transfer in transfers:
+        partial_path(settings, transfer.transfer_session_id).unlink(missing_ok=True)
+        transfer.state = MediaTransferState.EXPIRED
+        logger.info(
+            "transfer_partial_expired",
+            extra={"transfer_session_id": str(transfer.transfer_session_id)},
+        )
+    return len(transfers)

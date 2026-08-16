@@ -104,7 +104,9 @@
 - **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
 - **Transfer execution:** Central-to-Site Site-pull has a resumable offset reader, Site worker, and
-  Site-to-Central progress projection; reverse replication, cleanup execution, bandwidth control,
+  Site-to-Central progress projection. Site-local presentation ingestion now queues durable reverse
+  replication; the Site push worker resumes at Central's receiver-owned offset, and Central fsyncs,
+  verifies, and publishes the replica against the same PresentationVersion UUID. Bandwidth control
   and progress UI remain absent.
 - **Transfer architecture:** ADR-0011 now fixes Site-initiated Central pull, Site-initiated reverse
   push, durable byte-offset resume, Site-scoped authorization, SHA-256 finalization, partial
@@ -120,11 +122,12 @@
 - **Site-originated metadata:** disconnected Site Presentation and PresentationVersion creation now
   queues stable-identity outbox events. Central materializes the same UUIDs idempotently within an
   authorized Event deployment and rejects identity/version conflicts. Reverse Site-to-Central
-  binary replication and partial-expiry execution remain incomplete.
+  binary replication uses Site-initiated authenticated blocks, stable sessions, idempotent
+  finalization, and database-authoritative cleanup of expired terminal partials.
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
   ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
-  durable staging/match/version/transfer-queue APIs are implemented foundations. Reverse binary
-  replication, concurrent revision reconciliation, complete
+  durable staging/match/version/transfer-queue APIs and bidirectional binary movement are implemented
+  foundations. Concurrent revision reconciliation, complete
   Site audit/outbox handlers, Site RBAC, and equivalent Central/Site Event Media workspaces remain
   incomplete. This milestone must not be represented as production-complete until those paths and
   running-stack end-to-end verification exist.

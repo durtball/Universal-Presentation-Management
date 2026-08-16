@@ -24,12 +24,14 @@ from upm_site.media.storage import generate_object_key, staging_path
 from upm_site.persistence.models import (
     Event,
     MediaObject,
+    MediaReplicationSession,
     Presentation,
     PresentationAsset,
     PresentationVersion,
     ProcessingJob,
     Site,
     StorageTarget,
+    TransferJob,
 )
 
 SITE_URL = os.getenv("UPM_SITE_DATABASE_URL")
@@ -255,6 +257,16 @@ def test_presentation_linked_and_open_file_ingestion_are_distinguishable(
             )
             is not None
         )
+        replication = session.scalar(
+            select(MediaReplicationSession).where(
+                MediaReplicationSession.media_object_id == linked_result.media_object_id
+            )
+        )
+        assert replication is not None
+        assert replication.presentation_version_id == media_context["version_id"]
+        transfer = session.get(TransferJob, replication.replication_session_id)
+        assert transfer is not None
+        assert transfer.transfer_type == "presentation_media.central_push"
 
 
 def test_finalization_database_failure_is_reconciled(

@@ -16,7 +16,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from upm_shared.enums import AssetKind, JobPriority, MediaAvailability, MediaCategory
+from upm_shared.enums import (
+    AssetKind,
+    JobPriority,
+    MediaAvailability,
+    MediaCategory,
+    MediaReplicationState,
+)
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import PRIORITY_VALUES
 from upm_shared.presentation_media import (
@@ -37,6 +43,7 @@ from upm_site.persistence.models import (
     Event,
     EventParticipation,
     MediaObject,
+    MediaReplicationSession,
     PersonProjection,
     Presentation,
     PresentationAsset,
@@ -74,6 +81,7 @@ class IngestionRequest:
     storage_target_id: UUID | None = None
     idempotency_key: str | None = None
     client_mime_type: str | None = None
+    replicate_to_central: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +178,9 @@ class MediaIngestionService:
             self._record_finalizing(media_id, content_hash, bytes_written, detected_mime)
             atomic_finalize(staged, destination)
             finalized = True
-            processing_job_id = self._mark_available_and_enqueue(media_id, request.site_id)
+            processing_job_id = self._mark_available_and_enqueue(
+                media_id, request.site_id, replicate_to_central=request.replicate_to_central
+            )
             logger.info(
                 "upload_completed",
                 extra={
@@ -257,7 +267,9 @@ class MediaIngestionService:
             self._record_finalizing(media_id, content_hash, bytes_written, detected_mime)
             atomic_finalize(staged, destination)
             finalized = True
-            processing_job_id = self._mark_available_and_enqueue(media_id, request.site_id)
+            processing_job_id = self._mark_available_and_enqueue(
+                media_id, request.site_id, replicate_to_central=request.replicate_to_central
+            )
             logger.info(
                 "upload_completed",
                 extra={
@@ -574,7 +586,9 @@ class MediaIngestionService:
             media.mime_type = mime_type
             media.availability = MediaAvailability.FINALIZING
 
-    def _mark_available_and_enqueue(self, media_id: UUID, site_id: UUID) -> UUID:
+    def _mark_available_and_enqueue(
+        self, media_id: UUID, site_id: UUID, *, replicate_to_central: bool = True
+    ) -> UUID:
         with self.session_factory.begin() as session:
             media = session.get(MediaObject, media_id, with_for_update=True)
             if media is None or media.availability != MediaAvailability.FINALIZING:
@@ -589,6 +603,53 @@ class MediaIngestionService:
                 priority=PRIORITY_VALUES[JobPriority.NORMAL],
                 required_capabilities=["cpu"],
             )
+            asset = session.scalar(
+                select(PresentationAsset).where(PresentationAsset.media_object_id == media_id)
+            )
+            if (
+                replicate_to_central
+                and not (media.ingestion_idempotency_key or "").startswith("transfer:")
+                and asset is not None
+                and media.content_hash is not None
+                and media.size_bytes is not None
+            ):
+                version = session.get(PresentationVersion, asset.presentation_version_id)
+                presentation = (
+                    session.get(Presentation, version.presentation_id)
+                    if version is not None
+                    else None
+                )
+                if presentation is not None and media.event_id is not None:
+                    replication_id = new_uuid7()
+                    replication = MediaReplicationSession(
+                        replication_session_id=replication_id,
+                        site_id=site_id,
+                        event_id=media.event_id,
+                        presentation_id=presentation.presentation_id,
+                        presentation_version_id=asset.presentation_version_id,
+                        media_object_id=media_id,
+                        expected_size=media.size_bytes,
+                        sha256=media.content_hash,
+                        original_filename=media.original_filename,
+                        canonical_filename=media.canonical_filename,
+                        media_type=media.mime_type,
+                        state=MediaReplicationState.QUEUED,
+                    )
+                    session.add(replication)
+                    SiteQueue(session).enqueue_transfer(
+                        transfer_job_id=replication_id,
+                        site_id=site_id,
+                        media_object_id=media_id,
+                        transfer_type="presentation_media.central_push",
+                        payload={
+                            "schema_version": 1,
+                            "data": {"replication_session_id": str(replication_id)},
+                        },
+                        idempotency_key=f"media.replicate:{media_id}:{asset.presentation_version_id}",
+                        priority=PRIORITY_VALUES[JobPriority.NORMAL],
+                        required_capabilities=["transfer"],
+                        max_attempts=100,
+                    )
             return job.processing_job_id
 
     def _record_failure(self, media_id: UUID, error: Exception, *, finalized: bool) -> None:

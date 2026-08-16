@@ -13,12 +13,17 @@ from threading import Event
 import httpx
 from sqlalchemy import text
 
-from upm_shared.enums import JobStatus
+from upm_shared.enums import JobStatus, MediaReplicationState
 from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
-from upm_site.media.transfer import enqueue_transfer_progress, execute_central_pull
+from upm_site.media.replication import execute_central_push
+from upm_site.media.transfer import (
+    cleanup_transfer_partials,
+    enqueue_transfer_progress,
+    execute_central_pull,
+)
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
-from upm_site.persistence.models import MediaTransferSession
+from upm_site.persistence.models import MediaReplicationSession, MediaTransferSession, utc_now
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
@@ -71,6 +76,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     service_role=role,
                     capabilities=capabilities,
                 )
+                cleanup_transfer_partials(
+                    session,
+                    settings,
+                    utc_now() - timedelta(seconds=settings.transfer_partial_retention_seconds),
+                )
                 if not sync:
                     work = queue.claim_processing(worker_id, capabilities, lease)
                     kind = "processing"
@@ -111,6 +121,36 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 base_delay_seconds=settings.worker_retry_base_seconds,
                             )
                             log("media_pull_failed", work_id=work_id, detail=str(error)[:2048])
+                            continue
+                    elif (
+                        kind == "transfer"
+                        and work.transfer_type == "presentation_media.central_push"
+                    ):
+                        try:
+                            with httpx.Client(timeout=30.0) as client:
+                                completed = execute_central_push(
+                                    session, factory, settings, work, client
+                                )
+                        except Exception as error:
+                            replication = session.get(MediaReplicationSession, work.transfer_job_id)
+                            if replication is not None:
+                                replication.retry_count += 1
+                                replication.last_error = str(error)[:2048]
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="media_push_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            if replication is not None:
+                                replication.state = (
+                                    MediaReplicationState.RETRY_WAIT
+                                    if work.status is JobStatus.RETRY_WAIT
+                                    else MediaReplicationState.FAILED
+                                )
+                            log("media_push_failed", work_id=work_id, detail=str(error)[:2048])
                             continue
                     if not completed:
                         work.status = JobStatus.PENDING

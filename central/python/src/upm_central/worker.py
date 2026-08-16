@@ -14,8 +14,9 @@ from sqlalchemy import text
 
 from upm_central.config import CentralDatabaseSettings
 from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
+from upm_central.media_replication import cleanup_replication_partials
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
-from upm_central.persistence.models import DeletionOperation
+from upm_central.persistence.models import DeletionOperation, utc_now
 from upm_central.persistence.queue import CentralQueue
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
@@ -110,6 +111,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     hostname=socket.gethostname(),
                     service_role=role,
                     capabilities=capabilities,
+                )
+                cleanup_replication_partials(
+                    session,
+                    Path(settings.media_staging_path),
+                    utc_now() - timedelta(seconds=settings.transfer_partial_retention_seconds),
                 )
                 if not sync:
                     work = queue.claim_processing(worker_id, capabilities, lease)

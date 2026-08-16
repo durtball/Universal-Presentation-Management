@@ -1,22 +1,32 @@
 """Authenticated Central presentation-media staging and review APIs."""
 
+import os
+import shutil
 from collections.abc import Callable, Iterator
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.config import CentralDatabaseSettings
+from upm_central.media_replication import (
+    authorize_replication_context,
+    finalize_replication,
+    recover_partial,
+)
 from upm_central.persistence.models import (
     AuditRecord,
     EventDeployment,
+    MediaReplicationReceiveSession,
     Presentation,
     PresentationMediaImport,
     PresentationVersion,
     TransferJob,
+    utc_now,
 )
 from upm_central.presentation_media import (
     CentralMediaStagingService,
@@ -24,7 +34,26 @@ from upm_central.presentation_media import (
     _safe_staging_path,
 )
 from upm_central.sync import authenticate_site
-from upm_shared.enums import JobStatus, MediaImportState
+from upm_shared.enums import (
+    JobStatus,
+    MediaImportState,
+    MediaReplicationState,
+    MediaTransferState,
+)
+
+
+class ReplicationCreate(BaseModel):
+    replication_session_id: UUID
+    event_id: UUID
+    presentation_id: UUID
+    presentation_version_id: UUID
+    media_object_id: UUID
+    presentation_identifier: str = Field(min_length=1, max_length=128)
+    original_filename: str = Field(min_length=1, max_length=1024)
+    canonical_filename: str | None = Field(default=None, max_length=1024)
+    expected_size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    media_type: str | None = Field(default=None, max_length=255)
 
 
 def _view(item: PresentationMediaImport) -> dict[str, object]:
@@ -344,3 +373,192 @@ def register_presentation_media_routes(
             "X-UPM-Transfer-SHA256": item.sha256 or "",
         }
         return StreamingResponse(content(), media_type="application/octet-stream", headers=headers)
+
+    def replication_for_site(
+        replication_session_id: UUID,
+        session: Session,
+        authorization: str | None,
+        site_id: UUID | None,
+    ) -> MediaReplicationReceiveSession:
+        token = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+        if site_id is None:
+            raise HTTPException(401, "missing site identity")
+        authenticate_site(session, site_id, token)
+        receiver = session.get(
+            MediaReplicationReceiveSession, replication_session_id, with_for_update=True
+        )
+        if receiver is None or receiver.origin_site_id != site_id:
+            raise HTTPException(404, "replication session not found")
+        try:
+            authorize_replication_context(
+                session,
+                site_id=site_id,
+                event_id=receiver.event_id,
+                presentation_id=receiver.presentation_id,
+                presentation_version_id=receiver.presentation_version_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, "replication session not found") from exc
+        return receiver
+
+    def replication_view(receiver: MediaReplicationReceiveSession) -> dict[str, object]:
+        return {
+            "replication_session_id": receiver.replication_session_id,
+            "confirmed_offset": receiver.confirmed_offset,
+            "expected_size": receiver.expected_size,
+            "sha256": receiver.sha256,
+            "state": receiver.state,
+            "replication_state": receiver.replication_state,
+            "central_media_object_id": receiver.finalized_media_object_id,
+            "presentation_version_id": receiver.presentation_version_id,
+            "error_detail": receiver.error_detail,
+        }
+
+    @app.post("/api/v1/media-replications", tags=["media-transfer"])
+    def create_replication(
+        payload: ReplicationCreate,
+        session: DbSession,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, object]:
+        token = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+        if x_upm_site_id is None:
+            raise HTTPException(401, "missing site identity")
+        authenticate_site(session, x_upm_site_id, token)
+        try:
+            presentation = authorize_replication_context(
+                session,
+                site_id=x_upm_site_id,
+                event_id=payload.event_id,
+                presentation_id=payload.presentation_id,
+                presentation_version_id=payload.presentation_version_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(409, "presentation metadata is not synchronized") from exc
+        existing = session.get(
+            MediaReplicationReceiveSession,
+            payload.replication_session_id,
+            with_for_update=True,
+        )
+        if existing is not None:
+            immutable = (
+                existing.origin_site_id,
+                existing.event_id,
+                existing.presentation_version_id,
+                existing.source_media_object_id,
+                existing.expected_size,
+                existing.sha256,
+            )
+            requested = (
+                x_upm_site_id,
+                payload.event_id,
+                payload.presentation_version_id,
+                payload.media_object_id,
+                payload.expected_size,
+                payload.sha256,
+            )
+            if immutable != requested:
+                raise HTTPException(409, "replication session metadata conflict")
+            return replication_view(existing)
+        if presentation.presentation_identifier != payload.presentation_identifier:
+            raise HTTPException(409, "presentation identifier mismatch")
+        root = CentralMediaStagingService(
+            factory(), settings().media_staging_path, settings().max_upload_bytes
+        ).root
+        if payload.expected_size > settings().max_upload_bytes:
+            raise HTTPException(413, "replication exceeds configured maximum")
+        if shutil.disk_usage(root).free < payload.expected_size:
+            raise HTTPException(507, "insufficient replication storage")
+        receiver = MediaReplicationReceiveSession(
+            replication_session_id=payload.replication_session_id,
+            origin_site_id=x_upm_site_id,
+            event_id=payload.event_id,
+            presentation_id=payload.presentation_id,
+            presentation_version_id=payload.presentation_version_id,
+            source_media_object_id=payload.media_object_id,
+            presentation_identifier=payload.presentation_identifier,
+            original_filename=payload.original_filename,
+            canonical_filename=payload.canonical_filename,
+            expected_size=payload.expected_size,
+            sha256=payload.sha256,
+            media_type=payload.media_type,
+            partial_key=str(payload.replication_session_id),
+            state=MediaTransferState.AVAILABLE,
+            replication_state=MediaReplicationState.QUEUED,
+        )
+        session.add(receiver)
+        session.flush()
+        recover_partial(root, receiver)
+        return replication_view(receiver)
+
+    @app.get("/api/v1/media-replications/{replication_session_id}", tags=["media-transfer"])
+    def replication_status(
+        replication_session_id: UUID,
+        session: DbSession,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, object]:
+        return replication_view(
+            replication_for_site(replication_session_id, session, authorization, x_upm_site_id)
+        )
+
+    @app.put("/api/v1/media-replications/{replication_session_id}/content", tags=["media-transfer"])
+    async def replication_content(
+        replication_session_id: UUID,
+        request: Request,
+        session: DbSession,
+        offset: Annotated[int, Query(ge=0)],
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, object]:
+        receiver = replication_for_site(
+            replication_session_id, session, authorization, x_upm_site_id
+        )
+        if receiver.finalized_media_object_id is not None:
+            return replication_view(receiver)
+        if offset != receiver.confirmed_offset:
+            raise HTTPException(409, detail={"confirmed_offset": receiver.confirmed_offset})
+        root = CentralMediaStagingService(
+            factory(), settings().media_staging_path, settings().max_upload_bytes
+        ).root
+        path = recover_partial(root, receiver)
+        written = 0
+        try:
+            with path.open("ab", buffering=0) as partial:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > settings().transfer_block_bytes:
+                        raise HTTPException(413, "block exceeds configured maximum")
+                    if offset + written > receiver.expected_size:
+                        raise HTTPException(413, "block exceeds expected size")
+                    partial.write(chunk)
+                partial.flush()
+                os.fsync(partial.fileno())
+        except Exception:
+            with path.open("r+b") as partial:
+                partial.truncate(receiver.confirmed_offset)
+            raise
+        receiver.confirmed_offset += written
+        receiver.state = MediaTransferState.TRANSFERRING
+        receiver.replication_state = MediaReplicationState.SYNCING
+        receiver.last_progress_at = utc_now()
+        return replication_view(receiver)
+
+    @app.post(
+        "/api/v1/media-replications/{replication_session_id}/finalize",
+        tags=["media-transfer"],
+    )
+    def finalize_replication_endpoint(
+        replication_session_id: UUID,
+        session: DbSession,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, object]:
+        receiver = replication_for_site(
+            replication_session_id, session, authorization, x_upm_site_id
+        )
+        root = CentralMediaStagingService(
+            factory(), settings().media_staging_path, settings().max_upload_bytes
+        ).root
+        finalize_replication(session, root, receiver)
+        return replication_view(receiver)

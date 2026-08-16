@@ -43,6 +43,8 @@ from upm_shared.enums import (
     MediaCategory,
     MediaImportState,
     MediaMatchState,
+    MediaReplicationState,
+    MediaTransferState,
     ParticipantStatus,
     PresentationIdentifierSource,
     PresentationProcessingStatus,
@@ -983,6 +985,56 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(String(2048))
+
+
+class MediaReplicationReceiveSession(CentralRecordMixin, CentralBase):
+    """Central-owned resumable receiver state for a Site authoritative binary."""
+
+    __tablename__ = "media_replication_receive_sessions"
+    __table_args__ = (
+        CheckConstraint("expected_size >= 0", name="expected_size_nonnegative"),
+        CheckConstraint(
+            "confirmed_offset >= 0 AND confirmed_offset <= expected_size",
+            name="confirmed_offset_range",
+        ),
+        Index("ix_central_replication_site_state", "origin_site_id", "state"),
+        Index("ix_central_replication_version", "presentation_version_id"),
+    )
+
+    replication_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    origin_site_id: Mapped[UUID] = mapped_column(ForeignKey("sites.site_id"), nullable=False)
+    event_id: Mapped[UUID] = mapped_column(ForeignKey("events.event_id"), nullable=False)
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id"), nullable=False
+    )
+    presentation_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id"), nullable=False
+    )
+    source_media_object_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    presentation_identifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    canonical_filename: Mapped[str | None] = mapped_column(String(1024))
+    expected_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_type: Mapped[str | None] = mapped_column(String(255))
+    partial_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    confirmed_offset: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    state: Mapped[MediaTransferState] = mapped_column(
+        domain_enum(MediaTransferState, length=16),
+        default=MediaTransferState.QUEUED,
+        nullable=False,
+    )
+    replication_state: Mapped[MediaReplicationState] = mapped_column(
+        domain_enum(MediaReplicationState, length=16),
+        default=MediaReplicationState.QUEUED,
+        nullable=False,
+    )
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_detail: Mapped[str | None] = mapped_column(String(2048))
+    finalized_media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_object_replicas.media_object_id", ondelete="RESTRICT")
+    )
 
 
 class PresentationAsset(CentralRecordMixin, CentralBase):
