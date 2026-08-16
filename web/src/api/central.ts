@@ -3,6 +3,7 @@ import type {
   AuthSession,
   EventRecord,
   EventDeploymentPreview,
+  EventWrite,
   Health,
   ImportBatch,
   PersonRecord,
@@ -33,11 +34,16 @@ export function centralApi(csrfToken: string | null = null) {
       get<SiteRecord[]>("/api/v1/admin/sites", signal),
     events: (signal?: AbortSignal) =>
       get<EventRecord[]>("/api/v1/admin/events", signal),
-    createEvent: (name: string, timezone: string) =>
+    createEvent: (values: EventWrite) =>
       client.request<EventRecord>("/api/v1/admin/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, timezone }),
+        body: JSON.stringify(values),
+      }),
+    updateEvent: (eventId: string, values: EventWrite) =>
+      client.request<EventRecord>(`/api/v1/admin/events/${eventId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
       }),
     eventDeletionImpact: (eventId: string) =>
       get<DeletionPreview>(`/api/v1/admin/events/${eventId}/deletion-impact`),

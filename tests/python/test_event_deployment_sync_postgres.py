@@ -249,23 +249,28 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
         updated = central_client.put(
             f"/api/v1/admin/events/{event_id}",
             headers=headers,
-            json={"name": "UPM Expo Updated"},
+            json={
+                "name": "  UPM Expo Updated  ",
+                "timezone": "America/New_York",
+                "starts_at": "2027-04-10T00:00:00Z",
+                "ends_at": "2027-04-12T00:00:00Z",
+            },
         )
         assert updated.status_code == 200
+        assert updated.json()["event_id"] == event_id
         update_status = central_client.get(
             f"/api/v1/admin/events/{event_id}/deployments", headers=headers
         ).json()[0]
         assert update_status["update_available"] is True
-        assert update_status["desired_revision"] == 1
-        pushed = central_client.post(
-            f"/api/v1/admin/event-deployments/{deployment_id}/push", headers=headers
-        )
-        assert pushed.status_code == 200
+        assert update_status["desired_revision"] == 2
         synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
         synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
         with site_factory() as session:
             assert session.get(EventDeploymentProjection, deployment_id).applied_revision == 2
-            assert session.get(SiteEvent, event_id).name == "UPM Expo Updated"
+            site_event = session.get(SiteEvent, event_id)
+            assert site_event.name == "UPM Expo Updated"
+            assert site_event.timezone == "America/New_York"
+            assert site_event.starts_at.isoformat().startswith("2027-04-10")
 
         central_engine = create_engine(central_url)
         try:
@@ -282,32 +287,28 @@ def test_enrollment_deployment_update_duplicate_outage_and_recovery(
                 duplicate.status = JobStatus.PENDING
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
 
-            # Central changes remain explicit update availability while the Site is disconnected.
+            # Each offline edit durably publishes a complete update; the Site may skip ahead.
             for revision in range(3, 6):
                 response = central_client.put(
                     f"/api/v1/admin/events/{event_id}",
                     headers=headers,
-                    json={"name": f"Offline revision {revision}"},
+                    json={"name": f"Offline revision {revision}", "timezone": "America/New_York"},
                 )
                 assert response.status_code == 200
             pending_update = central_client.get(
                 f"/api/v1/admin/events/{event_id}/deployments", headers=headers
             ).json()[0]
             assert pending_update["update_available"] is True
-            assert pending_update["desired_revision"] == 2
-            pushed = central_client.post(
-                f"/api/v1/admin/event-deployments/{deployment_id}/push", headers=headers
-            )
-            assert pushed.status_code == 200
+            assert pending_update["desired_revision"] == 5
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
             synchronize_once(site_factory, site_settings, "site-sync-test", adapter)
             with site_factory() as session:
                 projection = session.get(EventDeploymentProjection, deployment_id)
-                assert projection.applied_revision == 3
+                assert projection.applied_revision == 5
                 assert session.get(SiteEvent, event_id).name == "Offline revision 5"
             with Session(central_engine) as session:
                 deployment = session.get(CentralDeployment, deployment_id)
-                assert deployment.desired_revision == deployment.acknowledged_revision == 3
+                assert deployment.desired_revision == deployment.acknowledged_revision == 5
                 assert deployment.status == EventDeploymentStatus.DEPLOYED
         finally:
             central_engine.dispose()

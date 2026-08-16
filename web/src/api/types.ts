@@ -24,6 +24,12 @@ export interface EventRecord extends Row {
   ends_at?: string;
   deployments: EventDeployment[];
 }
+export interface EventWrite {
+  name: string;
+  timezone: string;
+  starts_at: string | null;
+  ends_at: string | null;
+}
 export interface EventDeployment extends Row {
   deployment_id: string; event_id: string; site_id: string; site_name: string;
   status: string; synchronization_state: string; desired_revision: number;

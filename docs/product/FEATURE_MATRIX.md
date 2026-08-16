@@ -21,7 +21,7 @@ Status meanings:
 | People | Protected person deletion | API + UI | N/A | N/A | N/A | Implemented | Detailed impact, exact-name confirmation, durable cleanup, retained-history removal, progress, and surviving audit evidence. |
 | People | Protected bulk person deletion | API + UI | Durable tombstone + snapshot convergence | N/A | N/A | Implemented | Exact `delete all` confirmation queues one durable target snapshot, reuses person cleanup/reference safety, audits results, and republishes affected Event deployments. |
 | Events | Operational lifecycle deletion | API + UI | Durable purge projection | N/A | N/A | Implemented | Explicit cleanup preserves Person history and shared resources and sends offline-safe protocol-v1 tombstones. |
-| Events | Event create/list/edit | API + UI | Projection | No | No | Partial | Central create/list UI and API edits exist; full lifecycle administration is incomplete. |
+| Events | Event create/list/edit | API + UI | Projection | No | No | Implemented | One modal creates and edits names, dates, and IANA timezones; deployed metadata edits automatically publish durable complete snapshots while preserving identity and relationships. |
 | Program | Participants, sessions, presentations domain | API + UI | Projection + UI | No | No | Implemented | Normalized backend relationships, migrations, snapshot projection, and read views exist. |
 | Program | Direct browser program editing | Read-oriented | Read-only | No | No | Partial | Backend CRUD is broad; browser pages mostly list imported data rather than edit it. |
 | Imports | CSV/XLSX stage/review/reconcile/commit | Yes | N/A | No | No | Implemented | Source preservation, validation, identity review, transactional commit, UI, and PostgreSQL tests exist. |

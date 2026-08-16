@@ -47,6 +47,8 @@
 - Snapshot v1 projects event metadata, event-scoped people, participation, sessions, session presenters, logical presentations, presentation relationships, versions, external identifiers, and relevant room mapping.
 - New snapshots deactivate omitted Central-owned program rows without deleting Site-owned media or operational history.
 - Central and Site browser pages expose deployment and locally retained program state. Site reads continue without Central.
+- Central Event metadata edits automatically publish a complete revision to every active deployment;
+  the Site idempotently updates its local Event projection after reconnecting when necessary.
 - Central Event detail provides a Site selector and committed-program deployment preview with counts,
   warnings, blocking conflicts, explicit deploy/update/retry controls, Site names, revisions, and
   applied/update-available status. Program changes no longer publish silently.
@@ -57,7 +59,9 @@
 - API services support people, protected deletion impact/delete, participants, sessions, presenters, presentations, explicit relationships, external identifiers, and concurrency revisions.
 - CSV/XLSX imports preserve source bytes/hash, raw/normalized/corrected rows, issues, identity evidence, decisions, candidates, counts, and entity lineage.
 - Reconciliation uses explicit UUID, unique external identifier, and normalized email evidence; name-only evidence requires review. Commit is transactional and guarded against stale program/person revisions.
-- Central browser administration supports Event creation, functional upload/review/reconciliation/commit, relationship lists, Site enrollment approval, deployment, Site room mapping, and useful failure states.
+- Central browser administration supports modal Event creation/editing with dates and searchable
+  IANA timezones, functional upload/review/reconciliation/commit, relationship lists, Site enrollment
+  approval, deployment, Site room mapping, and useful failure states.
 - Central Event and permanent Person administration provide lifecycle deletion previews, exact-name
   confirmation, durable processing, progress/error state, and target-independent audit evidence.
   Event cleanup retains person-owned participation history and propagates Site purge tombstones

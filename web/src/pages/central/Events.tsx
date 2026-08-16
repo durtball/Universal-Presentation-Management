@@ -1,15 +1,15 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { centralApi } from "../../api/central";
 import type { EventRecord } from "../../api/types";
 import { DataTable, type Column } from "../../components/DataTable";
 import { PageState } from "../../components/Feedback";
-import { ErrorSurface } from "../../components/Feedback";
-import { Page, Panel } from "../../components/Page";
+import { Page } from "../../components/Page";
 import { useApi } from "../../hooks/useApi";
 import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
 import { DeletionDialog } from "../../components/DeletionDialog";
+import { EventDialog } from "../../components/EventDialog";
 
 const baseColumns: Column<EventRecord>[] = [
   {
@@ -44,32 +44,18 @@ export function Events() {
   const { csrfToken } = useSession();
   const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const result = useApi((signal) => api.events(signal), [api]);
-  const [name, setName] = useState("");
-  const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
-  const [error, setError] = useState<unknown>();
+  const [editing, setEditing] = useState<EventRecord | null>();
   const [deleting, setDeleting] = useState<EventRecord>();
   const columns = useMemo<Column<EventRecord>[]>(()=>[...baseColumns, {key:"actions",label:"Actions",value:()=>"",
-    render:(row)=><div className="button-row"><Link className="button button--primary" to={`/admin/events/${row.event_id}#deploy`}>Deploy to Site</Link><button className="button button--danger" type="button" onClick={()=>setDeleting(row)}>Delete Event</button></div>}],[]);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault(); setError(undefined);
-    try { await api.createEvent(name, timezone); setName(""); result.refresh(); }
-    catch (caught) { setError(caught); }
-  };
+    render:(row)=><div className="button-row"><Link className="button" to={`/admin/events/${row.event_id}`}>Open</Link><button className="button" type="button" onClick={()=>setEditing(row)}>Edit</button><Link className="button button--primary" to={`/admin/events/${row.event_id}#deploy`}>Deploy to Site</Link><button className="button button--danger" type="button" onClick={()=>setDeleting(row)}>Delete Event</button></div>}],[]);
   return (
     <Page
       eyebrow="Program"
       title="Events"
       description="Central-owned event programs and their Site deployments."
+      actions={<button className="button button--primary" type="button" onClick={()=>setEditing(null)}>+ Create Event</button>}
     >
       <AdminBoundary>
-        <Panel title="Create event">
-          <form className="inline-form" onSubmit={submit}>
-            <label className="field">Event name<input className="input" required value={name} onChange={(e) => setName(e.target.value)} /></label>
-            <label className="field">Timezone<input className="input" required value={timezone} onChange={(e) => setTimezone(e.target.value)} /></label>
-            <button className="button button--primary">Create event</button>
-          </form>
-          {error != null ? <ErrorSurface error={error} /> : null}
-        </Panel>
         <PageState
           {...result}
           empty={(rows) => !rows.length}
@@ -88,6 +74,9 @@ export function Events() {
           load={()=>api.eventDeletionImpact(deleting.event_id)}
           start={(confirmation)=>api.deleteEvent(deleting.event_id, confirmation)}
           close={()=>{setDeleting(undefined);result.refresh();}} /> : null}
+        {editing !== undefined ? <EventDialog event={editing??undefined}
+          save={values=>editing ? api.updateEvent(editing.event_id, values) : api.createEvent(values)}
+          close={()=>{setEditing(undefined);result.refresh();}} /> : null}
       </AdminBoundary>
     </Page>
   );

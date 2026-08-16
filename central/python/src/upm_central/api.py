@@ -4,13 +4,14 @@ import base64
 import hashlib
 import hmac
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -103,6 +104,14 @@ class EventCreate(BaseModel):
     timezone: Annotated[str, Field(min_length=1, max_length=100)] = "UTC"
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("event name cannot be empty")
+        return value
 
 
 class EventUpdate(EventCreate):
@@ -611,7 +620,7 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         validate_timezone(payload.timezone)
         require_aware(payload.starts_at, "starts_at")
         require_aware(payload.ends_at, "ends_at")
-        if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
+        if payload.starts_at and payload.ends_at and payload.ends_at < payload.starts_at:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
         event = Event(**payload.model_dump())
         session.add(event)
@@ -647,15 +656,80 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         validate_timezone(payload.timezone)
         require_aware(payload.starts_at, "starts_at")
         require_aware(payload.ends_at, "ends_at")
-        if payload.starts_at and payload.ends_at and payload.ends_at <= payload.starts_at:
+        if payload.starts_at and payload.ends_at and payload.ends_at < payload.starts_at:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid event dates")
+        before = {
+            "name": event.name,
+            "description": event.description,
+            "timezone": event.timezone,
+            "starts_at": event.starts_at.isoformat() if event.starts_at else None,
+            "ends_at": event.ends_at.isoformat() if event.ends_at else None,
+        }
+        old_timezone = validate_timezone(event.timezone)
+        if old_timezone != payload.timezone:
+            # Imported schedules are stored as instants derived from event-local wall time.
+            # Re-zone those instants so a 09:00 session remains 09:00 event-local time.
+            old_zone = ZoneInfo(old_timezone)
+            new_zone = ZoneInfo(payload.timezone)
+            sessions = session.scalars(
+                select(ProgramSession).where(ProgramSession.event_id == event_id)
+            ).all()
+            for program_session in sessions:
+                for field_name in ("starts_at", "ends_at"):
+                    instant = getattr(program_session, field_name)
+                    if instant is not None:
+                        local = instant.astimezone(old_zone)
+                        rezoned = local.replace(tzinfo=new_zone, fold=local.fold)
+                        setattr(program_session, field_name, rezoned.astimezone(UTC))
         event.name = payload.name
         event.description = payload.description
         event.timezone = payload.timezone
         event.starts_at = payload.starts_at
         event.ends_at = payload.ends_at
         event.revision += 1
-        return {"event_id": event_id, "revision": event.revision, "update_available": True}
+        event.updated_at = utc_now()
+        session.flush()
+        deployments = session.scalars(
+            select(EventDeployment).where(
+                EventDeployment.event_id == event_id,
+                EventDeployment.status.notin_(
+                    [EventDeploymentStatus.REVOKED, EventDeploymentStatus.ARCHIVED]
+                ),
+            )
+        ).all()
+        for deployment in deployments:
+            push_deployment(session, deployment)
+        after = {
+            "name": event.name,
+            "description": event.description,
+            "timezone": event.timezone,
+            "starts_at": event.starts_at.isoformat() if event.starts_at else None,
+            "ends_at": event.ends_at.isoformat() if event.ends_at else None,
+            "deployment_revisions": {
+                str(item.deployment_id): item.desired_revision for item in deployments
+            },
+        }
+        session.add(
+            AuditRecord(
+                actor_id="central-admin",
+                action="central.event.updated",
+                target_type="event",
+                target_id=event_id,
+                event_id=event_id,
+                before_context=before,
+                after_context=after,
+            )
+        )
+        return {
+            "event_id": event_id,
+            "name": event.name,
+            "description": event.description,
+            "timezone": event.timezone,
+            "starts_at": event.starts_at,
+            "ends_at": event.ends_at,
+            "revision": event.revision,
+            "deployments": [deployment_view(item, session) for item in deployments],
+        }
 
     @app.get(
         "/api/v1/admin/events/{event_id}/deployment-preview",

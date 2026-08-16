@@ -2,9 +2,11 @@
 
 Central administrators manage events at `/admin/events`. The authenticated APIs support creating and
 editing an Event, previewing and deploying it independently to active Sites, explicitly pushing a
-new revision, retrying a failed application, and non-destructive revocation. Program edits advance
-the Central Event revision and display **Update available**; they do not silently publish. The
-operator reviews and explicitly deploys the next complete revision.
+program revision, retrying a failed application, and non-destructive revocation. Event metadata
+edits (name, dates, or IANA timezone) atomically create a new complete snapshot revision for every
+active deployment and enqueue it through protocol v1; an offline Site catches up without blocking
+the edit. Other program edits advance the Central Event revision and display **Update available**;
+the operator reviews and explicitly deploys those broader program changes.
 
 Event types are:
 
