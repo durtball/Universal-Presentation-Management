@@ -39,6 +39,9 @@ These rules operationalize the [Master Architecture](../architecture/UPM_MASTER_
 - Use storage target plus validated relative object key; absolute host paths are deployment configuration, not media identity.
 - Keep API processes responsive by streaming large bodies and handing expensive work to workers.
 - Transfers must eventually verify identity, size, and hash, expose progress, and recover partial work; do not invent a disposable non-resumable critical protocol.
+- Implement media transfer according to ADR-0011: Sites initiate Central pulls and pushes, durable
+  contiguous byte offset is the resume contract, and the existing Site credential authenticates
+  each separately authorized transfer resource. Never add Central-initiated Site connectivity.
 
 ## Server and client authority
 

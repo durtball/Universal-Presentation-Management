@@ -104,6 +104,10 @@
 - **Room operations:** the Site room-centered read/coordination workflow and primary/backup assignment UI are implemented. Automated readiness policy, operator acknowledgements, manual status overrides, endpoint availability, and presentation-control actions are not.
 - **Agent and room clients:** no Windows executable, secure device enrollment flow, heartbeat/status reporting, assignment recovery client, diagnostics, transfer client, presentation launch/control, or primary/backup synchronization.
 - **Transfer execution:** TransferJob persistence exists, but no resumable/chunked protocol, bandwidth controller, sender/receiver handler, or progress UI exists.
+- **Transfer architecture:** ADR-0011 now fixes Site-initiated Central pull, Site-initiated reverse
+  push, durable byte-offset resume, Site-scoped authorization, SHA-256 finalization, partial
+  ownership, retry/replay, and separate replication/readiness semantics. Network handlers and
+  workers remain unimplemented.
 - **Production presentation-media workflow:** identifier allocation, canonical naming, deterministic
   ID matching, Site-local creation/version APIs, canonical metadata at Site ingestion, and Central
   durable staging/match/version/transfer-queue APIs are implemented foundations. Bidirectional
@@ -148,7 +152,6 @@
 ## Decisions that should receive future ADRs
 
 - Signage service boundaries, Site-local data ownership, Central/Site-to-Signage deployment contracts, redundancy, scheduling, override precedence, and renderer lifecycle.
-- Resumable transfer protocol, chunk identity, resume negotiation, integrity, bandwidth adaptation, and endpoint authorization.
 - Windows client technology, secure enrollment, discovery, update policy, cached recovery state, and primary/backup control protocol.
 - Presentation runtime fidelity/adapters and explicit fallback behavior by source format.
 - PDF conversion engine, sandboxing, derivative lifecycle, and failure/retry policy.

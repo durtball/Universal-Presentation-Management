@@ -45,6 +45,28 @@ class MediaImportState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class MediaTransferState(StrEnum):
+    QUEUED = "queued"
+    AVAILABLE = "available"
+    TRANSFERRING = "transferring"
+    RETRY_WAIT = "retry_wait"
+    VERIFYING = "verifying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class MediaReplicationState(StrEnum):
+    LOCAL_ONLY = "local_only"
+    QUEUED = "queued"
+    SYNCING = "syncing"
+    SYNCED = "synced"
+    RETRY_WAIT = "retry_wait"
+    FAILED = "failed"
+    CONFLICT = "conflict"
+
+
 class EnrollmentState(StrEnum):
     UNREGISTERED = "unregistered"
     PENDING = "pending"

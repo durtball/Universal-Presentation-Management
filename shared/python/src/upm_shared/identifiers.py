@@ -32,6 +32,7 @@ type DeviceAssignmentId = UUID7
 type StorageTargetId = UUID7
 type MediaObjectId = UUID7
 type TransferJobId = UUID7
+type TransferSessionId = UUID7
 type ProcessingJobId = UUID7
 type SyncEventId = UUID7
 type AuditRecordId = UUID7

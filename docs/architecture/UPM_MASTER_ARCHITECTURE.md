@@ -23,6 +23,7 @@ Accepted implementation decisions refine this specification without replacing it
 - [ADR-0007: Versioned event deployment snapshots](decisions/ADR-0007-event-deployment-snapshots.md)
 - [ADR-0008: Shared React admin frontends](decisions/ADR-0008-shared-react-admin-frontends.md)
 - [ADR-0009: Site room materialization from deployed program locations](decisions/ADR-0009-site-room-materialization.md)
+- [ADR-0011: Resumable presentation media transfer and replication](decisions/ADR-0011-resumable-media-transfer-and-replication.md)
 
 Historical ADRs must not be rewritten to make later decisions retroactive. A significant change requires a new or superseding ADR.
 
@@ -698,6 +699,20 @@ Requirements:
 - Clear progress indicators
 
 Transfers should be able to adapt based on network saturation rather than blindly consuming all available bandwidth.
+
+Binary media transfer extends ADR-0006 without changing its network direction. Sites initiate all
+connections to Central: Central-to-Site delivery is a Site-initiated authenticated pull, while
+Site-to-Central replication is a Site-initiated authenticated push. Central does not require inbound
+reachability to Sites, including co-located Sites. Both directions use stable UUIDv7 transfer
+sessions, durable contiguous byte offsets, expected size, and full-file SHA-256 verification. The
+existing per-Site credential authenticates the Site, followed by independent authorization of the
+Site/Event/deployment/transfer relationship. See
+[ADR-0011](decisions/ADR-0011-resumable-media-transfer-and-replication.md).
+
+Partial receive files remain private receiver-owned staging until idempotent verification and
+finalization. Each destination Site has independent transfer progress. Local Site readiness and
+media replication are separate states: locally verified media remains usable while Central is
+offline or replication is pending/failed.
 
 ---
 
