@@ -46,7 +46,11 @@ export async function runBounded<T>(
     while (cursor < values.length) {
       const value = values[cursor++];
       await beforeEach();
-      await worker(value);
+      try {
+        await worker(value);
+      } catch {
+        // A single item owns its failure; it must never terminate the remaining batch.
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, run));

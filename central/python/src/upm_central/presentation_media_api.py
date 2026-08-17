@@ -1,7 +1,9 @@
 """Authenticated Central presentation-media staging and review APIs."""
 
+import asyncio
 import logging
 from collections.abc import Callable, Iterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 from urllib.parse import unquote
 from uuid import UUID
@@ -187,6 +189,28 @@ def register_presentation_media_routes(
 ) -> None:
     admin = [Depends(require_admin)]
     DbSession = Annotated[Session, Depends(db)]
+    upload_admission_lock = asyncio.Lock()
+    active_staging_uploads = 0
+
+    @asynccontextmanager
+    async def staging_admission():
+        nonlocal active_staging_uploads
+        async with upload_admission_lock:
+            if active_staging_uploads >= settings().staging_upload_concurrency:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "code": "staging_capacity",
+                        "message": "Staging capacity is temporarily full.",
+                    },
+                    headers={"Retry-After": str(settings().staging_retry_after_seconds)},
+                )
+            active_staging_uploads += 1
+        try:
+            yield
+        finally:
+            async with upload_admission_lock:
+                active_staging_uploads -= 1
 
     def media_storage() -> AsyncMediaStorageClient:
         configured = settings()
@@ -197,7 +221,7 @@ def register_presentation_media_routes(
 
     @app.post(
         "/api/v1/admin/events/{event_id}/media-imports",
-        status_code=201,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=admin,
         tags=["media"],
     )
@@ -214,18 +238,19 @@ def register_presentation_media_routes(
     ) -> dict[str, object]:
         service = staging_service()
         try:
-            item = await service.stage(
-                event_id=event_id,
-                destination_site_id=destination_site_id,
-                original_filename=unquote(original_filename),
-                source_relative_path=unquote(source_relative_path)
-                if source_relative_path
-                else None,
-                content_type=content_type,
-                idempotency_key=idempotency_key,
-                chunks=request.stream(),
-                actor=getattr(request.state, "admin_actor", "central-admin"),
-            )
+            async with staging_admission():
+                item = await service.stage(
+                    event_id=event_id,
+                    destination_site_id=destination_site_id,
+                    original_filename=unquote(original_filename),
+                    source_relative_path=unquote(source_relative_path)
+                    if source_relative_path
+                    else None,
+                    content_type=content_type,
+                    idempotency_key=idempotency_key,
+                    chunks=request.stream(),
+                    actor=getattr(request.state, "admin_actor", "central-admin"),
+                )
         except MediaStagingError as error:
             code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE if error.code == "too_large" else 422
             if error.code == "event_not_found":

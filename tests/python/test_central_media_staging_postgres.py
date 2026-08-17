@@ -9,7 +9,12 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from upm_central.persistence.models import Event, PresentationMediaImport, StorageRoot
+from upm_central.persistence.models import (
+    Event,
+    PresentationMediaImport,
+    ProcessingJob,
+    StorageRoot,
+)
 from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import MediaImportState
 from upm_shared.identifiers import new_uuid7
@@ -33,6 +38,7 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
 
     class StorageClient:
         writes = 0
+        commits = 0
 
         async def allocate_staging(self):
             return {
@@ -56,6 +62,7 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
             }
 
         async def commit(self, target_id, key, sha256):
+            self.commits += 1
             (tmp_path / "committed").write_bytes((tmp_path / "staged").read_bytes())
             return {
                 "storage_target_id": str(media_root_id),
@@ -115,18 +122,42 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
             persisted = session.get(PresentationMediaImport, result.media_import_id)
             assert active is not None and active.revision == 1
             assert persisted is not None
-            assert persisted.import_state in {
-                MediaImportState.STAGED,
-                MediaImportState.NEEDS_REVIEW,
-            }
+            assert persisted.import_state == MediaImportState.STAGED
             assert persisted.staging_storage_root_id == root_id
-            assert persisted.committed_storage_root_id == media_root_id
-            assert persisted.committed_storage_key is not None
+            assert persisted.committed_storage_root_id is None
+            assert persisted.committed_storage_key is None
+            queued = session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.idempotency_key == str(result.media_import_id)
+                )
+            )
+            assert queued is not None
             assert storage.writes == 1
+            assert storage.commits == 0
             assert (tmp_path / "staged").read_bytes() == payload
-            assert (tmp_path / "committed").read_bytes() == payload
+        replay = await CentralMediaStagingService(factory, storage, 1024).stage(
+            event_id=event_id,
+            destination_site_id=None,
+            original_filename="unmatched-deck.pptx",
+            source_relative_path=None,
+            content_type="application/vnd.ms-powerpoint",
+            idempotency_key=f"storage-revision-{event_id}",
+            chunks=chunks(),
+            actor="regression-test",
+        )
+        assert replay.media_import_id == result.media_import_id
+        assert storage.writes == 1
+        processed = await CentralMediaStagingService(factory, storage, 1024).process(
+            result.media_import_id
+        )
+        assert processed.import_state == MediaImportState.NEEDS_REVIEW
+        assert storage.commits == 1
+        assert (tmp_path / "committed").read_bytes() == payload
     finally:
         with factory.begin() as session:
+            session.query(ProcessingJob).filter(
+                ProcessingJob.idempotency_key == str(result.media_import_id)
+            ).delete(synchronize_session=False)
             session.query(PresentationMediaImport).filter(
                 PresentationMediaImport.event_id == event_id
             ).delete(synchronize_session=False)

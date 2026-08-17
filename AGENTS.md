@@ -32,6 +32,10 @@ Do not assume a capability is missing because the UI does not expose it. Inspect
 - Use the PostgreSQL durable job/outbox architecture for restart-sensitive, retryable, heavy, or show-critical work. Do not substitute in-memory background tasks.
 - Keep services modular, independently testable, single-purpose, observable, and replaceable.
 - Never commit passwords, tokens, certificates, API keys, `.env` files, or other secrets.
+- Codex must not commit generated binary artifacts, screenshots, presentation files, spreadsheets,
+  PDFs, videos, or archives unless that exact binary asset is an intentional repository dependency.
+  Tests must generate required fixtures at runtime in temporary directories. Before completing a
+  task, inspect the final diff against the task base for accidental binary files.
 - Do not add fake UI actions. A control must perform a real action or clearly identify an unavailable capability.
 - Update documentation when implementation or an approved decision materially changes documented behavior. Significant architecture changes require a new or superseding ADR; do not rewrite historical ADRs.
 

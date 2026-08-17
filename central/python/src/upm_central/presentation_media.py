@@ -124,11 +124,26 @@ class CentralMediaStagingService:
             or any(ord(character) < 32 for character in raw_filename)
         ):
             raise MediaStagingError("invalid original filename", "invalid_filename")
-        recognized_presentation = Path(filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
         try:
             relative_path = normalize_source_relative_path(source_relative_path, filename)
         except ValueError as error:
             raise MediaStagingError(str(error), "invalid_source_relative_path") from error
+        # Resolve an idempotent replay before allocating storage.  This transaction ends before
+        # any request bytes are read, so an upload cannot occupy a database connection while the
+        # client is sending a large file.
+        with self.factory.begin() as session:
+            if session.get(Event, event_id) is None:
+                raise MediaStagingError("event not found", "event_not_found")
+            if idempotency_key:
+                existing = session.scalar(
+                    select(PresentationMediaImport).where(
+                        PresentationMediaImport.idempotency_key == idempotency_key
+                    )
+                )
+                if existing and existing.import_state is not MediaImportState.FAILED:
+                    session.refresh(existing)
+                    session.expunge(existing)
+                    return existing
         try:
             allocation = await self.storage.allocate_staging()
         except MediaStorageOperationError as error:
@@ -136,8 +151,6 @@ class CentralMediaStagingService:
         except MediaStorageUnavailable as error:
             raise MediaStagingError(str(error), "storage_service_unavailable") from error
         with self.factory.begin() as session:
-            if session.get(Event, event_id) is None:
-                raise MediaStagingError("event not found", "event_not_found")
             existing = None
             if idempotency_key:
                 existing = session.scalar(
@@ -192,9 +205,6 @@ class CentralMediaStagingService:
             staged = await self.storage.write_staging(
                 allocation["storage_target_id"], allocation["storage_key"], bounded_chunks()
             )
-            committed = await self.storage.commit(
-                allocation["storage_target_id"], allocation["storage_key"], staged["sha256"]
-            )
         except (MediaStorageUnavailable, MediaStorageOperationError) as error:
             error_code = getattr(error, "code", "storage_service_unavailable")
             with self.factory.begin() as session:
@@ -213,18 +223,17 @@ class CentralMediaStagingService:
         try:
             with self.factory.begin() as session:
                 record = session.get(PresentationMediaImport, import_id)
-                media_root = self._storage_root(session, committed, "media")
                 record.size_bytes = staged["size_bytes"]
                 record.sha256 = staged["sha256"]
-                record.committed_storage_root_id = media_root.storage_root_id
-                record.committed_storage_key = committed["storage_key"]
                 record.import_state = MediaImportState.STAGED
-                if recognized_presentation:
-                    self._automatic_match_and_assign(session, record)
-                else:
-                    record.match_state = MediaMatchState.UNMATCHED
-                    record.match_reason = "Unclassified media type preserved for operator review"
-                    record.import_state = MediaImportState.NEEDS_REVIEW
+                record.match_reason = "Durably staged; downstream processing is queued"
+                CentralQueue(session).enqueue_processing(
+                    job_type="presentation_media.process",
+                    payload={"data": {"media_import_id": str(import_id)}},
+                    idempotency_key=str(import_id),
+                    required_capabilities=["cpu"],
+                    max_attempts=5,
+                )
                 session.add(
                     AuditRecord(
                         actor_id=actor,
@@ -237,7 +246,7 @@ class CentralMediaStagingService:
                             "original_filename": filename,
                             "size_bytes": total,
                             "sha256": record.sha256,
-                            "match_state": record.match_state,
+                            "processing_queued": True,
                         },
                     )
                 )
@@ -252,8 +261,7 @@ class CentralMediaStagingService:
                         "original_filename": filename,
                         "source_relative_path": relative_path,
                         "result": str(record.import_state),
-                        "match_result": str(record.match_state),
-                        "presentation_identifier_candidate": record.external_presentation_id,
+                        "processing_queued": True,
                     },
                 )
                 return record
@@ -283,6 +291,40 @@ class CentralMediaStagingService:
                 session.refresh(record)
                 session.expunge(record)
                 return record
+
+    async def process(self, media_import_id: UUID) -> PresentationMediaImport:
+        """Promote and match one durable staged import independently of its source request."""
+        with self.factory.begin() as session:
+            record = session.get(PresentationMediaImport, media_import_id)
+            if record is None:
+                raise MediaStagingError("media import not found", "not_found")
+            if record.import_state not in {MediaImportState.STAGED, MediaImportState.NEEDS_REVIEW}:
+                session.expunge(record)
+                return record
+            target_id = record.staging_storage_root_id
+            staging_key = record.staging_key
+            sha256 = record.sha256
+            recognized = (
+                Path(record.original_filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
+            )
+        if target_id is None or sha256 is None:
+            raise MediaStagingError("staged media reference is incomplete", "invalid_staging")
+        committed = await self.storage.commit(str(target_id), staging_key, sha256)
+        with self.factory.begin() as session:
+            record = session.get(PresentationMediaImport, media_import_id)
+            media_root = self._storage_root(session, committed, "media")
+            record.committed_storage_root_id = media_root.storage_root_id
+            record.committed_storage_key = committed["storage_key"]
+            if recognized:
+                self._automatic_match_and_assign(session, record)
+            else:
+                record.match_state = MediaMatchState.UNMATCHED
+                record.match_reason = "Unclassified media type preserved for operator review"
+                record.import_state = MediaImportState.NEEDS_REVIEW
+            session.flush()
+            session.refresh(record)
+            session.expunge(record)
+            return record
 
     def _automatic_match_and_assign(
         self, session: Session, record: PresentationMediaImport

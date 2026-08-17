@@ -49,14 +49,14 @@ describe("presentation upload selection", () => {
     expect(completed).toEqual(["a", "c"]);
   });
 
-  it("preserves a 370-item batch while skipping only known junk", async () => {
+  it("drains a 1,000-item batch with bounded concurrency", async () => {
     const selected = [
-      ...Array.from({ length: 300 }, (_, index) => file(`${index}.pptx`, `root/room/${index}.pptx`)),
+      ...Array.from({ length: 950 }, (_, index) => file(`${index}.pptx`, `root/room/${index}.pptx`)),
       ...Array.from({ length: 50 }, (_, index) => file(`material-${index}.xyz`, `root/source/material-${index}.xyz`)),
       ...Array.from({ length: 20 }, (_, index) => file(`~$lock-${index}.pptx`, `root/~$lock-${index}.pptx`)),
     ];
     const result = selectPresentationFiles(selected);
-    expect(result.accepted).toHaveLength(350);
+    expect(result.accepted).toHaveLength(1_000);
     expect(result.accepted.filter((item) => !item.recognized)).toHaveLength(50);
     expect(result.skipped).toHaveLength(20);
     let active = 0; let maximum = 0; let completed = 0;
@@ -65,6 +65,6 @@ describe("presentation upload selection", () => {
       await Promise.resolve(); completed += 1; active -= 1;
     });
     expect(maximum).toBe(2);
-    expect(completed).toBe(350);
+    expect(completed).toBe(1_000);
   });
 });

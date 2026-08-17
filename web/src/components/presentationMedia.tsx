@@ -12,12 +12,12 @@ export function MediaStatusBadge({ value }: { value: unknown }) {
   return <StatusBadge value={mapped[String(value)] ?? value} />;
 }
 
-type UploadState = "queued" | "uploading" | "retrying" | "staged" | "needs_review" | "matched" | "failed";
+type UploadState = "queued" | "uploading" | "retrying" | "staged" | "suggested" | "needs_review" | "confirmed" | "failed";
 export interface UploadItem extends SelectedUpload { progress: number; state: UploadState; retryCount: number; error?: string }
 
 export function MediaUploadDialog({ title, onClose, upload }: {
   title: string; onClose: () => void;
-  upload: (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => Promise<{ state: "staged" | "needs_review" | "matched" }>;
+  upload: (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => Promise<{ state: "staged" | "suggested" | "needs_review" | "confirmed" }>;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -74,7 +74,7 @@ export function MediaUploadDialog({ title, onClose, upload }: {
         <input ref={input} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
         <input ref={folderInput} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
       </div>
-      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Eligible <strong>{items.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Staged <strong>{items.filter((item) => item.state === "staged").length}</strong></span><span>Matched <strong>{items.filter((item) => item.state === "matched").length}</strong></span><span>Needs review <strong>{items.filter((item) => item.state === "needs_review").length}</strong></span><span>Retrying <strong>{items.filter((item) => item.state === "retrying").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
+      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Eligible <strong>{items.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Staged <strong>{items.filter((item) => item.state === "staged").length}</strong></span><span>Suggested <strong>{items.filter((item) => item.state === "suggested").length}</strong></span><span>Needs review <strong>{items.filter((item) => item.state === "needs_review").length}</strong></span><span>Confirmed <strong>{items.filter((item) => item.state === "confirmed").length}</strong></span><span>Retrying <strong>{items.filter((item) => item.state === "retrying").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
       <UploadQueue items={items} retry={run} />
       {skipped.length > 0 && <details className="skipped-files"><summary>{skipped.length} known junk or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
       <div className="button-row">
@@ -90,7 +90,8 @@ export function MediaUploadDialog({ title, onClose, upload }: {
 export function UploadQueue({ items, retry }: { items: UploadItem[]; retry: (item: UploadItem) => Promise<void> }) {
   if (!items.length) return null;
   return <div className="upload-queue" aria-label="Upload queue">
-    {items.map((item) => <article key={item.id}>
+    {items.length > 200 && <p>Showing the first 200 of {items.length} files. Aggregate progress includes the complete batch.</p>}
+    {items.slice(0, 200).map((item) => <article key={item.id}>
       <div><strong>{item.file.name}</strong><small>{item.relativePath || "Individual file"} · {formatBytes(item.file.size)}</small></div>
       <progress max="100" value={item.progress}>{Math.round(item.progress)}%</progress>
       <MediaStatusBadge value={item.state} />

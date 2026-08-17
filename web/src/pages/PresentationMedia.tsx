@@ -39,7 +39,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     if (mode === "central") {
       const result = await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath, retrying);
       data.refresh();
-      return { state: result.match_state === "suggested" ? "needs_review" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const };
+      return { state: result.match_state === "suggested" ? "suggested" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const };
     }
     else {
       let versionId: string | null = null;
@@ -47,7 +47,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
       await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath, retrying);
     }
     data.refresh();
-    return { state: uploadTarget ? "matched" as const : "needs_review" as const };
+    return { state: uploadTarget ? "confirmed" as const : "needs_review" as const };
   };
   if (events.loading) return <Loading />;
   if (events.error) return <ErrorSurface error={events.error} onRetry={events.refresh} />;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isRetryableUploadStatus, UPLOAD_RETRY_DELAYS_MS } from "../api/upload";
+import { isRetryableUploadStatus, retryAfterMilliseconds, UPLOAD_RETRY_DELAYS_MS } from "../api/upload";
 
 describe("upload retry policy", () => {
   it("uses bounded exponential backoff", () => {
@@ -8,5 +8,8 @@ describe("upload retry policy", () => {
   it("retries only transport and transient server pressure", () => {
     expect([undefined, 429, 500, 502, 503, 504].every(isRetryableUploadStatus)).toBe(true);
     expect([400, 401, 403, 409, 413, 422].some(isRetryableUploadStatus)).toBe(false);
+  });
+  it("honors Retry-After seconds", () => {
+    expect(retryAfterMilliseconds("3")).toBe(3_000);
   });
 });

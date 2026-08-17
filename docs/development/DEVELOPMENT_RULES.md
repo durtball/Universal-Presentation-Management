@@ -38,6 +38,10 @@ These rules operationalize the [Master Architecture](../architecture/UPM_MASTER_
 - Preserve original media. Derivatives are separate linked records and processing never overwrites source objects.
 - Use storage target plus validated relative object key; absolute host paths are deployment configuration, not media identity.
 - Keep API processes responsive by streaming large bodies and handing expensive work to workers.
+- Presentation media ingestion and processing are separate lifecycles. Intake sources durably stage
+  media and release the source connection; asynchronous UPM workers independently inspect, promote,
+  match, and prepare staged media. Matching is suggestion-driven and operator-authoritative: no
+  assignment is confirmed without explicit operator action.
 - Transfers must eventually verify identity, size, and hash, expose progress, and recover partial work; do not invent a disposable non-resumable critical protocol.
 - Implement media transfer according to ADR-0011: Sites initiate Central pulls and pushes, durable
   contiguous byte offset is the resume contract, and the existing Site credential authenticates

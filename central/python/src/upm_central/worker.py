@@ -1,6 +1,7 @@
 """Runnable Central durable worker process."""
 
 import argparse
+import asyncio
 import json
 import os
 import signal
@@ -9,6 +10,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
@@ -18,17 +20,27 @@ from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
 from upm_central.persistence.models import DeletionOperation
 from upm_central.persistence.queue import CentralQueue
+from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
+from upm_shared.media_storage_client import AsyncMediaStorageClient
 
 
 def log(event: str, **context: object) -> None:
     print(json.dumps({"event": event, **context}, default=str), flush=True)
 
 
-def execute_processing_job(session, queue: CentralQueue, work, worker_id: str) -> bool:
+def execute_processing_job(
+    session, queue: CentralQueue, work, worker_id: str, media_processor=None
+) -> bool:
     """Dispatch one claimed Central processing job; return false when it was failed."""
+    if work.job_type == "presentation_media.process":
+        if media_processor is None:
+            raise RuntimeError("presentation media processor is unavailable")
+        media_import_id = work.payload.get("data", {}).get("media_import_id")
+        asyncio.run(media_processor.process(UUID(str(media_import_id))))
+        return True
     if work.job_type not in {"lifecycle.delete_event", "lifecycle.delete_person"}:
         if work.job_type != "lifecycle.delete_people_bulk":
             return True
@@ -91,6 +103,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
     capabilities = {
         item.strip() for item in settings.worker_capabilities.split(",") if item.strip()
     }
+    media_processor = CentralMediaStagingService(
+        factory,
+        AsyncMediaStorageClient(settings.media_storage_url, settings.media_storage_token),
+        settings.max_upload_bytes,
+    )
     stop = Event()
 
     def request_stop(_signum: int, _frame: object) -> None:
@@ -143,7 +160,9 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     if kind == "processing":
                         try:
                             with session.begin_nested():
-                                executed = execute_processing_job(session, queue, work, worker_id)
+                                executed = execute_processing_job(
+                                    session, queue, work, worker_id, media_processor
+                                )
                         except Exception as exc:
                             operation_id = processing_deletion_operation_id(work)
                             operation = (
