@@ -57,6 +57,34 @@ from upm_shared.presentation_media import (
 logger = logging.getLogger(__name__)
 
 
+def intake_lifecycle_state(record: PresentationMediaImport) -> str:
+    """Return the single operator-facing lifecycle category for an intake record.
+
+    Match suggestions are meaningful only before confirmation.  Keeping this
+    derivation beside assignment prevents API summaries and clients from
+    independently interpreting the two persisted state machines.
+    """
+    if record.match_state is MediaMatchState.CONFIRMED:
+        if record.import_state is MediaImportState.FAILED:
+            return "failed"
+        if record.import_state in {
+            MediaImportState.TRANSFER_QUEUED,
+            MediaImportState.TRANSFERRING,
+            MediaImportState.RETRY_WAIT,
+        }:
+            return "processing"
+        return "confirmed"
+    if record.import_state is MediaImportState.FAILED:
+        return "failed"
+    if record.import_state in {MediaImportState.UPLOADING, MediaImportState.STAGED}:
+        return "processing"
+    if record.match_state is MediaMatchState.SUGGESTED:
+        return "suggested"
+    if record.import_state is MediaImportState.CANCELLED:
+        return "history"
+    return "needs_review"
+
+
 class MediaStagingError(RuntimeError):
     def __init__(self, message: str, code: str = "staging_failed") -> None:
         super().__init__(message)

@@ -206,6 +206,12 @@
 
 Central presentation uploads now retain Event-scoped, explained candidate rankings as suggestions rather than automatically creating PresentationVersions. The Event candidate API and shared review UI support presenter/session/Presentation search, changing a suggestion, re-running unresolved matching, individual confirmation, and explicit selected bulk confirmation with per-item results. Confirmation is Event-validated and retry-idempotent. The persistence-free matcher is shared with Site, but the equivalent Site unresolved-import review/confirmation API remains future integration work; Site-local direct uploads to an explicitly chosen Presentation continue to use existing offline-capable semantics.
 
+Central now derives one operator-facing intake lifecycle category. Confirmed imports are excluded
+from active review and good-match queues, expose history rather than matching actions, and are
+database-constrained to reference both a Presentation and PresentationVersion. A production-safe
+migration repairs historical confirmed/needs-review contradictions. The larger Site show-operations
+and modular Email Intake milestone remains incomplete.
+
 Roster-shaped program rows whose imported Presentation ID maps to `Session.session_code` now
 materialize an idempotent canonical Presentation and mirror Session presenters to that Presentation.
 Import commit enforces the assignable-Presentation invariant. Re-run matching repairs historical

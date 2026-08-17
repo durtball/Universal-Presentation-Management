@@ -42,6 +42,7 @@ from upm_central.persistence.models import (
 from upm_central.presentation_media import (
     CentralMediaStagingService,
     MediaStagingError,
+    intake_lifecycle_state,
 )
 from upm_central.program import touch_event_program
 from upm_central.sync import authenticate_site
@@ -144,6 +145,7 @@ def _candidate_views(
 
 
 def _view(item: PresentationMediaImport) -> dict[str, object]:
+    lifecycle_state = intake_lifecycle_state(item)
     return {
         "media_import_id": item.media_import_id,
         "event_id": item.event_id,
@@ -175,6 +177,14 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "origin": item.origin,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
+        "lifecycle_state": lifecycle_state,
+        "operator_actions": (
+            ["view_session", "view_presentation", "view_version", "view_source"]
+            if lifecycle_state in {"confirmed", "processing"}
+            else ["confirm", "rerun_matching", "choose_candidate"]
+            if lifecycle_state in {"suggested", "needs_review"}
+            else ["view_source"]
+        ),
     }
 
 
@@ -321,7 +331,13 @@ def register_presentation_media_routes(
                 "with_media": len(assigned),
                 "missing": sum(item.presentation_id not in assigned for item in presentations),
                 "needs_review": sum(
-                    item.import_state == MediaImportState.NEEDS_REVIEW for item in imports
+                    intake_lifecycle_state(item) == "needs_review" for item in imports
+                ),
+                "suggested": sum(
+                    intake_lifecycle_state(item) == "suggested" for item in imports
+                ),
+                "confirmed": sum(
+                    intake_lifecycle_state(item) == "confirmed" for item in imports
                 ),
                 "unmatched": sum(item.presentation_id is None for item in imports),
                 "transferring": sum(

@@ -3,7 +3,8 @@ from uuid import UUID
 
 import pytest
 
-from upm_shared.enums import MediaMatchState, PresentationIdentifierSource
+from upm_central.presentation_media import intake_lifecycle_state
+from upm_shared.enums import MediaImportState, MediaMatchState, PresentationIdentifierSource
 from upm_shared.presentation_media import (
     CanonicalPresentationMetadata,
     MatchCandidate,
@@ -61,6 +62,24 @@ def test_no_match_is_reviewable_not_an_exception() -> None:
     )
     assert result.state is MediaMatchState.UNMATCHED
     assert result.presentation_id is None
+
+
+@pytest.mark.parametrize(
+    ("match_state", "import_state", "expected"),
+    [
+        (MediaMatchState.UNMATCHED, MediaImportState.NEEDS_REVIEW, "needs_review"),
+        (MediaMatchState.SUGGESTED, MediaImportState.NEEDS_REVIEW, "suggested"),
+        (MediaMatchState.CONFIRMED, MediaImportState.ASSIGNED, "confirmed"),
+        (MediaMatchState.CONFIRMED, MediaImportState.TRANSFERRING, "processing"),
+        # A stale historical import_state cannot put confirmed media back into review.
+        (MediaMatchState.CONFIRMED, MediaImportState.NEEDS_REVIEW, "confirmed"),
+    ],
+)
+def test_intake_lifecycle_has_one_authoritative_category(
+    match_state: MediaMatchState, import_state: MediaImportState, expected: str
+) -> None:
+    record = type("Record", (), {"match_state": match_state, "import_state": import_state})()
+    assert intake_lifecycle_state(record) == expected
 
 
 def test_imported_and_offline_generated_identifiers_are_stable_and_distinct() -> None:

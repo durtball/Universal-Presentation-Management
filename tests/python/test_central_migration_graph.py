@@ -9,8 +9,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MERGE_REVISION = "f18a6c42d9e7"
 MERGE_PARENTS = {"5d23c80ab411", "d7f4a2c91b63"}
 STORAGE_REVISION = "a84d91c6e2f0"
-PREVIOUS_HEAD_REVISION = "b93e4a71d520"
-HEAD_REVISION = "c7a91e4b2d60"
+MEDIA_STORAGE_REVISION = "b93e4a71d520"
+PREVIOUS_HEAD_REVISION = "c7a91e4b2d60"
+HEAD_REVISION = "e19f4a7c2d31"
 
 
 def central_script() -> ScriptDirectory:
@@ -34,7 +35,10 @@ def test_central_migrations_have_one_merged_head() -> None:
     assert head.down_revision == PREVIOUS_HEAD_REVISION
     previous_head = script.get_revision(PREVIOUS_HEAD_REVISION)
     assert previous_head is not None
-    assert previous_head.down_revision == STORAGE_REVISION
+    assert previous_head.down_revision == MEDIA_STORAGE_REVISION
+    media_storage = script.get_revision(MEDIA_STORAGE_REVISION)
+    assert media_storage is not None
+    assert media_storage.down_revision == STORAGE_REVISION
     storage = script.get_revision(STORAGE_REVISION)
     assert storage is not None
     assert storage.down_revision == MERGE_REVISION
@@ -49,6 +53,7 @@ def test_both_central_branches_converge_at_merge_revision() -> None:
     assert {
         HEAD_REVISION,
         PREVIOUS_HEAD_REVISION,
+        MEDIA_STORAGE_REVISION,
         STORAGE_REVISION,
         MERGE_REVISION,
         *MERGE_PARENTS,

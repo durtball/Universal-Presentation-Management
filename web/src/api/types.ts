@@ -359,6 +359,8 @@ export interface CentralMediaImport extends Row {
   confirmed_by?: string | null;
   confirmed_at?: string | null;
   import_state: string;
+  lifecycle_state: "needs_review" | "suggested" | "confirmed" | "processing" | "failed" | "history";
+  operator_actions: string[];
   sync_state: string;
   origin: string;
   retry_count: number;

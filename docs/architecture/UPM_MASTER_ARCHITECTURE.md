@@ -1414,3 +1414,9 @@ This document governs the implementation until deliberately amended.
 ### Operator authority for presentation media matching
 
 Presentation media matching is suggestion-driven and operator-authoritative. UPM may automatically discover and rank candidate Presentation matches, but it may not finalize a media assignment without explicit operator confirmation. Operators may bulk-confirm explicitly selected high-confidence suggestions. Uncertain matching preserves valid uploaded media for review and is not an ingest failure. Central and Site apply this rule against their deployment-local Event program data and canonical Presentation / PresentationVersion model.
+
+Presentation Media is an intake and reconciliation queue, not the lasting operational presentation
+workspace. Confirmation closes its suggestion/review actions and links the provenance record to the
+canonical PresentationVersion. A confirmed record remains available as history, while Sessions and
+PresentationVersion views become the operational source. Presentation readiness and room delivery
+are separate lifecycles and must be presented independently.
