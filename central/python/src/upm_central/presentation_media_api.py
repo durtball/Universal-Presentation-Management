@@ -1,8 +1,6 @@
 """Authenticated Central presentation-media staging and review APIs."""
 
 import logging
-import os
-import shutil
 from collections.abc import Callable, Iterator
 from typing import Annotated
 from urllib.parse import unquote
@@ -18,8 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from upm_central.config import CentralDatabaseSettings
 from upm_central.media_replication import (
     authorize_replication_context,
-    finalize_replication,
-    recover_partial,
+    finalize_replication_reference,
 )
 from upm_central.persistence.models import (
     AuditRecord,
@@ -34,7 +31,6 @@ from upm_central.persistence.models import (
 from upm_central.presentation_media import (
     CentralMediaStagingService,
     MediaStagingError,
-    _safe_staging_path,
 )
 from upm_central.sync import authenticate_site
 from upm_shared.enums import (
@@ -43,6 +39,7 @@ from upm_shared.enums import (
     MediaReplicationState,
     MediaTransferState,
 )
+from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +80,8 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "sync_state": item.sync_state,
         "transfer_job_id": item.transfer_job_id,
         "site_media_object_id": item.site_media_object_id,
+        "committed_storage_target_id": item.committed_storage_root_id,
+        "committed_storage_key": item.committed_storage_key,
         "retry_count": item.retry_count,
         "error_code": item.error_code,
         "error_detail": item.error_detail,
@@ -102,6 +101,13 @@ def register_presentation_media_routes(
     admin = [Depends(require_admin)]
     DbSession = Annotated[Session, Depends(db)]
 
+    def media_storage() -> AsyncMediaStorageClient:
+        configured = settings()
+        return AsyncMediaStorageClient(configured.media_storage_url, configured.media_storage_token)
+
+    def staging_service() -> CentralMediaStagingService:
+        return CentralMediaStagingService(factory(), media_storage(), settings().max_upload_bytes)
+
     @app.post(
         "/api/v1/admin/events/{event_id}/media-imports",
         status_code=201,
@@ -119,9 +125,7 @@ def register_presentation_media_routes(
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
         content_type: Annotated[str | None, Header(alias="Content-Type")] = None,
     ) -> dict[str, object]:
-        service = CentralMediaStagingService(
-            factory(), settings().media_staging_path, settings().max_upload_bytes
-        )
+        service = staging_service()
         try:
             item = await service.stage(
                 event_id=event_id,
@@ -139,6 +143,10 @@ def register_presentation_media_routes(
             code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE if error.code == "too_large" else 422
             if error.code == "event_not_found":
                 code = 404
+            if error.code == "storage_service_unavailable":
+                code = status.HTTP_503_SERVICE_UNAVAILABLE
+            if error.code == "storage_write_error":
+                code = status.HTTP_507_INSUFFICIENT_STORAGE
             raise HTTPException(code, detail={"code": error.code, "message": str(error)}) from error
         except OSError as error:
             logger.exception(
@@ -282,9 +290,7 @@ def register_presentation_media_routes(
             else None,
             "match_state": str(item.match_state),
         }
-        CentralMediaStagingService(
-            factory(), settings().media_staging_path, settings().max_upload_bytes
-        ).assign(session, item, presentation_id, manual=True)
+        staging_service().assign(session, item, presentation_id, manual=True)
         session.add(
             AuditRecord(
                 actor_id=getattr(request.state, "admin_actor", "central-admin"),
@@ -395,7 +401,7 @@ def register_presentation_media_routes(
         }
 
     @app.get("/api/v1/media-transfers/{transfer_session_id}/content", tags=["media-transfer"])
-    def transfer_content(
+    async def transfer_content(
         transfer_session_id: UUID,
         session: DbSession,
         offset: Annotated[int, Query(ge=0)] = 0,
@@ -406,26 +412,19 @@ def register_presentation_media_routes(
         expected_size = item.size_bytes or 0
         if offset > expected_size:
             raise HTTPException(416, "offset exceeds expected size")
-        path = _safe_staging_path(
-            CentralMediaStagingService(
-                factory(), settings().media_staging_path, settings().max_upload_bytes
-            ).root,
-            item.staging_key,
-        )
-        if not path.is_file() or path.stat().st_size != expected_size:
-            raise HTTPException(409, "staged transfer source is unavailable")
+        if item.committed_storage_root_id is None or item.committed_storage_key is None:
+            raise HTTPException(409, "committed transfer source is unavailable")
         count = min(settings().transfer_block_bytes, expected_size - offset)
 
-        def content():
-            with path.open("rb") as source:
-                source.seek(offset)
-                remaining = count
-                while remaining:
-                    chunk = source.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
+        async def content():
+            try:
+                async for chunk in media_storage().stream_object(
+                    item.committed_storage_root_id, item.committed_storage_key, offset, count
+                ):
                     yield chunk
+            except MediaStorageUnavailable as error:
+                logger.exception("central_media_transfer_storage_unavailable")
+                raise RuntimeError("transfer storage unavailable") from error
 
         headers = {
             "X-UPM-Transfer-Offset": str(offset),
@@ -476,7 +475,7 @@ def register_presentation_media_routes(
         }
 
     @app.post("/api/v1/media-replications", tags=["media-transfer"])
-    def create_replication(
+    async def create_replication(
         payload: ReplicationCreate,
         session: DbSession,
         authorization: Annotated[str | None, Header()] = None,
@@ -520,16 +519,19 @@ def register_presentation_media_routes(
             )
             if immutable != requested:
                 raise HTTPException(409, "replication session metadata conflict")
+            if existing.storage_target_id is None and existing.finalized_media_object_id is None:
+                allocation = await media_storage().allocate_staging()
+                existing.storage_target_id = UUID(allocation["storage_target_id"])
+                existing.partial_key = allocation["storage_key"]
             return replication_view(existing)
         if presentation.presentation_identifier != payload.presentation_identifier:
             raise HTTPException(409, "presentation identifier mismatch")
-        root = CentralMediaStagingService(
-            factory(), settings().media_staging_path, settings().max_upload_bytes
-        ).root
         if payload.expected_size > settings().max_upload_bytes:
             raise HTTPException(413, "replication exceeds configured maximum")
-        if shutil.disk_usage(root).free < payload.expected_size:
-            raise HTTPException(507, "insufficient replication storage")
+        try:
+            allocation = await media_storage().allocate_staging()
+        except MediaStorageUnavailable as error:
+            raise HTTPException(503, str(error)) from error
         receiver = MediaReplicationReceiveSession(
             replication_session_id=payload.replication_session_id,
             origin_site_id=x_upm_site_id,
@@ -543,13 +545,13 @@ def register_presentation_media_routes(
             expected_size=payload.expected_size,
             sha256=payload.sha256,
             media_type=payload.media_type,
-            partial_key=str(payload.replication_session_id),
+            partial_key=allocation["storage_key"],
+            storage_target_id=UUID(allocation["storage_target_id"]),
             state=MediaTransferState.AVAILABLE,
             replication_state=MediaReplicationState.QUEUED,
         )
         session.add(receiver)
         session.flush()
-        recover_partial(root, receiver)
         return replication_view(receiver)
 
     @app.get("/api/v1/media-replications/{replication_session_id}", tags=["media-transfer"])
@@ -579,27 +581,24 @@ def register_presentation_media_routes(
             return replication_view(receiver)
         if offset != receiver.confirmed_offset:
             raise HTTPException(409, detail={"confirmed_offset": receiver.confirmed_offset})
-        root = CentralMediaStagingService(
-            factory(), settings().media_staging_path, settings().max_upload_bytes
-        ).root
-        path = recover_partial(root, receiver)
         written = 0
-        try:
-            with path.open("ab", buffering=0) as partial:
-                async for chunk in request.stream():
-                    written += len(chunk)
-                    if written > settings().transfer_block_bytes:
-                        raise HTTPException(413, "block exceeds configured maximum")
-                    if offset + written > receiver.expected_size:
-                        raise HTTPException(413, "block exceeds expected size")
-                    partial.write(chunk)
-                partial.flush()
-                os.fsync(partial.fileno())
-        except Exception:
-            with path.open("r+b") as partial:
-                partial.truncate(receiver.confirmed_offset)
-            raise
-        receiver.confirmed_offset += written
+
+        async def bounded():
+            nonlocal written
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > settings().transfer_block_bytes:
+                    raise HTTPException(413, "block exceeds configured maximum")
+                if offset + written > receiver.expected_size:
+                    raise HTTPException(413, "block exceeds expected size")
+                yield chunk
+
+        if receiver.storage_target_id is None:
+            raise HTTPException(409, "replication storage reference is missing")
+        result = await media_storage().append_staging(
+            receiver.storage_target_id, receiver.partial_key, offset, bounded()
+        )
+        receiver.confirmed_offset = result["confirmed_offset"]
         receiver.state = MediaTransferState.TRANSFERRING
         receiver.replication_state = MediaReplicationState.SYNCING
         receiver.last_progress_at = utc_now()
@@ -609,7 +608,7 @@ def register_presentation_media_routes(
         "/api/v1/media-replications/{replication_session_id}/finalize",
         tags=["media-transfer"],
     )
-    def finalize_replication_endpoint(
+    async def finalize_replication_endpoint(
         replication_session_id: UUID,
         session: DbSession,
         authorization: Annotated[str | None, Header()] = None,
@@ -618,8 +617,12 @@ def register_presentation_media_routes(
         receiver = replication_for_site(
             replication_session_id, session, authorization, x_upm_site_id
         )
-        root = CentralMediaStagingService(
-            factory(), settings().media_staging_path, settings().max_upload_bytes
-        ).root
-        finalize_replication(session, root, receiver)
+        if receiver.storage_target_id is None:
+            raise HTTPException(409, "replication storage reference is missing")
+        if receiver.confirmed_offset != receiver.expected_size:
+            raise HTTPException(409, "replication byte range is incomplete")
+        committed = await media_storage().commit(
+            receiver.storage_target_id, receiver.partial_key, receiver.sha256
+        )
+        finalize_replication_reference(session, receiver, committed)
         return replication_view(receiver)

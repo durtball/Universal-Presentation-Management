@@ -155,8 +155,13 @@
   persistent default volumes or independently configurable staging/media/temp host bind mounts.
   Their shared themed page remains rendered during service outage, can test/select compatible
   targets, and distinguishes backing-filesystem use from recursively measured UPM-owned bytes.
-  Complete importer/replication client conversion and the
-  database-owned resumable main-media migration worker remain incomplete.
+  Central browser uploads stream through the service, retain staging target/key identity, commit
+  immutable SHA-256 objects through the active media assignment, and serve Site-pull ranges without
+  a shared API filesystem. Site browser ingestion uses its independent service and Site-to-Central
+  replication reads committed object ranges through that boundary. Site-pull receive sessions also
+  retain service staging target/key references, append at durable offsets, verify/commit through the
+  Site service, and materialize local MediaObject metadata without copying through a worker path.
+  The database-owned resumable main-media migration worker remains incomplete.
 - **Program editing:** backend CRUD is broader than the browser; Sessions, Presenters, Presentations, and People pages are primarily read views after import.
 - **Imports:** current CSV/XLSX parsing is synchronous and limited to 25 MiB; arbitrary operator column mapping and worker processing are deferred.
 - **Authentication/RBAC:** Site admin authentication, Operator/restricted roles, user management, recovery, rotation UI, and a complete authorization policy are absent.

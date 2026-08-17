@@ -7,8 +7,8 @@ from uuid import UUID
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_shared.enums import MediaReplicationState
+from upm_shared.media_storage_client import MediaStorageClient
 from upm_site.config import SiteSettings
-from upm_site.media.storage import resolve_object_path
 from upm_site.persistence.models import (
     CentralRegistration,
     MediaObject,
@@ -28,6 +28,7 @@ def execute_central_push(
     settings: SiteSettings,
     job: TransferJob,
     client,
+    storage: MediaStorageClient | None = None,
 ) -> bool:
     replication = session.get(MediaReplicationSession, job.transfer_job_id, with_for_update=True)
     if replication is None:
@@ -41,9 +42,9 @@ def execute_central_push(
     token = decrypt_secret(settings, registration.credential_encrypted)
     if not token or not registration.central_url:
         raise RuntimeError("Central registration is unavailable")
-    source_path = resolve_object_path(target, media.object_key)
-    if not source_path.is_file() or source_path.stat().st_size != replication.expected_size:
-        raise RuntimeError("authoritative Site media is unavailable")
+    storage = storage or MediaStorageClient(
+        settings.media_storage_url, settings.media_storage_token
+    )
     headers = {
         "Authorization": f"Bearer {token}",
         "X-UPM-Site-ID": str(replication.site_id),
@@ -68,34 +69,33 @@ def execute_central_push(
         raise ValueError("Central returned an invalid confirmed offset")
     replication.confirmed_offset = confirmed
     replication.state = MediaReplicationState.SYNCING
-    with source_path.open("rb") as source:
-        while confirmed < replication.expected_size:
-            source.seek(confirmed)
-            block = source.read(
-                min(settings.transfer_block_bytes, replication.expected_size - confirmed)
+    while confirmed < replication.expected_size:
+        block = storage.read_object(
+            media.storage_target_id,
+            media.object_key,
+            confirmed,
+            min(settings.transfer_block_bytes, replication.expected_size - confirmed),
+        )
+        if not block:
+            raise RuntimeError("Site media ended before expected size")
+        remote = checked(
+            client.put(
+                f"{base}/{replication.replication_session_id}/content",
+                headers=headers,
+                params={"offset": confirmed},
+                content=block,
             )
-            if not block:
-                raise RuntimeError("Site media ended before expected size")
-            remote = checked(
-                client.put(
-                    f"{base}/{replication.replication_session_id}/content",
-                    headers=headers,
-                    params={"offset": confirmed},
-                    content=block,
-                )
-            ).json()
-            next_offset = int(remote["confirmed_offset"])
-            if next_offset != confirmed + len(block):
-                raise ValueError("Central acknowledgment does not match uploaded block")
-            confirmed = next_offset
-            replication.confirmed_offset = confirmed
-            replication.last_progress_at = utc_now()
-            job.progress = (
-                100
-                if replication.expected_size == 0
-                else confirmed * 100 / replication.expected_size
-            )
-            session.flush()
+        ).json()
+        next_offset = int(remote["confirmed_offset"])
+        if next_offset != confirmed + len(block):
+            raise ValueError("Central acknowledgment does not match uploaded block")
+        confirmed = next_offset
+        replication.confirmed_offset = confirmed
+        replication.last_progress_at = utc_now()
+        job.progress = (
+            100 if replication.expected_size == 0 else confirmed * 100 / replication.expected_size
+        )
+        session.flush()
     result = checked(
         client.post(f"{base}/{replication.replication_session_id}/finalize", headers=headers)
     ).json()

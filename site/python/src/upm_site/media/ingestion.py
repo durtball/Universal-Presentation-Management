@@ -22,9 +22,16 @@ from upm_shared.enums import (
     MediaAvailability,
     MediaCategory,
     MediaReplicationState,
+    StorageHealth,
+    StorageType,
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import PRIORITY_VALUES
+from upm_shared.media_storage_client import (
+    AsyncMediaStorageClient,
+    MediaStorageOperationError,
+    MediaStorageUnavailable,
+)
 from upm_shared.presentation_media import (
     CanonicalPresentationMetadata,
     canonical_presentation_filename,
@@ -124,12 +131,14 @@ class MediaIngestionService:
         *,
         max_upload_bytes: int,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        storage_client: AsyncMediaStorageClient | None = None,
     ) -> None:
         if max_upload_bytes <= 0 or chunk_size <= 0:
             raise ValueError("upload and chunk sizes must be positive")
         self.session_factory = session_factory
         self.max_upload_bytes = max_upload_bytes
         self.chunk_size = chunk_size
+        self.storage_client = storage_client
 
     def ingest(self, request: IngestionRequest, source: BinaryIO) -> IngestionResult:
         filename = validate_original_filename(request.original_filename)
@@ -232,10 +241,19 @@ class MediaIngestionService:
         if existing is not None:
             return existing
 
+        if self.storage_client is None:
+            raise IngestionError(
+                "Media Storage service is unavailable", code="storage_service_unavailable"
+            )
+        try:
+            allocation = await self.storage_client.allocate_staging()
+        except MediaStorageOperationError as error:
+            raise IngestionError(str(error), code=error.code) from error
+        except MediaStorageUnavailable as error:
+            raise IngestionError(str(error), code="storage_service_unavailable") from error
         media_id = new_uuid7()
         object_key = generate_object_key(request.category, media_id)
-        target, event_id = self._load_target_and_event(request)
-        self._preflight(target, request.expected_size or 0, media_id)
+        target, event_id = self._load_service_target_and_event(request, allocation)
         try:
             asset_id = self._create_staging_record(
                 request, media_id, object_key, filename, target.storage_target_id, event_id
@@ -245,7 +263,6 @@ class MediaIngestionService:
             if retry is not None:
                 return retry
             raise IngestionConflictError("ingestion idempotency conflict") from error
-        staged: Path | None = None
         finalized = False
         bytes_written = 0
         logger.info(
@@ -256,22 +273,39 @@ class MediaIngestionService:
             },
         )
         try:
-            staged = staging_path(target, media_id)
-            destination = ensure_safe_parent(target, object_key)
-            content_hash, bytes_written, detected_mime = await self._stream_async_to_staging(
-                chunks, staged, target
+
+            async def bounded():
+                nonlocal bytes_written
+                async for chunk in chunks:
+                    bytes_written += len(chunk)
+                    if bytes_written > self.max_upload_bytes:
+                        raise IngestionError("upload exceeds configured maximum", code="too_large")
+                    yield chunk
+
+            staged_result = await self.storage_client.write_staging(
+                allocation["storage_target_id"], allocation["storage_key"], bounded()
             )
             if request.expected_size is not None and bytes_written != request.expected_size:
                 raise IngestionError(
                     "uploaded size does not match expected size", code="size_mismatch"
                 )
-            require_capacity(target, 0)
+            content_hash = staged_result["sha256"]
+            detected_mime = request.client_mime_type or "application/octet-stream"
             self._record_finalizing(media_id, content_hash, bytes_written, detected_mime)
-            atomic_finalize(staged, destination)
+            committed = await self.storage_client.commit(
+                allocation["storage_target_id"], allocation["storage_key"], content_hash
+            )
+            self._record_service_commit(request.site_id, media_id, committed)
             finalized = True
             processing_job_id = self._mark_available_and_enqueue(
                 media_id, request.site_id, replicate_to_central=request.replicate_to_central
             )
+            try:
+                await self.storage_client.release_staging(
+                    allocation["storage_target_id"], allocation["storage_key"]
+                )
+            except (MediaStorageUnavailable, MediaStorageOperationError):
+                logger.warning("staged_release_deferred", extra={"media_object_id": str(media_id)})
             logger.info(
                 "upload_completed",
                 extra={
@@ -290,14 +324,6 @@ class MediaIngestionService:
                 content_hash,
             )
         except Exception as error:
-            if not finalized:
-                try:
-                    if staged is not None:
-                        staged.unlink(missing_ok=True)
-                except OSError:
-                    logger.exception(
-                        "failed_upload_cleanup", extra={"media_object_id": str(media_id)}
-                    )
             self._record_failure(media_id, error, finalized=finalized)
             logger.exception(
                 "upload_failed",
@@ -306,6 +332,107 @@ class MediaIngestionService:
             if isinstance(error, (IngestionError, StorageError)):
                 raise
             raise IngestionError("media ingestion failed") from error
+
+    def _load_service_target_and_event(
+        self, request: IngestionRequest, target: dict
+    ) -> tuple[StorageTarget, UUID | None]:
+        target_id = UUID(target["storage_target_id"])
+        with self.session_factory.begin() as session:
+            event_id = request.event_id
+            if request.presentation_version_id is not None:
+                version_event = session.scalar(
+                    select(Presentation.event_id)
+                    .join(
+                        PresentationVersion,
+                        PresentationVersion.presentation_id == Presentation.presentation_id,
+                    )
+                    .join(Event, Event.event_id == Presentation.event_id)
+                    .where(
+                        PresentationVersion.presentation_version_id
+                        == request.presentation_version_id,
+                        Event.site_id == request.site_id,
+                    )
+                )
+                if version_event is None:
+                    raise IngestionError("presentation version was not found", code="invalid_link")
+                if event_id is not None and event_id != version_event:
+                    raise IngestionError("event does not own the presentation version")
+                event_id = version_event
+            elif (
+                event_id is not None
+                and session.scalar(
+                    select(Event.event_id).where(
+                        Event.event_id == event_id, Event.site_id == request.site_id
+                    )
+                )
+                is None
+            ):
+                raise IngestionError("event was not found at this Site", code="invalid_link")
+            record = session.get(StorageTarget, target_id)
+            if record is None:
+                record = StorageTarget(
+                    storage_target_id=target_id,
+                    site_id=request.site_id,
+                    display_name=target["name"],
+                    storage_type=StorageType.LOCAL_FILESYSTEM,
+                    root_path=target["internal_path"],
+                    enabled=True,
+                    primary_media=False,
+                    health=StorageHealth.UNKNOWN,
+                    safety_reserve_bytes=0,
+                )
+                session.add(record)
+            return record, event_id
+
+    def _record_service_commit(self, site_id: UUID, media_id: UUID, committed: dict) -> None:
+        target_id = UUID(committed["storage_target_id"])
+        with self.session_factory.begin() as session:
+            target = session.get(StorageTarget, target_id)
+            if target is None:
+                target = StorageTarget(
+                    storage_target_id=target_id,
+                    site_id=site_id,
+                    display_name=committed["name"],
+                    storage_type=StorageType.LOCAL_FILESYSTEM,
+                    root_path=committed["internal_path"],
+                    enabled=True,
+                    primary_media=False,
+                    health=StorageHealth.UNKNOWN,
+                    safety_reserve_bytes=0,
+                )
+                session.add(target)
+                session.flush()
+            media = session.get(MediaObject, media_id)
+            media.storage_target_id = target_id
+            media.object_key = committed["storage_key"]
+
+    def adopt_committed(
+        self, request: IngestionRequest, committed: dict, size_bytes: int, sha256: str
+    ) -> IngestionResult:
+        """Materialize already verified receiver bytes without copying them through the app."""
+        existing = self._find_retry(request)
+        if existing is not None:
+            return existing
+        media_id = new_uuid7()
+        target, event_id = self._load_service_target_and_event(request, committed)
+        asset_id = self._create_staging_record(
+            request,
+            media_id,
+            committed["storage_key"],
+            validate_original_filename(request.original_filename),
+            target.storage_target_id,
+            event_id,
+        )
+        self._record_finalizing(
+            media_id, sha256, size_bytes, request.client_mime_type or "application/octet-stream"
+        )
+        self._record_service_commit(request.site_id, media_id, committed)
+        job_id = self._mark_available_and_enqueue(
+            media_id, request.site_id, replicate_to_central=request.replicate_to_central
+        )
+        return IngestionResult(
+            media_id, asset_id, job_id, MediaAvailability.AVAILABLE, size_bytes, sha256
+        )
 
     def _validate_request(self, request: IngestionRequest) -> None:
         if request.expected_size is not None and request.expected_size < 0:

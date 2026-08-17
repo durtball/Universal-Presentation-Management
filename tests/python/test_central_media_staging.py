@@ -54,3 +54,17 @@ def test_storage_root_uses_standard_central_record_revision() -> None:
     assert revision.nullable is False
     assert revision.default is not None
     assert revision.default.arg == 1
+
+
+def test_central_presentation_ingestion_has_no_legacy_data_path_dependency() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    config = (repository / "central/python/src/upm_central/config.py").read_text()
+    compose = (repository / "docker-compose.central.yml").read_text()
+    staging = (repository / "central/python/src/upm_central/presentation_media.py").read_text()
+
+    assert "media_staging_path" not in config
+    assert "media_objects_path" not in config
+    assert "central-media-data" not in compose
+    assert "/data/staging" not in staging
+    assert "write_staging" in staging
+    assert "storage.commit" in staging

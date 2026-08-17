@@ -147,6 +147,51 @@ def finalize_replication(
     return replica
 
 
+def finalize_replication_reference(
+    session: Session, receiver: MediaReplicationReceiveSession, committed: dict
+) -> MediaObjectReplica:
+    """Finalize domain metadata after Media Storage has checksum-verified publication."""
+    existing = (
+        session.get(MediaObjectReplica, receiver.finalized_media_object_id)
+        if receiver.finalized_media_object_id
+        else None
+    )
+    if existing is not None:
+        return existing
+    authorize_replication_context(
+        session,
+        site_id=receiver.origin_site_id,
+        event_id=receiver.event_id,
+        presentation_id=receiver.presentation_id,
+        presentation_version_id=receiver.presentation_version_id,
+    )
+    replica = MediaObjectReplica(
+        media_object_id=receiver.source_media_object_id,
+        authoritative_site_id=receiver.origin_site_id,
+        event_id=receiver.event_id,
+        category=MediaCategory.PRESENTATION_VERSION,
+        object_key=committed["storage_key"],
+        content_hash=receiver.sha256,
+        size_bytes=receiver.expected_size,
+        source_revision=1,
+    )
+    session.add(replica)
+    session.add(
+        PresentationAsset(
+            presentation_version_id=receiver.presentation_version_id,
+            media_object_id=receiver.source_media_object_id,
+            kind=AssetKind.ORIGINAL,
+        )
+    )
+    receiver.finalized_media_object_id = receiver.source_media_object_id
+    receiver.state = MediaTransferState.COMPLETED
+    receiver.replication_state = MediaReplicationState.SYNCED
+    receiver.last_progress_at = utc_now()
+    receiver.error_detail = None
+    session.flush()
+    return replica
+
+
 def cleanup_replication_partials(session: Session, root: Path, cutoff: datetime) -> int:
     """Expire only terminal, old, non-finalized receiver sessions."""
     receivers = session.scalars(

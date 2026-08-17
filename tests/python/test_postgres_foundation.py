@@ -44,8 +44,8 @@ def test_postgres_databases_and_version_histories_are_independent() -> None:
             site_version = connection.execute(
                 text("SELECT version_num FROM alembic_version_site")
             ).scalar_one()
-        assert central_version == "a84d91c6e2f0"
-        assert site_version
+        assert central_version == "b93e4a71d520"
+        assert site_version == "d42f7a91c6e3"
     finally:
         central_engine.dispose()
         site_engine.dispose()

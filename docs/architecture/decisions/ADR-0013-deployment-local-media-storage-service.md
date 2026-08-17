@@ -57,3 +57,11 @@ service logs.
 - Replication senders read committed objects through the local service and receivers allocate local
   service staging before verification and commit.
 - Cross-filesystem publication is a verified copy rather than an unsafe rename.
+
+## Ingestion integration
+
+Central and Site API/worker processes stream presentation bytes through their local service. A
+durable staged record retains target UUID and key; accepted and unmatched files are checksum-verified
+into the active media assignment. Transfer senders request bounded object ranges, and receivers use
+durable append offsets in service staging before commit. Application containers do not mount a
+parallel `/data/staging` or `/data/objects` presentation store.

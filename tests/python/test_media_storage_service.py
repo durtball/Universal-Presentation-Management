@@ -125,6 +125,31 @@ def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
     assert client.get(f"/api/v1/storage/staging/{STAGING_ID}/../escape").status_code in {404, 422}
 
 
+def test_resumable_append_and_bounded_object_reads(tmp_path):
+    client = configured_client(tmp_path)
+    allocation = client.post("/api/v1/storage/staging/allocations").json()
+    url = f"/api/v1/storage/staging/{allocation['storage_target_id']}/{allocation['storage_key']}"
+    assert client.patch(url, params={"offset": 0}, content=b"first").json()["confirmed_offset"] == 5
+    assert (
+        client.patch(url, params={"offset": 5}, content=b"-second").json()["confirmed_offset"] == 12
+    )
+    assert client.patch(url, params={"offset": 0}, content=b"bad").status_code == 409
+    digest = hashlib.sha256(b"first-second").hexdigest()
+    committed = client.post(
+        "/api/v1/storage/objects/commit",
+        json={
+            "staging_target_id": allocation["storage_target_id"],
+            "staging_key": allocation["storage_key"],
+            "sha256": digest,
+        },
+    ).json()
+    response = client.get(
+        f"/api/v1/storage/objects/{committed['storage_target_id']}/{committed['storage_key']}",
+        params={"offset": 6, "limit": 3},
+    )
+    assert response.content == b"sec"
+
+
 def test_assignment_persists_across_service_restart(tmp_path):
     client = configured_client(tmp_path)
     response = client.put(f"/api/v1/storage/assignments/staging/{STAGING_ID}")

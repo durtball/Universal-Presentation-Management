@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
 
-from anyio import to_thread
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -40,6 +38,11 @@ from upm_shared.enums import (
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import OutboxPayload
+from upm_shared.media_storage_client import (
+    AsyncMediaStorageClient,
+    MediaStorageOperationError,
+    MediaStorageUnavailable,
+)
 from upm_shared.presentation_media import (
     SUPPORTED_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
@@ -70,12 +73,32 @@ class CentralMediaStagingService:
     def __init__(
         self,
         factory: sessionmaker[Session],
-        staging_root: str,
+        storage: AsyncMediaStorageClient,
         max_upload_bytes: int,
     ) -> None:
         self.factory = factory
-        self.root = Path(staging_root)
+        self.storage = storage
         self.max_upload_bytes = max_upload_bytes
+
+    @staticmethod
+    def _storage_root(session: Session, target: dict, role: str) -> StorageRoot:
+        target_id = UUID(target["storage_target_id"])
+        root = session.get(StorageRoot, target_id)
+        if root is None:
+            root = StorageRoot(
+                storage_root_id=target_id,
+                role=role,
+                display_name=target["name"],
+                path=target["internal_path"],
+                backend_type="filesystem",
+                enabled=False,
+            )
+            session.add(root)
+            session.flush()
+        else:
+            root.display_name = target["name"]
+            root.path = target["internal_path"]
+        return root
 
     async def stage(
         self,
@@ -104,6 +127,12 @@ class CentralMediaStagingService:
             relative_path = normalize_source_relative_path(source_relative_path, filename)
         except ValueError as error:
             raise MediaStagingError(str(error), "invalid_source_relative_path") from error
+        try:
+            allocation = await self.storage.allocate_staging()
+        except MediaStorageOperationError as error:
+            raise MediaStagingError(str(error), error.code) from error
+        except MediaStorageUnavailable as error:
+            raise MediaStagingError(str(error), "storage_service_unavailable") from error
         with self.factory.begin() as session:
             if session.get(Event, event_id) is None:
                 raise MediaStagingError("event not found", "event_not_found")
@@ -119,27 +148,16 @@ class CentralMediaStagingService:
                     session.expunge(existing)
                     return existing
             import_id = existing.media_import_id if existing else new_uuid7()
-            storage_root = session.scalar(
-                select(StorageRoot).where(
-                    StorageRoot.role == "staging", StorageRoot.enabled.is_(True)
-                )
-            )
-            if storage_root is None:
-                storage_root = StorageRoot(
-                    role="staging",
-                    display_name="Temporary / Staging Storage",
-                    path=str(self.root),
-                    backend_type="filesystem",
-                    enabled=True,
-                )
-                session.add(storage_root)
-                session.flush()
-            self.root = Path(storage_root.path)
+            storage_root = self._storage_root(session, allocation, "staging")
             if existing:
                 existing.import_state = MediaImportState.UPLOADING
                 existing.error_code = None
                 existing.error_detail = None
                 existing.retry_count += 1
+                existing.staging_key = allocation["storage_key"]
+                existing.staging_storage_root_id = storage_root.storage_root_id
+                existing.committed_storage_root_id = None
+                existing.committed_storage_key = None
             else:
                 record = PresentationMediaImport(
                     media_import_id=import_id,
@@ -147,7 +165,7 @@ class CentralMediaStagingService:
                     destination_site_id=destination_site_id,
                     original_filename=filename,
                     source_relative_path=relative_path,
-                    staging_key=f"{import_id}.upload",
+                    staging_key=allocation["storage_key"],
                     staging_storage_root_id=storage_root.storage_root_id,
                     mime_type=content_type,
                     idempotency_key=idempotency_key,
@@ -156,27 +174,34 @@ class CentralMediaStagingService:
                     sync_state=SyncState.LOCAL,
                 )
                 session.add(record)
-        await to_thread.run_sync(self.root.mkdir, 0o750, True, True)
-        temporary = _safe_staging_path(self.root, f".{import_id}.partial")
-        final = _safe_staging_path(self.root, f"{import_id}.upload")
-        digest, total = hashlib.sha256(), 0
+        total = 0
+
+        async def bounded_chunks():
+            nonlocal total
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > self.max_upload_bytes:
+                    raise MediaStagingError("upload exceeds configured maximum", "too_large")
+                yield chunk
+
         try:
-            handle = await to_thread.run_sync(lambda: temporary.open("xb"))
-            try:
-                async for chunk in chunks:
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > self.max_upload_bytes:
-                        raise MediaStagingError("upload exceeds configured maximum", "too_large")
-                    digest.update(chunk)
-                    await to_thread.run_sync(handle.write, chunk)
-                await to_thread.run_sync(handle.flush)
-            finally:
-                await to_thread.run_sync(handle.close)
-            await to_thread.run_sync(temporary.replace, final)
+            staged = await self.storage.write_staging(
+                allocation["storage_target_id"], allocation["storage_key"], bounded_chunks()
+            )
+            committed = await self.storage.commit(
+                allocation["storage_target_id"], allocation["storage_key"], staged["sha256"]
+            )
+        except (MediaStorageUnavailable, MediaStorageOperationError) as error:
+            error_code = getattr(error, "code", "storage_service_unavailable")
+            with self.factory.begin() as session:
+                failed = session.get(PresentationMediaImport, import_id)
+                failed.import_state = MediaImportState.FAILED
+                failed.error_code = error_code
+                failed.error_detail = str(error)[:2048]
+            raise MediaStagingError(str(error), error_code) from error
         except Exception as error:
-            await to_thread.run_sync(temporary.unlink, True)
             with self.factory.begin() as session:
                 failed = session.get(PresentationMediaImport, import_id)
                 failed.import_state = MediaImportState.FAILED
@@ -186,8 +211,11 @@ class CentralMediaStagingService:
         try:
             with self.factory.begin() as session:
                 record = session.get(PresentationMediaImport, import_id)
-                record.size_bytes = total
-                record.sha256 = digest.hexdigest()
+                media_root = self._storage_root(session, committed, "media")
+                record.size_bytes = staged["size_bytes"]
+                record.sha256 = staged["sha256"]
+                record.committed_storage_root_id = media_root.storage_root_id
+                record.committed_storage_key = committed["storage_key"]
                 record.import_state = MediaImportState.STAGED
                 if recognized_presentation:
                     self._automatic_match_and_assign(session, record)
@@ -241,7 +269,7 @@ class CentralMediaStagingService:
             with self.factory.begin() as session:
                 record = session.get(PresentationMediaImport, import_id)
                 record.size_bytes = total
-                record.sha256 = digest.hexdigest()
+                record.sha256 = staged["sha256"]
                 record.match_state = MediaMatchState.UNMATCHED
                 record.match_reason = "Post-upload processing failed; file preserved for review"
                 record.import_state = MediaImportState.NEEDS_REVIEW

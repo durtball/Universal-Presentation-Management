@@ -868,6 +868,7 @@ class MediaTransferSession(SiteRecordMixin, SiteBase):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     media_type: Mapped[str | None] = mapped_column(String(255))
     partial_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    storage_target_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     confirmed_offset: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     state: Mapped[MediaTransferState] = mapped_column(
         upm_enum(MediaTransferState, length=16),

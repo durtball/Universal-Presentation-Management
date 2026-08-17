@@ -10,8 +10,6 @@ class SiteSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="UPM_SITE_", extra="ignore")
 
     database_url: str
-    media_mount_path: str = "/data/objects"
-    staging_mount_path: str = "/data/staging"
     media_storage_url: str = "http://site-media-storage:8080"
     media_storage_token: str = ""
     storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
@@ -41,17 +39,3 @@ class SiteSettings(BaseSettings):
         if not value.startswith("postgresql+psycopg://"):
             raise ValueError("Site database_url must use postgresql+psycopg://")
         return value
-
-    @field_validator("media_mount_path")
-    @classmethod
-    def require_absolute_container_path(cls, value: str) -> str:
-        if not value.startswith("/"):
-            raise ValueError("media_mount_path must be an absolute Linux container path")
-        return value.rstrip("/") or "/"
-
-    @field_validator("staging_mount_path")
-    @classmethod
-    def require_absolute_staging_path(cls, value: str) -> str:
-        if not value.startswith("/"):
-            raise ValueError("staging_mount_path must be an absolute Linux container path")
-        return value.rstrip("/") or "/"

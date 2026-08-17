@@ -121,7 +121,12 @@ def test_site_push_resumes_from_central_confirmed_offset(tmp_path, monkeypatch):
         transfer_block_bytes=65_536,
     )
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    assert execute_central_push(session, None, settings, job, client)
+
+    class Storage:
+        def read_object(self, _target_id, _key, offset, limit):
+            return data[offset : offset + limit]
+
+    assert execute_central_push(session, None, settings, job, client, Storage())
     assert offsets == [5]
     assert bytes(received) == data
     assert replication.state is MediaReplicationState.SYNCED

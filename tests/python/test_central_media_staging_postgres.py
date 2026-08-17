@@ -27,8 +27,42 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     event_id = new_uuid7()
     root_id = new_uuid7()
+    media_root_id = new_uuid7()
     payload = b"generated central presentation upload"
     previously_enabled: list = []
+
+    class StorageClient:
+        writes = 0
+
+        async def allocate_staging(self):
+            return {
+                "storage_target_id": str(root_id),
+                "storage_key": f"staging/{event_id}.upload",
+                "name": "Regression staging",
+                "internal_path": "/storage/staging",
+            }
+
+        async def write_staging(self, target_id, key, chunks):
+            self.writes += 1
+            content = b"".join([chunk async for chunk in chunks])
+            (tmp_path / "staged").write_bytes(content)
+            import hashlib
+
+            return {
+                "storage_target_id": str(target_id),
+                "storage_key": key,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+
+        async def commit(self, target_id, key, sha256):
+            (tmp_path / "committed").write_bytes((tmp_path / "staged").read_bytes())
+            return {
+                "storage_target_id": str(media_root_id),
+                "storage_key": f"objects/sha256/{sha256[:2]}/{sha256}",
+                "name": "Regression media",
+                "internal_path": "/storage/media",
+            }
 
     async def chunks():
         yield payload[:12]
@@ -60,7 +94,8 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
                 )
             )
 
-        result = await CentralMediaStagingService(factory, str(tmp_path), 1024).stage(
+        storage = StorageClient()
+        result = await CentralMediaStagingService(factory, storage, 1024).stage(
             event_id=event_id,
             destination_site_id=None,
             original_filename="unmatched-deck.pptx",
@@ -85,7 +120,11 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
                 MediaImportState.NEEDS_REVIEW,
             }
             assert persisted.staging_storage_root_id == root_id
-            assert (tmp_path / persisted.staging_key).read_bytes() == payload
+            assert persisted.committed_storage_root_id == media_root_id
+            assert persisted.committed_storage_key is not None
+            assert storage.writes == 1
+            assert (tmp_path / "staged").read_bytes() == payload
+            assert (tmp_path / "committed").read_bytes() == payload
     finally:
         with factory.begin() as session:
             session.query(PresentationMediaImport).filter(
@@ -95,6 +134,9 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
                 synchronize_session=False
             )
             session.query(StorageRoot).filter(StorageRoot.storage_root_id == root_id).delete(
+                synchronize_session=False
+            )
+            session.query(StorageRoot).filter(StorageRoot.storage_root_id == media_root_id).delete(
                 synchronize_session=False
             )
             if previously_enabled:

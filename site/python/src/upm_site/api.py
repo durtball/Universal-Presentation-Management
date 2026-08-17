@@ -26,7 +26,11 @@ from upm_shared.enums import (
     MediaCategory,
     StorageHealth,
 )
-from upm_shared.media_storage_client import MediaStorageClient, MediaStorageUnavailable
+from upm_shared.media_storage_client import (
+    AsyncMediaStorageClient,
+    MediaStorageClient,
+    MediaStorageUnavailable,
+)
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import (
     IngestionConflictError,
@@ -270,7 +274,11 @@ def create_app(
         content_type: Annotated[str | None, Header(alias="Content-Type")] = None,
     ) -> IngestionResponse:
         service = MediaIngestionService(
-            get_factory(), max_upload_bytes=get_settings().max_upload_bytes
+            get_factory(),
+            max_upload_bytes=get_settings().max_upload_bytes,
+            storage_client=AsyncMediaStorageClient(
+                get_settings().media_storage_url, get_settings().media_storage_token
+            ),
         )
         request = IngestionRequest(
             site_id=site_id,
@@ -296,6 +304,10 @@ def create_app(
                 if getattr(error, "code", "") == "too_large"
                 else status.HTTP_422_UNPROCESSABLE_ENTITY
             )
+            if getattr(error, "code", "") == "storage_service_unavailable":
+                code = status.HTTP_503_SERVICE_UNAVAILABLE
+            if getattr(error, "code", "") == "storage_write_error":
+                code = status.HTTP_507_INSUFFICIENT_STORAGE
             raise HTTPException(code, detail=str(error)) from error
         with get_factory()() as session:
             media = session.get(MediaObject, result.media_object_id)

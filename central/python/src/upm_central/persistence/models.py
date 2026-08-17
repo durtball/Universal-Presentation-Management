@@ -989,6 +989,10 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     staging_storage_root_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
     )
+    committed_storage_root_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
+    )
+    committed_storage_key: Mapped[str | None] = mapped_column(String(2048))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(255))
     sha256: Mapped[str | None] = mapped_column(String(64))
@@ -1047,6 +1051,7 @@ class MediaReplicationReceiveSession(CentralRecordMixin, CentralBase):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     media_type: Mapped[str | None] = mapped_column(String(255))
     partial_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    storage_target_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     confirmed_offset: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     state: Mapped[MediaTransferState] = mapped_column(
         domain_enum(MediaTransferState, length=16),
