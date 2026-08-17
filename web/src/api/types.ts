@@ -342,6 +342,7 @@ export interface SiteMediaWorkspace extends Row {
 }
 export interface CentralMediaImport extends Row {
   media_import_id: string;
+  batch_id?: string | null;
   event_id: string;
   destination_site_id?: string | null;
   presentation_id?: string | null;
@@ -366,6 +367,17 @@ export interface CentralMediaImport extends Row {
   error_detail?: string | null;
   created_at: string;
   updated_at: string;
+}
+export interface MediaImportBatch extends Row {
+  batch_id: string; event_id: string; selected_count: number; registered_count: number;
+  queued_count: number; uploading_count: number; staged_count: number; processing_count: number;
+  suggested_count: number; needs_review_count: number; confirmed_count: number; failed_count: number;
+  skipped_count: number; items: CentralMediaImport[];
+}
+export interface OperationalLog extends Row {
+  operational_log_id: string; occurred_at: string; severity: string; service: string;
+  event_type: string; message: string; context: Row; batch_id?: string | null;
+  media_import_id?: string | null; worker_id?: string | null;
 }
 export interface PresentationMatchCandidate extends Row {
   presentation_id: string; presentation_identifier: string; external_presentation_id?: string | null;

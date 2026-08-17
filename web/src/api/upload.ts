@@ -11,16 +11,17 @@ export class UploadError extends Error {
 }
 
 export async function uploadFile<T>({
-  path, file, relativePath, query, csrf, progress, retrying,
+  path, file, relativePath, query, csrf, progress, retrying, batchId,
 }: {
   path: string; file: File; relativePath?: string;
   query?: Record<string, string | number | undefined>; csrf?: string | null;
   progress: (value: number) => void; retrying?: (count: number) => void;
+  batchId?: string;
 }): Promise<T> {
   const idempotencyKey = `browser-upload-${Date.now()}-${requestSequence++}`;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await attemptUpload<T>({ path, file, relativePath, query, csrf, progress, idempotencyKey });
+      return await attemptUpload<T>({ path, file, relativePath, query, csrf, progress, idempotencyKey, batchId });
     } catch (error) {
       if (!(error instanceof UploadError) || !isRetryable(error) || attempt >= UPLOAD_RETRY_DELAYS_MS.length) throw error;
       retrying?.(attempt + 1);
@@ -30,10 +31,11 @@ export async function uploadFile<T>({
   }
 }
 
-function attemptUpload<T>({ path, file, relativePath, query, csrf, progress, idempotencyKey }: {
+function attemptUpload<T>({ path, file, relativePath, query, csrf, progress, idempotencyKey, batchId }: {
   path: string; file: File; relativePath?: string;
   query?: Record<string, string | number | undefined>; csrf?: string | null;
   progress: (value: number) => void; idempotencyKey: string;
+  batchId?: string;
 }) {
   return new Promise<T>((resolve, reject) => {
     const url = new URL(path, window.location.origin);
@@ -45,6 +47,7 @@ function attemptUpload<T>({ path, file, relativePath, query, csrf, progress, ide
     if (relativePath) request.setRequestHeader("X-UPM-Source-Relative-Path", encodeURIComponent(relativePath));
     request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
     request.setRequestHeader("Idempotency-Key", idempotencyKey);
+    if (batchId) request.setRequestHeader("X-UPM-Batch-ID", batchId);
     if (csrf) request.setRequestHeader("X-CSRF-Token", csrf);
     let watchdog = window.setTimeout(stalled, 120_000);
     const resetWatchdog = () => { window.clearTimeout(watchdog); watchdog = window.setTimeout(stalled, 120_000); };

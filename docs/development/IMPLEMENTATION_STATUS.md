@@ -152,6 +152,12 @@
   unmatched deletion/rename, and complete bulk Central-to-Site deployment controls remain incomplete.
   Running-stack end-to-end verification is still required before calling the overall workflow
   production-complete.
+- **Bulk intake visibility and operational logs:** Central browser imports now register durable batch
+  identity, retain selected/skipped accounting, correlate media lifecycle events, and render complete
+  large selections through a searchable/filterable windowed list. Central and Site independently
+  expose time-bounded structured operational logs with service/severity/context filters, polling,
+  export, typed correlation IDs, and recursive secret redaction. Operational retention is configured
+  separately from audit history. Broader instrumentation of untouched workflows remains incremental.
 - **File management:** a read-only Site managed-media list exists, but there is no filesystem browser, rename/move/copy/guarded delete, preview, download, print, upload, or entry-linking UI.
 - **PDF conversion:** derivative data structures and job primitives exist, but no converter, retry handler, status surface, preview, or room delivery workflow exists.
 - **Storage administration:** a reusable, authenticated Media Storage service exposes explicitly

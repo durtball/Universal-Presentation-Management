@@ -32,6 +32,7 @@ from upm_central.persistence.models import (
     Person,
     Presentation,
     PresentationMediaImport,
+    PresentationMediaImportBatch,
     PresentationPresenter,
     PresentationVersion,
     TransferJob,
@@ -79,6 +80,11 @@ class MatchConfirmation(BaseModel):
 
 class MatchConfirmationBatch(BaseModel):
     items: list[MatchConfirmation] = Field(min_length=1, max_length=1000)
+
+
+class MediaBatchCreate(BaseModel):
+    selected_count: int = Field(ge=1, le=100000)
+    skipped_items: list[dict[str, object]] = Field(default_factory=list, max_length=100000)
 
 
 def _candidate_views(
@@ -147,6 +153,7 @@ def _candidate_views(
 def _view(item: PresentationMediaImport) -> dict[str, object]:
     return {
         "media_import_id": item.media_import_id,
+        "batch_id": item.batch_id,
         "event_id": item.event_id,
         "destination_site_id": item.destination_site_id,
         "presentation_id": item.presentation_id,
@@ -176,6 +183,36 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "origin": item.origin,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
+    }
+
+
+def _batch_view(session: Session, item: PresentationMediaImportBatch) -> dict[str, object]:
+    imports = session.scalars(
+        select(PresentationMediaImport).where(PresentationMediaImport.batch_id == item.batch_id)
+    ).all()
+    return {
+        "batch_id": item.batch_id,
+        "event_id": item.event_id,
+        "origin": item.origin,
+        "created_by": item.created_by,
+        "created_at": item.created_at,
+        "completed_at": item.completed_at,
+        "status": item.status,
+        "selected_count": item.selected_count,
+        "registered_count": len(imports),
+        "queued_count": max(0, item.selected_count - item.skipped_count - len(imports)),
+        "uploading_count": sum(row.import_state is MediaImportState.UPLOADING for row in imports),
+        "staged_count": sum(row.import_state is MediaImportState.STAGED for row in imports),
+        "processing_count": sum(row.import_state is MediaImportState.STAGED for row in imports),
+        "suggested_count": sum(row.match_state is MediaMatchState.SUGGESTED for row in imports),
+        "needs_review_count": sum(
+            row.import_state is MediaImportState.NEEDS_REVIEW for row in imports
+        ),
+        "confirmed_count": sum(row.match_state is MediaMatchState.CONFIRMED for row in imports),
+        "failed_count": sum(row.import_state is MediaImportState.FAILED for row in imports),
+        "skipped_count": item.skipped_count,
+        "skipped_items": item.skipped_items,
+        "items": [_view(row) for row in imports],
     }
 
 
@@ -219,6 +256,55 @@ def register_presentation_media_routes(
         return CentralMediaStagingService(factory(), media_storage(), settings().max_upload_bytes)
 
     @app.post(
+        "/api/v1/admin/events/{event_id}/media-import-batches",
+        status_code=201,
+        dependencies=admin,
+        tags=["media"],
+    )
+    def create_batch(
+        event_id: UUID, body: MediaBatchCreate, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        if session.get(Event, event_id) is None:
+            raise HTTPException(404, "event not found")
+        item = PresentationMediaImportBatch(
+            event_id=event_id,
+            origin="browser",
+            created_by=getattr(request.state, "admin_actor", "central-admin"),
+            selected_count=body.selected_count,
+            skipped_count=len(body.skipped_items),
+            skipped_items=body.skipped_items,
+        )
+        session.add(item)
+        session.flush()
+        from upm_central.operational_logs import record_log
+
+        record_log(
+            session,
+            service="central-api",
+            event_type="batch.created",
+            message=f"Bulk import registered with {body.selected_count} selected files",
+            batch_id=item.batch_id,
+            event_id=event_id,
+            context={
+                "selected_count": body.selected_count,
+                "skipped_count": len(body.skipped_items),
+            },
+        )
+        return _batch_view(session, item)
+
+    @app.get(
+        "/api/v1/admin/events/{event_id}/media-import-batches", dependencies=admin, tags=["media"]
+    )
+    def list_batches(event_id: UUID, session: DbSession) -> dict[str, object]:
+        items = session.scalars(
+            select(PresentationMediaImportBatch)
+            .where(PresentationMediaImportBatch.event_id == event_id)
+            .order_by(PresentationMediaImportBatch.created_at.desc())
+            .limit(100)
+        ).all()
+        return {"items": [_batch_view(session, item) for item in items]}
+
+    @app.post(
         "/api/v1/admin/events/{event_id}/media-imports",
         status_code=status.HTTP_201_CREATED,
         dependencies=admin,
@@ -233,6 +319,7 @@ def register_presentation_media_routes(
         ] = None,
         destination_site_id: Annotated[UUID | None, Query()] = None,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+        batch_id: Annotated[UUID | None, Header(alias="X-UPM-Batch-ID")] = None,
         content_type: Annotated[str | None, Header(alias="Content-Type")] = None,
     ) -> dict[str, object]:
         service = staging_service()
@@ -247,6 +334,7 @@ def register_presentation_media_routes(
                     else None,
                     content_type=content_type,
                     idempotency_key=idempotency_key,
+                    batch_id=batch_id,
                     chunks=request.stream(),
                     actor=getattr(request.state, "admin_actor", "central-admin"),
                 )

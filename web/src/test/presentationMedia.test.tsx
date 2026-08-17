@@ -14,6 +14,32 @@ describe("presentation media workflows", () => {
     expect(await screen.findAllByText("Staged")).toHaveLength(3); // summary label plus two items
   });
 
+  it("keeps 2,000 rows searchable without rendering the entire list", () => {
+    const upload = vi.fn();
+    render(<MediaUploadDialog title="Bulk Import" onClose={() => undefined} upload={upload} />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const files = Array.from({ length: 2_000 }, (_, index) => new File([String(index)], `file-${index}.pptx`));
+    fireEvent.change(input, { target: { files } });
+    expect(screen.getByText("Bulk Import — 2000 files")).toBeInTheDocument();
+    expect(screen.queryByText("file-1999.pptx")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search batch files"), { target: { value: "file-1999" } });
+    expect(screen.getByText("file-1999.pptx")).toBeInTheDocument();
+    expect(document.querySelectorAll(".upload-queue article").length).toBeLessThan(30);
+  });
+
+  it("registers the complete batch and opens its correlated log", async () => {
+    const upload = vi.fn(async () => ({ state: "staged" as const }));
+    const registerBatch = vi.fn(async () => "batch-527");
+    const viewLog = vi.fn();
+    render(<MediaUploadDialog title="Bulk Import" onClose={() => undefined} upload={upload} registerBatch={registerBatch} onViewBatchLog={viewLog} />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: Array.from({ length: 527 }, (_, index) => new File(["x"], `${index}.pptx`)) } });
+    fireEvent.click(screen.getByRole("button", { name: "Upload 527 files" }));
+    await waitFor(() => expect(registerBatch).toHaveBeenCalledWith(527, []));
+    fireEvent.click(await screen.findByRole("button", { name: "View Batch Log" }));
+    expect(viewLog).toHaveBeenCalledWith("batch-527");
+  });
+
   it("shows current version, complete history, canonical names, and local readiness", () => {
     render(<PresentationMediaDetail onClose={() => undefined} row={{
       presentation_id: "p1", presentation_identifier: "UPM-101", title: "Opening",

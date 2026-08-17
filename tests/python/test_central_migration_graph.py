@@ -9,8 +9,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MERGE_REVISION = "f18a6c42d9e7"
 MERGE_PARENTS = {"5d23c80ab411", "d7f4a2c91b63"}
 STORAGE_REVISION = "a84d91c6e2f0"
-PREVIOUS_HEAD_REVISION = "b93e4a71d520"
-HEAD_REVISION = "c7a91e4b2d60"
+PREVIOUS_HEAD_REVISION = "c7a91e4b2d60"
+PREVIOUS_OPERATOR_REVISION = "b93e4a71d520"
+HEAD_REVISION = "e91c2a7b4d10"
 
 
 def central_script() -> ScriptDirectory:
@@ -34,7 +35,10 @@ def test_central_migrations_have_one_merged_head() -> None:
     assert head.down_revision == PREVIOUS_HEAD_REVISION
     previous_head = script.get_revision(PREVIOUS_HEAD_REVISION)
     assert previous_head is not None
-    assert previous_head.down_revision == STORAGE_REVISION
+    assert previous_head.down_revision == PREVIOUS_OPERATOR_REVISION
+    operator_previous = script.get_revision(PREVIOUS_OPERATOR_REVISION)
+    assert operator_previous is not None
+    assert operator_previous.down_revision == STORAGE_REVISION
     storage = script.get_revision(STORAGE_REVISION)
     assert storage is not None
     assert storage.down_revision == MERGE_REVISION
@@ -67,5 +71,5 @@ def test_storage_root_revision_upgrade_is_reversible() -> None:
 
 def test_site_media_storage_reference_has_one_head() -> None:
     script = site_script()
-    assert script.get_heads() == ["d42f7a91c6e3"]
+    assert script.get_heads() == ["aa12bc34de56"]
     assert script.get_revision("d42f7a91c6e3").down_revision == "c18d3f7a92e1"

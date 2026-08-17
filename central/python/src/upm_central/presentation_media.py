@@ -8,9 +8,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from upm_central.operational_logs import record_log
 from upm_central.persistence.models import (
     AuditRecord,
     Event,
@@ -19,6 +20,7 @@ from upm_central.persistence.models import (
     Person,
     Presentation,
     PresentationMediaImport,
+    PresentationMediaImportBatch,
     PresentationPresenter,
     PresentationVersion,
     ProcessingJob,
@@ -58,6 +60,51 @@ from upm_shared.presentation_media import (
 logger = logging.getLogger(__name__)
 
 
+def _complete_batch_if_accounted(session: Session, batch_id: UUID | None) -> None:
+    if not batch_id:
+        return
+    batch = session.get(PresentationMediaImportBatch, batch_id)
+    if batch is None or batch.completed_at:
+        return
+    registered = (
+        session.scalar(
+            select(func.count())
+            .select_from(PresentationMediaImport)
+            .where(PresentationMediaImport.batch_id == batch_id)
+        )
+        or 0
+    )
+    active = (
+        session.scalar(
+            select(func.count())
+            .select_from(PresentationMediaImport)
+            .where(
+                PresentationMediaImport.batch_id == batch_id,
+                PresentationMediaImport.import_state.in_(
+                    [MediaImportState.UPLOADING, MediaImportState.STAGED]
+                ),
+            )
+        )
+        or 0
+    )
+    if registered + batch.skipped_count >= batch.selected_count and active == 0:
+        batch.status = "completed"
+        batch.completed_at = utc_now()
+        record_log(
+            session,
+            service="central-worker",
+            event_type="batch.completed",
+            message="Bulk import processing reached an accounted terminal state",
+            batch_id=batch_id,
+            event_id=batch.event_id,
+            context={
+                "selected_count": batch.selected_count,
+                "registered_count": registered,
+                "skipped_count": batch.skipped_count,
+            },
+        )
+
+
 class MediaStagingError(RuntimeError):
     def __init__(self, message: str, code: str = "staging_failed") -> None:
         super().__init__(message)
@@ -82,6 +129,7 @@ class CentralMediaStagingService:
         self.factory = factory
         self.storage = storage
         self.max_upload_bytes = max_upload_bytes
+        self._candidate_cache: dict[UUID, tuple[int, list[MatchCandidate]]] = {}
 
     @staticmethod
     def _storage_root(session: Session, target: dict, role: str) -> StorageRoot:
@@ -112,6 +160,7 @@ class CentralMediaStagingService:
         source_relative_path: str | None,
         content_type: str | None,
         idempotency_key: str | None,
+        batch_id: UUID | None = None,
         chunks: AsyncIterator[bytes],
         actor: str,
     ) -> PresentationMediaImport:
@@ -135,6 +184,10 @@ class CentralMediaStagingService:
         with self.factory.begin() as session:
             if session.get(Event, event_id) is None:
                 raise MediaStagingError("event not found", "event_not_found")
+            if batch_id:
+                batch = session.get(PresentationMediaImportBatch, batch_id)
+                if batch is None or batch.event_id != event_id:
+                    raise MediaStagingError("media import batch not found", "batch_not_found")
             if idempotency_key:
                 existing = session.scalar(
                     select(PresentationMediaImport).where(
@@ -177,6 +230,7 @@ class CentralMediaStagingService:
             else:
                 record = PresentationMediaImport(
                     media_import_id=import_id,
+                    batch_id=batch_id,
                     event_id=event_id,
                     destination_site_id=destination_site_id,
                     original_filename=filename,
@@ -190,6 +244,16 @@ class CentralMediaStagingService:
                     sync_state=SyncState.LOCAL,
                 )
                 session.add(record)
+                record_log(
+                    session,
+                    service="central-api",
+                    event_type="file.registered",
+                    message="Presentation file registered for upload",
+                    batch_id=batch_id,
+                    media_import_id=import_id,
+                    event_id=event_id,
+                    context={"filename": filename, "source_relative_path": relative_path},
+                )
         total = 0
 
         async def bounded_chunks():
@@ -213,6 +277,17 @@ class CentralMediaStagingService:
                 failed.import_state = MediaImportState.FAILED
                 failed.error_code = error_code
                 failed.error_detail = str(error)[:2048]
+                record_log(
+                    session,
+                    service="central-api",
+                    severity="error",
+                    event_type="upload.failed",
+                    message="Presentation staging failed",
+                    batch_id=failed.batch_id,
+                    media_import_id=import_id,
+                    event_id=failed.event_id,
+                    context={"error_code": error_code, "safe_message": str(error)},
+                )
             raise MediaStagingError(str(error), error_code) from error
         except Exception as error:
             with self.factory.begin() as session:
@@ -220,6 +295,17 @@ class CentralMediaStagingService:
                 failed.import_state = MediaImportState.FAILED
                 failed.error_code = getattr(error, "code", "staging_failed")
                 failed.error_detail = str(error)[:2048]
+                record_log(
+                    session,
+                    service="central-api",
+                    severity="error",
+                    event_type="upload.failed",
+                    message="Presentation staging failed",
+                    batch_id=failed.batch_id,
+                    media_import_id=import_id,
+                    event_id=failed.event_id,
+                    context={"error_code": failed.error_code, "safe_message": str(error)},
+                )
             raise
         try:
             with self.factory.begin() as session:
@@ -251,6 +337,21 @@ class CentralMediaStagingService:
                         },
                     )
                 )
+                record_log(
+                    session,
+                    service="central-api",
+                    event_type="upload.staged",
+                    message="Presentation received into durable staging",
+                    batch_id=batch_id,
+                    media_import_id=import_id,
+                    event_id=event_id,
+                    context={
+                        "filename": filename,
+                        "size_bytes": total,
+                        "processing_job_id": str(import_id),
+                    },
+                )
+                _complete_batch_if_accounted(session, record.batch_id)
                 session.flush()
                 session.refresh(record)
                 session.expunge(record)
@@ -316,6 +417,21 @@ class CentralMediaStagingService:
                     record.match_state = MediaMatchState.UNMATCHED
                     record.match_reason = "Unclassified media type preserved for operator review"
                     record.import_state = MediaImportState.NEEDS_REVIEW
+                record_log(
+                    session,
+                    service="central-worker",
+                    event_type="match.suggested"
+                    if record.match_state is MediaMatchState.SUGGESTED
+                    else "match.unmatched",
+                    message="Presentation match suggested"
+                    if record.match_state is MediaMatchState.SUGGESTED
+                    else "Presentation needs operator review",
+                    batch_id=record.batch_id,
+                    media_import_id=record.media_import_id,
+                    event_id=record.event_id,
+                    context={"reason": record.match_reason},
+                )
+                _complete_batch_if_accounted(session, record.batch_id)
                 session.flush()
                 session.refresh(record)
                 session.expunge(record)
@@ -329,6 +445,18 @@ class CentralMediaStagingService:
                     record.import_state = MediaImportState.NEEDS_REVIEW
                     record.error_code = "analysis_failed"
                     record.error_detail = f"{type(error).__name__}: {error}"[:2048]
+                    record_log(
+                        session,
+                        service="central-worker",
+                        severity="error",
+                        event_type="match.analysis_failed",
+                        message="Presentation analysis failed; staged media preserved",
+                        batch_id=record.batch_id,
+                        media_import_id=record.media_import_id,
+                        event_id=record.event_id,
+                        context={"error_code": record.error_code, "safe_message": str(error)},
+                    )
+                    _complete_batch_if_accounted(session, record.batch_id)
             raise
 
     def queue_promotion(
@@ -370,6 +498,17 @@ class CentralMediaStagingService:
             required_capabilities=["cpu"],
             max_attempts=5,
         )
+        record_log(
+            session,
+            service="central-api",
+            event_type="confirmation.requested",
+            message="Presentation confirmation queued",
+            batch_id=record.batch_id,
+            media_import_id=record.media_import_id,
+            event_id=record.event_id,
+            presentation_id=presentation_id,
+            context={"processing_job_id": idempotency_key},
+        )
 
     async def promote_and_assign(
         self, media_import_id: UUID, presentation_id: UUID, *, actor: str
@@ -400,6 +539,18 @@ class CentralMediaStagingService:
                 record.committed_storage_root_id = media_root.storage_root_id
                 record.committed_storage_key = committed["storage_key"]
                 self.assign(session, record, presentation_id, manual=True, actor=actor)
+                record_log(
+                    session,
+                    service="central-worker",
+                    event_type="media.promoted",
+                    message="Presentation confirmed and canonical media published",
+                    batch_id=record.batch_id,
+                    media_import_id=record.media_import_id,
+                    event_id=record.event_id,
+                    presentation_id=record.presentation_id,
+                    presentation_version_id=record.presentation_version_id,
+                    context={"storage_key": record.committed_storage_key},
+                )
                 session.add(
                     AuditRecord(
                         actor_id=actor,
@@ -423,6 +574,27 @@ class CentralMediaStagingService:
     def _automatic_match_and_assign(
         self, session: Session, record: PresentationMediaImport
     ) -> None:
+        event_revision = (
+            session.scalar(select(Event.revision).where(Event.event_id == record.event_id)) or 1
+        )
+        cached = self._candidate_cache.get(record.event_id)
+        if cached and cached[0] == event_revision:
+            candidates = cached[1]
+        else:
+            candidates = self._load_match_candidates(session, record.event_id)
+            self._candidate_cache[record.event_id] = (event_revision, candidates)
+        result = match_presentation(
+            record.source_relative_path or record.original_filename, candidates
+        )
+        record.match_state = result.state
+        record.match_reason = result.reason
+        record.match_candidates = list(result.candidates)
+        if result.state is MediaMatchState.UNMATCHED:
+            self._explain_unmaterialized_session(session, record)
+        # Matching is suggestion-only. Even an exact identifier never creates a version.
+        record.import_state = MediaImportState.NEEDS_REVIEW
+
+    def _load_match_candidates(self, session: Session, event_id: UUID) -> list[MatchCandidate]:
         rows = session.execute(
             select(Presentation, ProgramSession, Person)
             .outerjoin(ProgramSession, ProgramSession.session_id == Presentation.session_id)
@@ -436,7 +608,7 @@ class CentralMediaStagingService:
                 == PresentationPresenter.event_participation_id,
             )
             .outerjoin(Person, Person.person_id == EventParticipation.person_id)
-            .where(Presentation.event_id == record.event_id)
+            .where(Presentation.event_id == event_id)
             .order_by(
                 Presentation.presentation_id,
                 PresentationPresenter.primary_presenter.desc(),
@@ -464,47 +636,42 @@ class CentralMediaStagingService:
                     or (program_session.starts_at if program_session else None),
                 )
             )
-        result = match_presentation(
-            record.original_filename,
-            candidates,
-        )
-        record.match_state = result.state
-        record.match_reason = result.reason
-        record.match_candidates = list(result.candidates)
-        if result.state is MediaMatchState.UNMATCHED:
-            filename_tokens = {
-                token.casefold()
-                for token in re.split(r"[^A-Za-z0-9]+", Path(record.original_filename).stem)
-                if token
-            }
-            matching_unmaterialized = next(
-                (
-                    item
-                    for item in session.scalars(
-                        select(ProgramSession).where(
-                            ProgramSession.event_id == record.event_id,
-                            ProgramSession.session_code.is_not(None),
-                        )
+        return candidates
+
+    def _explain_unmaterialized_session(
+        self, session: Session, record: PresentationMediaImport
+    ) -> None:
+        filename_tokens = {
+            token.casefold()
+            for token in re.split(r"[^A-Za-z0-9]+", Path(record.original_filename).stem)
+            if token
+        }
+        matching_unmaterialized = next(
+            (
+                item
+                for item in session.scalars(
+                    select(ProgramSession).where(
+                        ProgramSession.event_id == record.event_id,
+                        ProgramSession.session_code.is_not(None),
                     )
-                    if item.session_code.casefold() in filename_tokens
-                    and session.scalar(
-                        select(Presentation.presentation_id).where(
-                            Presentation.event_id == record.event_id,
-                            Presentation.session_id == item.session_id,
-                        )
-                    )
-                    is None
-                ),
-                None,
-            )
-            if matching_unmaterialized:
-                record.match_reason = (
-                    f"Session {matching_unmaterialized.session_code} found, but no assignable "
-                    "Presentation record is materialized. Re-run matching to repair imported "
-                    "program data."
                 )
-        # Matching is suggestion-only. Even an exact identifier never creates a version.
-        record.import_state = MediaImportState.NEEDS_REVIEW
+                if item.session_code.casefold() in filename_tokens
+                and session.scalar(
+                    select(Presentation.presentation_id).where(
+                        Presentation.event_id == record.event_id,
+                        Presentation.session_id == item.session_id,
+                    )
+                )
+                is None
+            ),
+            None,
+        )
+        if matching_unmaterialized:
+            record.match_reason = (
+                f"Session {matching_unmaterialized.session_code} found, but no assignable "
+                "Presentation record is materialized. Re-run matching to repair imported "
+                "program data."
+            )
 
     def assign(
         self,

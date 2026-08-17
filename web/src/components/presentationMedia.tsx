@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type UIEvent } from "react";
 import type { PresentationMediaRow, PresentationMediaVersion } from "../api/types";
 import { StatusBadge } from "./StatusBadge";
 import { runBounded, selectPresentationFiles, type SelectedUpload, type SkippedUpload } from "./uploadSelection";
@@ -15,9 +15,11 @@ export function MediaStatusBadge({ value }: { value: unknown }) {
 type UploadState = "queued" | "uploading" | "retrying" | "staged" | "suggested" | "needs_review" | "confirmed" | "failed";
 export interface UploadItem extends SelectedUpload { progress: number; state: UploadState; retryCount: number; error?: string }
 
-export function MediaUploadDialog({ title, onClose, upload }: {
+export function MediaUploadDialog({ title, onClose, upload, registerBatch, onViewBatchLog }: {
   title: string; onClose: () => void;
-  upload: (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => Promise<{ state: "staged" | "suggested" | "needs_review" | "confirmed" }>;
+  upload: (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void, batchId?: string) => Promise<{ state: "staged" | "suggested" | "needs_review" | "confirmed" }>;
+  registerBatch?: (selected: number, skipped: SkippedUpload[]) => Promise<string>;
+  onViewBatchLog?: (batchId: string) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -25,6 +27,10 @@ export function MediaUploadDialog({ title, onClose, upload }: {
   const [skipped, setSkipped] = useState<SkippedUpload[]>([]);
   const [paused, setPaused] = useState(false);
   const [running, setRunning] = useState(false);
+  const [batchId, setBatchId] = useState<string>();
+  const batchIdRef = useRef<string | undefined>(undefined);
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
   const pausedRef = useRef(false);
   const resumeWaiters = useRef<Array<() => void>>([]);
   useEffect(() => {
@@ -39,7 +45,7 @@ export function MediaUploadDialog({ title, onClose, upload }: {
   const run = async (item: UploadItem) => {
     setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "uploading", error: undefined } : value));
     try {
-      const result = await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)), item.relativePath, (retryCount) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "retrying", retryCount } : value)));
+      const result = await upload(item.file, (progress) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress } : value)), item.relativePath, (retryCount) => setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "retrying", retryCount } : value)), batchIdRef.current);
       setItems((all) => all.map((value) => value.id === item.id ? { ...value, progress: 100, state: result.state } : value));
     } catch (error) {
       setItems((all) => all.map((value) => value.id === item.id ? { ...value, state: "failed", error: error instanceof Error ? error.message : "Upload failed" } : value));
@@ -66,7 +72,7 @@ export function MediaUploadDialog({ title, onClose, upload }: {
   const drop = (event: DragEvent) => { event.preventDefault(); add(event.dataTransfer.files); };
   return <div className="dialog-backdrop" role="presentation">
     <section className="dialog media-upload" role="dialog" aria-modal="true" aria-labelledby="upload-title">
-      <h2 id="upload-title">{title}</h2>
+      <h2 id="upload-title">{title} — {items.length + skipped.length} files</h2>
       <p>Original files are streamed to the server and preserved. Replacements create a new version.</p>
       <div className="drop-zone" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
         <strong>Drop presentation files here</strong><span>or</span>
@@ -74,24 +80,32 @@ export function MediaUploadDialog({ title, onClose, upload }: {
         <input ref={input} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
         <input ref={folderInput} hidden type="file" multiple onChange={(event) => event.target.files && add(event.target.files)} />
       </div>
-      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Discovered <strong>{items.length + skipped.length}</strong></span><span>Eligible <strong>{items.length}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Staged <strong>{items.filter((item) => item.state === "staged").length}</strong></span><span>Suggested <strong>{items.filter((item) => item.state === "suggested").length}</strong></span><span>Needs review <strong>{items.filter((item) => item.state === "needs_review").length}</strong></span><span>Confirmed <strong>{items.filter((item) => item.state === "confirmed").length}</strong></span><span>Retrying <strong>{items.filter((item) => item.state === "retrying").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
-      <UploadQueue items={items} retry={run} />
-      {skipped.length > 0 && <details className="skipped-files"><summary>{skipped.length} known junk or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
+      {(items.length > 0 || skipped.length > 0) && <div className="upload-summary" aria-label="Upload summary"><span>Selected <strong>{items.length + skipped.length}</strong></span><span>Registered <strong>{batchId ? items.length + skipped.length : 0}</strong></span><span>Queued <strong>{items.filter((item) => item.state === "queued").length}</strong></span><span>Uploading <strong>{items.filter((item) => item.state === "uploading").length}</strong></span><span>Staged <strong>{items.filter((item) => item.state === "staged").length}</strong></span><span>Processing <strong>0</strong></span><span>Suggested <strong>{items.filter((item) => item.state === "suggested").length}</strong></span><span>Needs review <strong>{items.filter((item) => item.state === "needs_review").length}</strong></span><span>Confirmed <strong>{items.filter((item) => item.state === "confirmed").length}</strong></span><span>Retrying <strong>{items.filter((item) => item.state === "retrying").length}</strong></span><span>Failed <strong>{items.filter((item) => item.state === "failed").length}</strong></span><span>Skipped <strong>{skipped.length}</strong></span></div>}
+      <div className="media-toolbar"><input className="input" aria-label="Search batch files" placeholder="Search filename or relative path" value={search} onChange={(event) => setSearch(event.target.value)} /><select className="input" aria-label="Filter batch files" value={filter} onChange={(event) => setFilter(event.target.value)}>{["all","queued","uploading","staged","processing","suggested","needs_review","confirmed","retrying","failed","skipped"].map((value) => <option key={value} value={value}>{value.replace("_", " ")}</option>)}</select></div>
+      <UploadQueue items={items} retry={run} filter={filter} search={search} />
+      {skipped.length > 0 && ["all", "skipped"].includes(filter) && <details className="skipped-files" open={filter === "skipped"}><summary>{skipped.length} known junk or temporary file{skipped.length === 1 ? "" : "s"} skipped</summary><ul>{skipped.filter((item) => item.path.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map((item, index) => <li key={`${item.path}-${index}`}><strong>{item.path}</strong> — {item.reason}</li>)}</ul></details>}
       <div className="button-row">
-        {items.some((item) => item.state === "queued") && !running && <button className="button button--primary" onClick={() => void start()}>Upload {items.filter((item) => item.state === "queued").length} file{items.filter((item) => item.state === "queued").length === 1 ? "" : "s"}</button>}
+        {items.some((item) => item.state === "queued") && !running && <button className="button button--primary" onClick={() => void (async () => { if (!batchId && registerBatch) { const value = await registerBatch(items.length + skipped.length, skipped); batchIdRef.current = value; setBatchId(value); } await start(); })()}>Upload {items.filter((item) => item.state === "queued").length} file{items.filter((item) => item.state === "queued").length === 1 ? "" : "s"}</button>}
         {running && <button className="button" onClick={() => setQueuePaused(!paused)}>{paused ? "Resume" : "Pause"}</button>}
         {items.some((item) => item.state === "failed") && !running && <button className="button" onClick={() => void retryFailed()}>Retry Failed</button>}
+        {batchId && onViewBatchLog && <button className="button" onClick={() => onViewBatchLog(batchId)}>View Batch Log</button>}
+        {batchId && onViewBatchLog && <button className="button" onClick={() => window.open(`/api/v1/admin/logs?batch_id=${batchId}&minutes=525600&limit=500`, "_blank")}>Export Batch Log</button>}
         <button className="button" onClick={onClose}>Done</button>
       </div>
     </section>
   </div>;
 }
 
-export function UploadQueue({ items, retry }: { items: UploadItem[]; retry: (item: UploadItem) => Promise<void> }) {
+export function UploadQueue({ items, retry, filter = "all", search = "" }: { items: UploadItem[]; retry: (item: UploadItem) => Promise<void>; filter?: string; search?: string }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const filtered = useMemo(() => items.filter((item) => filter !== "skipped" && (filter === "all" || item.state === filter) && `${item.file.name} ${item.relativePath || ""}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [items, filter, search]);
   if (!items.length) return null;
-  return <div className="upload-queue" aria-label="Upload queue">
-    {items.length > 200 && <p>Showing the first 200 of {items.length} files. Aggregate progress includes the complete batch.</p>}
-    {items.slice(0, 200).map((item) => <article key={item.id}>
+  const rowHeight = 58, viewport = 348, overscan = 4;
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const end = Math.min(filtered.length, Math.ceil((scrollTop + viewport) / rowHeight) + overscan);
+  return <div className="upload-queue" aria-label="Upload queue" onScroll={(event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop)}>
+    <div style={{ height: start * rowHeight }} aria-hidden="true" />
+    {filtered.slice(start, end).map((item) => <article key={item.id} data-index={items.indexOf(item)}>
       <div><strong>{item.file.name}</strong><small>{item.relativePath || "Individual file"} · {formatBytes(item.file.size)}</small></div>
       <progress max="100" value={item.progress}>{Math.round(item.progress)}%</progress>
       <MediaStatusBadge value={item.state} />
@@ -99,6 +113,7 @@ export function UploadQueue({ items, retry }: { items: UploadItem[]; retry: (ite
       {item.error && <p className="error-text">{friendlyError(item.error)}</p>}
       {item.state === "failed" && <button className="button button--small" onClick={() => void retry(item)}>Retry</button>}
     </article>)}
+    <div style={{ height: (filtered.length - end) * rowHeight }} aria-hidden="true" />
   </div>;
 }
 

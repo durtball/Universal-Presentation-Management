@@ -99,4 +99,6 @@ export const siteApi = {
     get<OperationsDashboard>("/api/v1/operations/dashboard", signal),
   retrySync: () =>
     siteClient.request<Row>("/api/v1/sync/retry-failed", { method: "POST" }),
+  logs: (query: Record<string, string | number | undefined>, signal?: AbortSignal) =>
+    siteClient.request<{items: import("./types").OperationalLog[]; next_cursor?: string | null}>("/api/v1/logs", { query, signal, retry: true }),
 };

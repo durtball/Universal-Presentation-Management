@@ -44,6 +44,7 @@ from upm_site.media.storage import (
     StorageObservation,
     observe_storage,
 )
+from upm_site.operational_logs import record_log, register_log_routes
 from upm_site.operations_api import register_operations_routes
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.models import (
@@ -314,6 +315,20 @@ def create_app(
             if media is None:
                 raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "media metadata missing")
             response = _media_response(session, media)
+        with get_factory().begin() as session:
+            record_log(
+                session,
+                service="presentation-intake",
+                event_type="upload.staged",
+                message="Presentation received into Site-local media",
+                media_import_id=result.media_object_id,
+                event_id=event_id,
+                presentation_version_id=presentation_version_id,
+                context={
+                    "filename": unquote(original_filename),
+                    "duplicate_retry": result.duplicate_retry,
+                },
+            )
         return IngestionResponse(**response.model_dump(), duplicate_retry=result.duplicate_retry)
 
     @app.get("/api/v1/media/{media_object_id}", response_model=MediaResponse, tags=["media"])
@@ -691,4 +706,5 @@ pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></bo
     register_program_routes(app, get_session)
     register_operations_routes(app, get_session, transaction)
     register_presentation_media_routes(app, get_session, transaction)
+    register_log_routes(app, get_session)
     return app

@@ -118,8 +118,12 @@ export function centralApi(csrfToken: string | null = null) {
       get<CentralMediaWorkspace>(`/api/v1/admin/events/${eventId}/media-imports`, signal),
     mediaCandidates: (eventId: string, search = "", signal?: AbortSignal) =>
       client.request<{ candidates: PresentationMatchCandidate[] }>(`/api/v1/admin/events/${eventId}/presentation-match-candidates`, { signal, retry: true, query: search ? { search } : undefined }),
-    uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void, relativePath?: string, onRetry?: (count: number) => void) =>
-      uploadFile<CentralMediaImport>({ path: `/api/v1/admin/events/${eventId}/media-imports`, file, progress: onProgress, csrf: csrfToken, relativePath, retrying: onRetry }),
+    createMediaBatch: (eventId: string, selectedCount: number, skippedItems: Array<{path:string;reason:string}>) =>
+      client.request<import("./types").MediaImportBatch>(`/api/v1/admin/events/${eventId}/media-import-batches`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected_count: selectedCount, skipped_items: skippedItems }) }),
+    mediaBatches: (eventId: string) => get<{items: import("./types").MediaImportBatch[]}>(`/api/v1/admin/events/${eventId}/media-import-batches`),
+    uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void, relativePath?: string, onRetry?: (count: number) => void, batchId?: string) =>
+      uploadFile<CentralMediaImport>({ path: `/api/v1/admin/events/${eventId}/media-imports`, file, progress: onProgress, csrf: csrfToken, relativePath, retrying: onRetry, batchId }),
+    logs: (query: Record<string, string | number | undefined>, signal?: AbortSignal) => client.request<{items: import("./types").OperationalLog[]; next_cursor?: string | null}>("/api/v1/admin/logs", { query, signal, retry: true }),
     assignMedia: (importId: string, presentationId: string) =>
       client.request<CentralMediaImport>(
         `/api/v1/admin/media-imports/${importId}/assignment/${presentationId}`,

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { centralApi } from "../api/central";
 import { siteApi } from "../api/site";
 import type { CentralMediaImport, PresentationMatchCandidate, PresentationMediaRow, Row } from "../api/types";
@@ -12,6 +13,7 @@ import { useSession } from "../state/session";
 type Mode = "central" | "site";
 export function PresentationMedia({ mode }: { mode: Mode }) {
   const session = useSession();
+  const navigate = useNavigate();
   const [eventId, setEventId] = useState("");
   const [filter, setFilter] = useState("all");
   const [upload, setUpload] = useState(false);
@@ -23,6 +25,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     ? (await centralApi(session.csrfToken).events(signal)).map((event) => ({ id: event.event_id, name: event.name }))
     : (await siteApi.deployments(signal)).map((event) => ({ id: event.central_event_id, name: event.event_name || event.central_event_id })), [mode, session?.csrfToken]);
   const activeEvent = eventId || events.data?.[0]?.id || "";
+  const batches = useApi(async () => mode === "central" && activeEvent ? (await centralApi(session.csrfToken).mediaBatches(activeEvent)).items : [], [mode, activeEvent, session.csrfToken]);
   const data = useApi(async (signal) => {
     if (!activeEvent) return null;
     if (mode === "site") {
@@ -35,9 +38,9 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
   }, [mode, activeEvent, session?.csrfToken]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
-  const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void) => {
+  const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void, batchId?: string) => {
     if (mode === "central") {
-      const result = await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath, retrying);
+      const result = await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath, retrying, batchId);
       data.refresh();
       return { state: result.match_state === "suggested" ? "suggested" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const };
     }
@@ -53,6 +56,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
   if (events.error) return <ErrorSurface error={events.error} onRetry={events.refresh} />;
   return <Page eyebrow={mode === "central" ? "Global media control" : "Site-local media"} title="Presentation Media" description={mode === "central" ? "Upload, match, version, and track presentation media across Sites." : "Local uploads remain fully available while Central or the WAN is unavailable."} actions={<button className="button button--primary" disabled={!activeEvent} onClick={() => setUpload(true)}>Upload media</button>}>
     {mode === "site" && <div className="autonomy-banner"><strong>Site-local autonomy</strong><span>Uploading and using local media never requires Central connectivity.</span></div>}
+    {mode === "central" && batches.data?.length ? <Panel title="Recent Imports" description="Durable batch accounting remains available after the upload window closes."><div className="log-list">{batches.data.slice(0, 10).map((batch) => <article key={batch.batch_id}><time>{batch.selected_count} selected</time><strong>{batch.registered_count} registered · {batch.failed_count} failed</strong><small>{batch.staged_count} staged · {batch.suggested_count} suggested · {batch.needs_review_count} needs review</small><button className="button button--small" onClick={() => navigate(`/admin/logs?batch_id=${batch.batch_id}`)}>View Batch Log</button></article>)}</div></Panel> : null}
     <Panel><div className="media-toolbar"><label>Event<select className="input" value={activeEvent} onChange={(event) => setEventId(event.target.value)}>{events.data?.map((event) => <option value={event.id} key={event.id}>{event.name}</option>)}</select></label><label>Status<select className="input" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">All</option><option value="suggested">Suggested</option><option value="good">Good Matches</option><option value="needs_review">Needs Review</option><option value="confirmed">Confirmed</option><option value="processing">Processing</option><option value="missing">Missing media</option><option value="ready">Ready</option><option value="failed">Failed</option></select></label><button className="button" onClick={data.refresh}>Refresh status</button></div></Panel>
     {data.loading ? <Loading /> : data.error ? <ErrorSurface error={data.error} onRetry={data.refresh} /> : data.data ? <>
       {(summary.expected === 0) && <div className="autonomy-banner autonomy-banner--warning"><strong>No Presentation records available</strong><span>This event currently has no committed Presentation records available for matching. Files will still be preserved for review.</span></div>}
@@ -60,7 +64,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
       <Panel title="Presentations" description="Current media and version state. Select Details for complete history."><DataTable rows={rows} columns={columns} rowKey={(row) => row.presentation_id} label="presentation media" pageSize={25} actions={(row) => <><button className="button button--small" onClick={() => setSelected(row)}>Details</button><button className="button button--small" onClick={() => { setUploadTarget(row.presentation_id); setUpload(true); }}>New version</button></>} /></Panel>
       <Panel title="Match Session / Presenter" description="Suggestions remain unassigned until you explicitly confirm them.">{data.data.unmatched.length ? <>{mode === "central" && <div className="media-toolbar media-toolbar--review"><label>Search review<input className="input" value={reviewSearch} onChange={(event) => setReviewSearch(event.target.value)} placeholder="Filename, presenter, or ID" /></label><button className="button" onClick={() => setChecked(new Set(goodMatchIds(data.data!.unmatched as CentralMediaImport[], reviewSearch, filter)))}>Select All Good Matches</button><button className="button" onClick={() => setChecked(new Set(data.data!.unmatched.filter((item) => reviewVisible(item as CentralMediaImport, reviewSearch, filter)).map((item) => String(item.media_import_id))))}>Select All Visible</button><button className="button" onClick={() => setChecked(new Set())}>Clear Selection</button><button className="button button--primary" disabled={!checked.size} onClick={() => { const items = data.data!.unmatched.filter((item) => checked.has(String(item.media_import_id))).map((item) => ({ media_import_id: String(item.media_import_id), presentation_id: selectedCandidate(item as CentralMediaImport) })).filter((item) => item.presentation_id); void centralApi(session.csrfToken).confirmMedia(items).then(() => { setChecked(new Set()); data.refresh(); }); }}>Confirm Selected ({checked.size})</button></div>}<div className="unmatched-grid">{data.data.unmatched.filter((item) => reviewVisible(item as CentralMediaImport, reviewSearch, filter)).map((item) => <article key={String(item.media_import_id || item.media_object_id)}>{mode === "central" && <input type="checkbox" aria-label={`Select ${item.original_filename}`} checked={checked.has(String(item.media_import_id))} onChange={() => setChecked((current) => { const next = new Set(current); if (next.has(String(item.media_import_id))) next.delete(String(item.media_import_id)); else next.add(String(item.media_import_id)); return next; })} />}<strong>{String(item.original_filename || item.filename || "Uploaded media")}</strong><small>{String(item.source_relative_path || "Individual file upload")} · {formatBytes(Number(item.size_bytes) || undefined)}</small><MediaStatusBadge value={item.match_state || item.availability || "unassigned"} />{mode === "central" && <MatchControl item={item as CentralMediaImport} candidates={data.data!.candidates || []} onDone={data.refresh} csrf={session.csrfToken} />}</article>)}</div></> : <Empty title="No media needs review" />}</Panel>
     </> : <Empty title="Select an event" />}
-    {upload && <MediaUploadDialog title={uploadTarget ? "Upload a new presentation version" : "Upload presentation media"} onClose={() => { setUpload(false); setUploadTarget(""); data.refresh(); }} upload={doUpload} />}
+    {upload && <MediaUploadDialog title={uploadTarget ? "Upload a new presentation version" : "Bulk Import"} onClose={() => { setUpload(false); setUploadTarget(""); data.refresh(); }} upload={doUpload} registerBatch={mode === "central" ? async (selectedCount, skippedItems) => (await centralApi(session.csrfToken).createMediaBatch(activeEvent, selectedCount, skippedItems)).batch_id : undefined} onViewBatchLog={(batchId) => navigate(`/admin/logs?batch_id=${batchId}`)} />}
     {selected && <PresentationMediaDetail row={selected} onClose={() => setSelected(null)} actions={(version) => mode === "site" && version.replication && ["failed", "retry_wait"].includes(version.replication.state) ? <button className="button button--small" onClick={() => void siteApi.retryReplication(version.replication!.replication_session_id).then(data.refresh)}>Retry Central replication</button> : null} />}
   </Page>;
 }

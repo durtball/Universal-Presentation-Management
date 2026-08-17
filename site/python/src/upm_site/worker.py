@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Event
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from upm_shared.enums import JobStatus, MediaReplicationState
 from upm_shared.identifiers import new_uuid7
@@ -22,8 +22,14 @@ from upm_site.media.transfer import (
     enqueue_transfer_progress,
     execute_central_pull,
 )
+from upm_site.operational_logs import prune_logs
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
-from upm_site.persistence.models import MediaReplicationSession, MediaTransferSession, utc_now
+from upm_site.persistence.models import (
+    MediaReplicationSession,
+    MediaTransferSession,
+    ProcessingJob,
+    utc_now,
+)
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
@@ -56,13 +62,30 @@ def run(*, sync: bool = False, once: bool = False) -> int:
     with factory.begin() as session:
         session.execute(text("SELECT 1"))
         bootstrap_identity(session, settings)
-        SiteQueue(session).register_worker(
+        startup_queue = SiteQueue(session)
+        startup_queue.register_worker(
             worker_id=worker_id,
             worker_type="sync" if sync else "general",
             hostname=socket.gethostname(),
             service_role=role,
             capabilities=capabilities,
         )
+        prune_key = f"operational-logs-prune:{utc_now().date().isoformat()}"
+        if (
+            session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.job_type == "operational_logs.prune",
+                    ProcessingJob.idempotency_key == prune_key,
+                )
+            )
+            is None
+        ):
+            startup_queue.enqueue_processing(
+                job_type="operational_logs.prune",
+                payload={"data": {"retention_days": settings.operational_log_retention_days}},
+                idempotency_key=prune_key,
+                required_capabilities=["cpu"],
+            )
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -96,6 +119,8 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     completed = True
+                    if kind == "processing" and work.job_type == "operational_logs.prune":
+                        prune_logs(session, settings.operational_log_retention_days)
                     if (
                         kind == "transfer"
                         and work.transfer_type == "presentation_media.central_pull"

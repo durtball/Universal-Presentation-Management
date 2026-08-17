@@ -968,6 +968,9 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     media_import_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
     )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_media_import_batches.batch_id", ondelete="SET NULL"), index=True
+    )
     event_id: Mapped[UUID] = mapped_column(
         ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
     )
@@ -1407,3 +1410,63 @@ class DeletionOperation(CentralBase):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PresentationMediaImportBatch(CentralBase):
+    __tablename__ = "presentation_media_import_batches"
+    __table_args__ = (Index("ix_central_media_batches_event_created", "event_id", "created_at"),)
+
+    batch_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="CASCADE"), nullable=False
+    )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="browser")
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    selected_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_items: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OperationalLog(CentralBase):
+    """Retention-managed diagnostics; deliberately separate from AuditRecord."""
+
+    __tablename__ = "operational_logs"
+    __table_args__ = (
+        Index("ix_central_logs_occurred", "occurred_at"),
+        Index("ix_central_logs_service_severity", "service", "severity", "occurred_at"),
+        Index("ix_central_logs_event_type", "event_type", "occurred_at"),
+        Index("ix_central_logs_batch", "batch_id", "occurred_at"),
+        Index("ix_central_logs_media_import", "media_import_id", "occurred_at"),
+        Index("ix_central_logs_event", "event_id", "occurred_at"),
+    )
+
+    operational_log_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    service: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    message: Mapped[str] = mapped_column(String(1024), nullable=False)
+    batch_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    media_import_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    event_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    presentation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    presentation_version_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    room_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    device_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    correlation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    context: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)

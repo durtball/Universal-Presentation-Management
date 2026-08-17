@@ -1093,3 +1093,39 @@ class AuditRecord(SiteBase):
     )
     before_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     after_context: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class OperationalLog(SiteBase):
+    """Site-owned retention-managed diagnostics, independent of Central and audit history."""
+
+    __tablename__ = "operational_logs"
+    __table_args__ = (
+        Index("ix_site_logs_occurred", "occurred_at"),
+        Index("ix_site_logs_service_severity", "service", "severity", "occurred_at"),
+        Index("ix_site_logs_event_type", "event_type", "occurred_at"),
+        Index("ix_site_logs_batch", "batch_id", "occurred_at"),
+        Index("ix_site_logs_media_import", "media_import_id", "occurred_at"),
+        Index("ix_site_logs_event", "event_id", "occurred_at"),
+    )
+
+    operational_log_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    service: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    message: Mapped[str] = mapped_column(String(1024), nullable=False)
+    batch_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    media_import_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    event_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    presentation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    presentation_version_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    room_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    device_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    correlation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    context: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)

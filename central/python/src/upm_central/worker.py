@@ -12,13 +12,19 @@ from pathlib import Path
 from threading import Event
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from upm_central.config import CentralDatabaseSettings
 from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
+from upm_central.operational_logs import prune_logs, record_log
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
-from upm_central.persistence.models import DeletionOperation, ProcessingJob
+from upm_central.persistence.models import (
+    DeletionOperation,
+    PresentationMediaImport,
+    ProcessingJob,
+    utc_now,
+)
 from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import JobStatus
@@ -40,6 +46,9 @@ def execute_processing_job(
             raise RuntimeError("presentation media processor is unavailable")
         media_import_id = work.payload.get("data", {}).get("media_import_id")
         media_processor.analyze(UUID(str(media_import_id)))
+        return True
+    if work.job_type == "operational_logs.prune":
+        prune_logs(session, int(work.payload.get("data", {}).get("retention_days", 30)))
         return True
     if work.job_type == "presentation_media.promote":
         if media_processor is None:
@@ -133,13 +142,30 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         ready_file = Path(tempfile.gettempdir()) / ready_file.name
     with factory.begin() as session:
         session.execute(text("SELECT 1"))
-        CentralQueue(session).register_worker(
+        startup_queue = CentralQueue(session)
+        startup_queue.register_worker(
             worker_id=worker_id,
             worker_type="sync" if sync else "general",
             hostname=socket.gethostname(),
             service_role=role,
             capabilities=capabilities,
         )
+        prune_key = f"operational-logs-prune:{utc_now().date().isoformat()}"
+        if (
+            session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.job_type == "operational_logs.prune",
+                    ProcessingJob.idempotency_key == prune_key,
+                )
+            )
+            is None
+        ):
+            startup_queue.enqueue_processing(
+                job_type="operational_logs.prune",
+                payload={"data": {"retention_days": settings.operational_log_retention_days}},
+                idempotency_key=prune_key,
+                required_capabilities=["cpu"],
+            )
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -273,11 +299,36 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             base_delay_seconds=settings.worker_retry_base_seconds,
                             metadata={"error_type": type(exc).__name__},
                         )
+                        media_import_id = UUID(
+                            str(media_work.payload.get("data", {}).get("media_import_id"))
+                        )
+                        media_import = session.get(PresentationMediaImport, media_import_id)
+                        record_log(
+                            session,
+                            service="central-worker",
+                            severity="error",
+                            event_type="presentation_media_processing_failed",
+                            message=str(exc)[:1024],
+                            batch_id=media_import.batch_id if media_import else None,
+                            media_import_id=media_import_id,
+                            event_id=media_import.event_id if media_import else None,
+                            worker_id=worker_id,
+                            context={
+                                "work_id": str(media_work_id),
+                                "error_code": getattr(exc, "code", "processing_failed"),
+                                "exception_type": type(exc).__name__,
+                                "attempt": media_work.attempt_count,
+                                "max_attempts": media_work.max_attempts,
+                                "next_retry_at": str(media_work.next_attempt_at),
+                            },
+                        )
                     log(
                         "presentation_media_processing_failed",
                         worker_id=worker_id,
                         work_id=media_work_id,
                         error_type=type(exc).__name__,
+                        error_code=getattr(exc, "code", "processing_failed"),
+                        safe_message=str(exc)[:1024],
                     )
             if once:
                 break

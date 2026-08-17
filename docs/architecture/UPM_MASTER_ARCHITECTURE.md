@@ -998,6 +998,17 @@ Requirements:
 
 ## 29. Observability
 
+Central and Site each own a deployment-local structured operational event store. Operational events
+are distinct from audit records: audit proves deliberate changes, while operational logs explain
+service, job, upload, device, and delivery outcomes under configurable retention. Typed correlation
+identifiers support Event, batch, media import, Presentation, version, Session, Room, Device, and
+worker investigation. Site log access never depends on Central connectivity.
+
+Large presentation-media selections create durable batch identity and authoritative per-file intake
+rows. The browser retains the complete logical set and uses windowed rendering rather than truncation.
+Batch counters derive from individual durable records, and lifecycle events correlate through batch
+and media-import UUIDs.
+
 UPM must provide meaningful operational visibility.
 
 Track:

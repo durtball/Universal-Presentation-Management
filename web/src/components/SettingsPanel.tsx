@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { usePreferences, type Motion } from "../state/preferences";
 import { useSession } from "../state/session";
+import { Link } from "react-router-dom";
 
 export function SettingsPanel({ central }: { central: boolean }) {
   const { theme, motion, effectiveMotion, setTheme, setMotion } =
@@ -104,6 +105,7 @@ export function SettingsPanel({ central }: { central: boolean }) {
                 </fieldset>
               )}
               <footer>
+                <Link className="button" to="/admin/logs" onClick={() => setOpen(false)}>Logs</Link>
                 <button
                   className="button button--primary"
                   onClick={() => setOpen(false)}

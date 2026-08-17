@@ -79,3 +79,14 @@ test("Site unavailable state is actionable", async () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable"),
   );
 });
+test("renders Site-local Settings Logs without Central", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const path = new URL(String(input), "http://test").pathname;
+    if (path.includes("central-registration")) return Response.json({ site_id: "site-1", display_name: "Offline Site", connection_status: "offline", pending_outbound: 0, failed_sync: 0 });
+    if (path === "/api/v1/logs") return Response.json({ items: [{ operational_log_id: "log-1", occurred_at: "2026-08-17T00:00:00Z", severity: "error", service: "site-worker", event_type: "room.transfer_failed", message: "Room transfer failed", context: {} }] });
+    return Response.json({});
+  });
+  renderApp("site", "/admin/logs");
+  expect(await screen.findByRole("heading", { name: "Logs", level: 2 })).toBeInTheDocument();
+  expect(await screen.findByText("Room transfer failed")).toBeInTheDocument();
+});
