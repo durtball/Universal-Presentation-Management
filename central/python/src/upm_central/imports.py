@@ -214,6 +214,8 @@ def _normalized(raw: dict[str, object]) -> dict[str, object]:
         normalized_key = COLUMN_ALIASES.get(key_value, key_value)
         if isinstance(value, str):
             value = " ".join(value.strip().split())
+        if value in (None, "") and result.get(normalized_key) not in (None, ""):
+            continue
         result[normalized_key] = value
     if result.get("presenter_email") and not result.get("email"):
         result["email"] = result["presenter_email"]
@@ -991,6 +993,166 @@ def _ensure_wide_row_participant(
     return participant
 
 
+def _materialize_session_presentation(
+    session: Session,
+    event: Event,
+    program_session: ProgramSession,
+    *,
+    actor: str,
+    import_batch_id: UUID | None = None,
+) -> Presentation:
+    """Ensure an imported presentation-bearing Session has one canonical Presentation.
+
+    The Session's stable Event-scoped program code is the imported Presentation identity for
+    roster-shaped sources. Existing explicit Presentations linked to the Session are reused; this
+    helper never creates a second Presentation for a repeated import or repair request.
+    """
+    item = session.scalar(
+        select(Presentation)
+        .where(
+            Presentation.event_id == event.event_id,
+            Presentation.session_id == program_session.session_id,
+        )
+        .order_by(Presentation.created_at, Presentation.presentation_id)
+        .limit(1)
+    )
+    if item is None and program_session.session_code:
+        item = session.scalar(
+            select(Presentation).where(
+                Presentation.event_id == event.event_id,
+                Presentation.presentation_code == program_session.session_code,
+            )
+        )
+    created = item is None
+    if item is None:
+        presentation_id = new_uuid7()
+        identifier, identifier_source = allocate_presentation_identifier(
+            program_session.session_code, "CENTRAL", presentation_id
+        )
+        item = Presentation(
+            presentation_id=presentation_id,
+            event_id=event.event_id,
+            session_id=program_session.session_id,
+            title=program_session.title,
+            presentation_code=program_session.session_code,
+            presentation_identifier=identifier,
+            presentation_identifier_source=identifier_source,
+            external_presentation_id=program_session.session_code,
+            scheduled_at=program_session.starts_at,
+            workflow_status=PresentationWorkflowStatus.EXPECTED,
+            source="import",
+            source_metadata={"materialized_from_session_id": str(program_session.session_id)},
+        )
+        session.add(item)
+        session.flush()
+    else:
+        if item.event_id != event.event_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="presentation event mismatch")
+        item.session_id = program_session.session_id
+        if (item.source_metadata or {}).get("materialized_from_session_id"):
+            item.title = program_session.title
+            item.scheduled_at = program_session.starts_at
+    if import_batch_id:
+        item.source_metadata = {
+            **item.source_metadata,
+            "import_batch_id": str(import_batch_id),
+        }
+    if (
+        session.scalar(
+            select(PresentationSession).where(
+                PresentationSession.presentation_id == item.presentation_id,
+                PresentationSession.session_id == program_session.session_id,
+            )
+        )
+        is None
+    ):
+        session.add(
+            PresentationSession(
+                presentation_id=item.presentation_id,
+                session_id=program_session.session_id,
+                association_type="scheduled",
+                primary_session=True,
+                source="import",
+            )
+        )
+    participants = session.scalars(
+        select(SessionParticipant)
+        .where(SessionParticipant.session_id == program_session.session_id)
+        .order_by(SessionParticipant.presenter_order, SessionParticipant.session_participant_id)
+    ).all()
+    for relationship in participants:
+        presenter = session.scalar(
+            select(PresentationPresenter).where(
+                PresentationPresenter.presentation_id == item.presentation_id,
+                PresentationPresenter.event_participation_id == relationship.event_participation_id,
+                PresentationPresenter.role == relationship.role,
+            )
+        )
+        if presenter is None:
+            session.add(
+                PresentationPresenter(
+                    presentation_id=item.presentation_id,
+                    event_participation_id=relationship.event_participation_id,
+                    role=relationship.role,
+                    presenter_order=relationship.presenter_order,
+                    primary_presenter=relationship.primary_presenter,
+                    source="import",
+                )
+            )
+        elif presenter.source == "import":
+            presenter.presenter_order = relationship.presenter_order
+            presenter.primary_presenter = relationship.primary_presenter
+    session.flush()
+    if created:
+        audit(
+            session,
+            action="central.presentation.materialized_from_session",
+            target_type="presentation",
+            target_id=item.presentation_id,
+            event_id=event.event_id,
+            after={"session_id": str(program_session.session_id)},
+            actor=actor,
+        )
+    return item
+
+
+def repair_event_presentation_materialization(
+    session: Session, event: Event, *, actor: str = "central-admin"
+) -> list[Presentation]:
+    """Idempotently repair imported Sessions created before the materialization invariant."""
+    repaired = []
+    imported_sessions = session.scalars(
+        select(ProgramSession).where(
+            ProgramSession.event_id == event.event_id,
+            ProgramSession.source == "import",
+            ProgramSession.session_code.is_not(None),
+        )
+    ).all()
+    for program_session in imported_sessions:
+        repaired.append(
+            _materialize_session_presentation(session, event, program_session, actor=actor)
+        )
+    return repaired
+
+
+def unmaterialized_imported_sessions(session: Session, event_id: UUID) -> list[ProgramSession]:
+    """Return presentation-bearing imported Sessions that violate the domain invariant."""
+    presentations = select(Presentation.presentation_id).where(
+        Presentation.event_id == event_id,
+        Presentation.session_id == ProgramSession.session_id,
+    )
+    return list(
+        session.scalars(
+            select(ProgramSession).where(
+                ProgramSession.event_id == event_id,
+                ProgramSession.source == "import",
+                ProgramSession.session_code.is_not(None),
+                ~presentations.exists(),
+            )
+        )
+    )
+
+
 def commit_batch(
     session: Session, batch: ImportBatch, *, actor: str = "central-admin"
 ) -> ImportBatch:
@@ -1213,6 +1375,7 @@ def commit_batch(
                     relationship_ids.append(str(relationship.session_participant_id))
                 row.committed_entity_ids = {
                     "session_id": str(item.session_id),
+                    "presentation_id": None,
                     "person_ids": person_ids,
                     "event_participation_ids": participant_ids,
                     "session_participant_ids": relationship_ids,
@@ -1420,6 +1583,57 @@ def commit_batch(
                     "committed_entity_ids": row.committed_entity_ids,
                 },
                 actor=actor,
+            )
+        session.flush()
+        imported_session_rows: dict[UUID, list[ImportRow]] = {}
+        for imported_row in rows:
+            session_id = (imported_row.committed_entity_ids or {}).get("session_id")
+            if session_id:
+                imported_session_rows.setdefault(UUID(str(session_id)), []).append(imported_row)
+        for session_id, contributing_rows in imported_session_rows.items():
+            program_session = session.get(ProgramSession, session_id)
+            if program_session is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail=f"committed Session {session_id} is unavailable",
+                )
+            presentation = _materialize_session_presentation(
+                session,
+                event,
+                program_session,
+                actor=actor,
+                import_batch_id=batch.import_batch_id,
+            )
+            for contributing_row in contributing_rows:
+                contributing_row.committed_entity_ids = {
+                    **contributing_row.committed_entity_ids,
+                    "presentation_id": str(presentation.presentation_id),
+                }
+        missing_materialization = []
+        for imported_row in rows:
+            session_id = (imported_row.committed_entity_ids or {}).get("session_id")
+            if not session_id or imported_row.resolution_action in {
+                ReconciliationAction.IGNORE,
+                ReconciliationAction.REJECT,
+            }:
+                continue
+            if (
+                session.scalar(
+                    select(Presentation.presentation_id).where(
+                        Presentation.event_id == event.event_id,
+                        Presentation.session_id == UUID(str(session_id)),
+                    )
+                )
+                is None
+            ):
+                missing_materialization.append(imported_row.source_row_number)
+        if missing_materialization:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "program rows could not materialize assignable Presentations",
+                    "rows": missing_materialization,
+                },
             )
         if changed:
             touch_event_program(session, event)

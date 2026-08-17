@@ -24,7 +24,7 @@ Status meanings:
 | Events | Event create/list/edit | API + UI | Projection | No | No | Implemented | One modal creates and edits names, dates, and IANA timezones; deployed metadata edits automatically publish durable complete snapshots while preserving identity and relationships. |
 | Program | Participants, sessions, presentations domain | API + UI | Projection + UI | No | No | Implemented | Normalized backend relationships, migrations, snapshot projection, and read views exist. |
 | Program | Direct browser program editing | Read-oriented | Read-only | No | No | Partial | Backend CRUD is broad; browser pages mostly list imported data rather than edit it. |
-| Imports | CSV/XLSX stage/review/reconcile/commit | Yes | N/A | No | No | Implemented | Source preservation, validation, identity review, transactional commit, UI, and PostgreSQL tests exist. |
+| Imports | CSV/XLSX stage/review/reconcile/commit | Yes | N/A | No | No | Implemented | Source preservation, validation, identity review, transactional commit, idempotent Session-to-Presentation materialization/repair, UI, and PostgreSQL tests exist. |
 | Imports | Arbitrary source-column remapping | No | N/A | No | No | Deferred | Common aliases are detected; unknown vendor-heading editor is not exposed. |
 | Imports | Durable worker parsing for large imports | Queue only | N/A | No | No | Deferred | Parsing is synchronous and capped at 25 MiB. |
 | Sites | Site enrollment and lifecycle | API + UI | Client state | N/A | N/A | Implemented | Pending approval, credential delivery, revoke/disable/re-enroll APIs, UI approval, and tests exist. |

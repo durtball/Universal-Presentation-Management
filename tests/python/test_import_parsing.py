@@ -204,6 +204,17 @@ def test_production_text_schedule_normalizes_with_event_timezone() -> None:
     assert scheduled["ends_at"] == "2026-08-04T23:45:00+00:00"
 
 
+def test_blank_alias_does_not_erase_imported_session_title() -> None:
+    normalized = _normalized(
+        {
+            "Session Title": "Reinventing Legacy Brands",
+            "Presentation Title": "",
+            "Presentation ID": "3261629",
+        }
+    )
+    assert normalized["session_title"] == "Reinventing Legacy Brands"
+
+
 def test_native_excel_schedule_normalizes_like_text() -> None:
     workbook = Workbook()
     sheet = workbook.active

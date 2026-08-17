@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
@@ -334,6 +335,38 @@ class CentralMediaStagingService:
         record.match_state = result.state
         record.match_reason = result.reason
         record.match_candidates = list(result.candidates)
+        if result.state is MediaMatchState.UNMATCHED:
+            filename_tokens = {
+                token.casefold()
+                for token in re.split(r"[^A-Za-z0-9]+", Path(record.original_filename).stem)
+                if token
+            }
+            matching_unmaterialized = next(
+                (
+                    item
+                    for item in session.scalars(
+                        select(ProgramSession).where(
+                            ProgramSession.event_id == record.event_id,
+                            ProgramSession.session_code.is_not(None),
+                        )
+                    )
+                    if item.session_code.casefold() in filename_tokens
+                    and session.scalar(
+                        select(Presentation.presentation_id).where(
+                            Presentation.event_id == record.event_id,
+                            Presentation.session_id == item.session_id,
+                        )
+                    )
+                    is None
+                ),
+                None,
+            )
+            if matching_unmaterialized:
+                record.match_reason = (
+                    f"Session {matching_unmaterialized.session_code} found, but no assignable "
+                    "Presentation record is materialized. Re-run matching to repair imported "
+                    "program data."
+                )
         # Matching is suggestion-only. Even an exact identifier never creates a version.
         record.import_state = MediaImportState.NEEDS_REVIEW
 

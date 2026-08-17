@@ -68,8 +68,11 @@ operator-visible errors. Files over 25 MiB receive HTTP 413; they are not silent
 Production roster-shaped workbooks also recognize Presentation/Session IDs, Presenter/Speaker/Person
 IDs, split names, professional title, role and roster order, event-local date/start/end, track,
 format, and room aliases through the same centralized vocabulary. A Presentation ID in this schema
-groups roster rows into one Session; it does not manufacture a logical Presentation or discard the
-contributing rows. Every populated worksheet row remains an `ImportRow`, including its original
+groups roster rows into one Session and materializes one Event-scoped canonical `Presentation`
+linked to that Session when no explicit Presentation row already supplies one. The imported code is
+the stable Presentation identity, and Session presenter relationships are mirrored to
+`PresentationPresenter`. Repeated rows and repeated commits reuse those UUID-backed records. Every
+populated worksheet row remains an `ImportRow`, including its original
 headers/values, worksheet, row number, canonical values, reconciliation state, issues, and committed
 Person/Session/relationship lineage. Repeated presenter identifiers are valid identity evidence;
 conflicting authoritative values on a repeated program identifier block commit without deleting
@@ -81,6 +84,12 @@ dates, 12-hour AM/PM times, and 24-hour times converge to ISO date/time values. 
 timezone is applied when those local values are combined into the timezone-aware Session schedule;
 Excel values never supply or imply timezone authority. Invalid values remain attached to their
 source row as field-specific blocking validation issues.
+
+Commit validates that every imported presentation-bearing Session resolves to an assignable
+Presentation. A failure is reported as a program-materialization conflict rather than silently
+leaving an unusable Session. For Events imported before this invariant, re-running media matching
+or calling `POST /api/v1/admin/events/{event_id}/presentation-materialization` idempotently repairs
+missing Presentations and presenter/session links; no Event deletion or media re-upload is needed.
 
 ## Room reconciliation
 

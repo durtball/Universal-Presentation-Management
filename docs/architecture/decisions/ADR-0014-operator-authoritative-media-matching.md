@@ -16,6 +16,11 @@ Valid uploaded media is preserved when evidence is absent, weak, ambiguous, or c
 
 Central and Site use the same persistence-free matching rules. Each deployment confirms against its local Event program projection and database, so Site confirmation remains available during WAN or Central outages. Confirmed metadata crosses the established snapshot/outbox and media-transfer boundaries rather than introducing direct database access or a new synchronization channel.
 
+An imported program item that can receive presentation media must materialize an Event-scoped
+canonical Presentation linked to its Session and presenters. Import and idempotent repair establish
+this invariant before candidate matching; matching never substitutes a Session or Person for the
+authoritative Presentation target.
+
 ## Consequences
 
 - Operators can review high-confidence suggestions efficiently without silent assignment.

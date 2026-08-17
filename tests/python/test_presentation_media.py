@@ -170,6 +170,25 @@ def test_identifier_and_surname_produce_explained_high_suggestion() -> None:
     assert "last name" in result.reason
 
 
+def test_session_code_and_samantha_lomow_produce_high_suggestion() -> None:
+    candidate = MatchCandidate(
+        UUID(int=1),
+        "UPM-CENTRAL-ABCDEF",
+        title="Reinventing Legacy Brands - Breaking the Rules Without Breaking the Brand",
+        presenter_family_name="Lomow",
+        presenter_given_name="Samantha",
+        session_title=("Reinventing Legacy Brands - Breaking the Rules Without Breaking the Brand"),
+        session_external_id="3261629",
+        room="Marcello Ballroom 4403",
+    )
+    result = match_presentation("3261629-Lomow.pptx", [candidate])
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == candidate.presentation_id
+    assert result.confidence == "high"
+    assert "Session ID 3261629 matched filename" in result.reason
+    assert "Presenter last name Lomow matched filename" in result.reason
+
+
 def test_unique_surname_suggests_but_ambiguous_surname_does_not() -> None:
     unique = MatchCandidate(UUID(int=1), "101", presenter_family_name="Lomow")
     assert match_presentation("Lomow.pptx", [unique]).state is MediaMatchState.SUGGESTED

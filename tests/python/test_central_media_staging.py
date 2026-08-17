@@ -27,6 +27,15 @@ def test_central_media_routes_are_authenticated_and_versioned() -> None:
         ("GET", "/api/v1/admin/events/{event_id}/media-imports"),
         ("GET", "/api/v1/admin/media-imports/{media_import_id}"),
         (
+            "GET",
+            "/api/v1/admin/events/{event_id}/presentation-match-candidates",
+        ),
+        ("POST", "/api/v1/admin/media-imports/{media_import_id}/match"),
+        (
+            "POST",
+            "/api/v1/admin/events/{event_id}/presentation-materialization",
+        ),
+        (
             "PUT",
             "/api/v1/admin/media-imports/{media_import_id}/assignment/{presentation_id}",
         ),

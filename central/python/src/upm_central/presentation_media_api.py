@@ -14,12 +14,17 @@ from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.config import CentralDatabaseSettings
+from upm_central.imports import (
+    repair_event_presentation_materialization,
+    unmaterialized_imported_sessions,
+)
 from upm_central.media_replication import (
     authorize_replication_context,
     finalize_replication_reference,
 )
 from upm_central.persistence.models import (
     AuditRecord,
+    Event,
     EventDeployment,
     EventParticipation,
     MediaReplicationReceiveSession,
@@ -38,6 +43,7 @@ from upm_central.presentation_media import (
     CentralMediaStagingService,
     MediaStagingError,
 )
+from upm_central.program import touch_event_program
 from upm_central.sync import authenticate_site
 from upm_shared.enums import (
     JobStatus,
@@ -87,7 +93,7 @@ def _candidate_views(
     for item in presentations:
         program_session = session.get(ProgramSession, item.session_id) if item.session_id else None
         presenters = session.execute(
-            select(Person.family_name, Person.given_name)
+            select(Person.family_name, Person.given_name, Person.display_name)
             .join(EventParticipation, EventParticipation.person_id == Person.person_id)
             .join(
                 PresentationPresenter,
@@ -114,9 +120,9 @@ def _candidate_views(
                 {
                     "family_name": family,
                     "given_name": given,
-                    "display_name": ", ".join(filter(None, [family, given])),
+                    "display_name": display_name or " ".join(filter(None, [given, family])),
                 }
-                for family, given in presenters
+                for family, given, display_name in presenters
             ],
         }
         haystack = " ".join(
@@ -372,8 +378,42 @@ def register_presentation_media_routes(
             raise HTTPException(404, "media import not found")
         if item.match_state is MediaMatchState.CONFIRMED or item.presentation_id:
             return _view(item)
+        event = session.get(Event, item.event_id)
+        missing = unmaterialized_imported_sessions(session, item.event_id)
+        if missing:
+            repair_event_presentation_materialization(
+                session,
+                event,
+                actor="presentation-media-rematch",
+            )
+            touch_event_program(session, event)
         staging_service()._automatic_match_and_assign(session, item)
         return _view(item)
+
+    @app.post(
+        "/api/v1/admin/events/{event_id}/presentation-materialization",
+        dependencies=admin,
+        tags=["media"],
+    )
+    def repair_materialization(
+        event_id: UUID, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            raise HTTPException(404, "event not found")
+        missing = unmaterialized_imported_sessions(session, event_id)
+        repaired = repair_event_presentation_materialization(
+            session,
+            event,
+            actor=getattr(request.state, "admin_actor", "central-admin"),
+        )
+        if missing:
+            touch_event_program(session, event)
+        return {
+            "event_id": event_id,
+            "repaired_count": len(missing),
+            "presentation_ids": [item.presentation_id for item in repaired],
+        }
 
     @app.put(
         "/api/v1/admin/media-imports/{media_import_id}/assignment/{presentation_id}",

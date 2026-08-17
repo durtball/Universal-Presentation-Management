@@ -41,6 +41,8 @@ Requirement labels:
 - **ER:** CSV/XLSX import is staged, validated, reconciled, previewed, approved where necessary, transactionally committed, and audited.
 - **ER:** Preserve source bytes, raw rows, normalized/corrected values, issues, decisions, lineage, and stable external identifiers.
 - **ER:** Detect duplicates and prevent stale review decisions from overwriting newer program state.
+- **ER:** Every imported presentation-bearing program item materializes an idempotent Event-scoped
+  Presentation linked to its Session and presenters so media can resolve to PresentationVersion.
 - **FP:** Operator-defined mapping for unknown vendor headings and durable worker handoff for large imports.
 
 ## Presenters

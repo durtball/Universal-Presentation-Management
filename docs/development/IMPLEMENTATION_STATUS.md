@@ -205,3 +205,10 @@
 ### Operator-confirmed presentation media matching
 
 Central presentation uploads now retain Event-scoped, explained candidate rankings as suggestions rather than automatically creating PresentationVersions. The Event candidate API and shared review UI support presenter/session/Presentation search, changing a suggestion, re-running unresolved matching, individual confirmation, and explicit selected bulk confirmation with per-item results. Confirmation is Event-validated and retry-idempotent. The persistence-free matcher is shared with Site, but the equivalent Site unresolved-import review/confirmation API remains future integration work; Site-local direct uploads to an explicitly chosen Presentation continue to use existing offline-capable semantics.
+
+Roster-shaped program rows whose imported Presentation ID maps to `Session.session_code` now
+materialize an idempotent canonical Presentation and mirror Session presenters to that Presentation.
+Import commit enforces the assignable-Presentation invariant. Re-run matching repairs historical
+imported Sessions before rebuilding candidates, and an explicit Event repair API exposes the same
+idempotent operation. Repaired program metadata uses the existing Event revision/deployment snapshot
+path; media matching remains suggestion-only and creates no PresentationVersion before confirmation.
