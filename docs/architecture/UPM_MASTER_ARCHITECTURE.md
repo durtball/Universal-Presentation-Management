@@ -1410,3 +1410,7 @@ UPM should behave as a professional distributed presentation-management platform
 - The architecture remains understandable years after initial implementation.
 
 This document governs the implementation until deliberately amended.
+
+### Operator authority for presentation media matching
+
+Presentation media matching is suggestion-driven and operator-authoritative. UPM may automatically discover and rank candidate Presentation matches, but it may not finalize a media assignment without explicit operator confirmation. Operators may bulk-confirm explicitly selected high-confidence suggestions. Uncertain matching preserves valid uploaded media for review and is not an ingest failure. Central and Site apply this rule against their deployment-local Event program data and canonical Presentation / PresentationVersion model.

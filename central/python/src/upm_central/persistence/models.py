@@ -1001,6 +1001,8 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     )
     match_reason: Mapped[str | None] = mapped_column(String(1024))
     match_candidates: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    confirmed_by: Mapped[str | None] = mapped_column(String(255))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     import_state: Mapped[MediaImportState] = mapped_column(
         domain_enum(MediaImportState, length=24),
         default=MediaImportState.UPLOADING,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePath, PurePosixPath
@@ -146,6 +146,11 @@ class MatchCandidate:
     expected_filename: str | None = None
     title: str | None = None
     presenter_family_name: str | None = None
+    presenter_given_name: str | None = None
+    session_title: str | None = None
+    session_external_id: str | None = None
+    room: str | None = None
+    starts_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +159,9 @@ class MatchResult:
     presentation_id: UUID | None
     reason: str
     candidate_ids: tuple[UUID, ...] = ()
+    candidates: tuple[dict[str, object], ...] = ()
+    confidence: str | None = None
+    has_conflict: bool = False
 
 
 def _match_token(value: str | None) -> str:
@@ -161,65 +169,132 @@ def _match_token(value: str | None) -> str:
 
 
 def match_presentation(filename: str, candidates: Iterable[MatchCandidate]) -> MatchResult:
-    """Match only deterministic identity evidence; never guess ambiguous results."""
+    """Rank event-scoped candidates without ever confirming an assignment.
+
+    The caller supplies the authority boundary (normally one Event). This function only returns a
+    suggestion; persistence of an assignment is deliberately outside the matcher.
+    """
     basename = unicodedata.normalize("NFKC", PurePath(filename).stem).strip().upper()
     normalized = _match_token(basename)
     candidates = tuple(candidates)
-    tiers: tuple[tuple[str, Callable[[MatchCandidate], str | None]], ...] = (
-        (
-            "Presentation Identifier",
-            lambda item: item.presentation_identifier,
-        ),
-        ("external Presentation ID", lambda item: item.external_presentation_id),
-    )
-    for label, value_for in tiers:
-        prefix_matches: list[tuple[MatchCandidate, str]] = []
-        for candidate in candidates:
-            value = unicodedata.normalize("NFKC", value_for(candidate) or "").strip().upper()
-            if value and basename.startswith(value):
-                suffix = basename[len(value) :]
-                if not suffix or suffix[0] in "-_. ":
-                    prefix_matches.append((candidate, value))
-        if prefix_matches:
-            longest = max(len(value) for _, value in prefix_matches)
-            unique = {
-                item.presentation_id: (item, value)
-                for item, value in prefix_matches
-                if len(value) == longest
-            }
-            if len(unique) == 1:
-                item, value = next(iter(unique.values()))
-                return MatchResult(
-                    MediaMatchState.EXACT,
-                    item.presentation_id,
-                    f"Exact {label} match: {value}",
-                    (item.presentation_id,),
-                )
-            ids = tuple(sorted(unique, key=str))
-            return MatchResult(
-                MediaMatchState.AMBIGUOUS,
-                None,
-                f"Ambiguous: {label} matches multiple records",
-                ids,
+    filename_tokens = {token for token in re.split(r"[^A-Z0-9]+", basename) if token}
+    identifier_hits: dict[UUID, list[str]] = {}
+    ranked: list[tuple[int, MatchCandidate, list[str]]] = []
+    surname_counts: dict[str, int] = {}
+    for item in candidates:
+        surname = _match_token(item.presenter_family_name)
+        if surname and surname in filename_tokens:
+            surname_counts[surname] = surname_counts.get(surname, 0) + 1
+    for item in candidates:
+        score, evidence = 0, []
+        for label, value in (
+            ("Presentation ID", item.presentation_identifier),
+            ("External presentation ID", item.external_presentation_id),
+        ):
+            token = _match_token(value)
+            raw_value = unicodedata.normalize("NFKC", value or "").strip().upper()
+            identifier_match = token in filename_tokens or (
+                bool(re.search(r"[^A-Z0-9]", raw_value)) and token in normalized
             )
-    expected = [
-        candidate
-        for candidate in candidates
-        if candidate.expected_filename
-        and _match_token(PurePath(candidate.expected_filename).stem) == normalized
-    ]
-    if len({item.presentation_id for item in expected}) == 1:
-        item = expected[0]
+            if token and identifier_match:
+                score += 100
+                evidence.append(f"{label} {value} matched filename")
+                identifier_hits.setdefault(item.presentation_id, []).append(token)
+        if (
+            item.expected_filename
+            and _match_token(PurePath(item.expected_filename).stem) == normalized
+        ):
+            score += 90
+            evidence.append("Expected filename matched")
+        surname = _match_token(item.presenter_family_name)
+        if surname and surname in filename_tokens:
+            score += 55 if surname_counts[surname] == 1 else 35
+            evidence.append(f"Presenter last name {item.presenter_family_name} matched filename")
+        given = _match_token(item.presenter_given_name)
+        if given and given in filename_tokens:
+            score += 15
+            evidence.append(f"Presenter first name {item.presenter_given_name} matched filename")
+        session_id = _match_token(item.session_external_id)
+        if session_id and session_id in filename_tokens:
+            score += 45
+            evidence.append(f"Session ID {item.session_external_id} matched filename")
+        for label, value, points in (
+            ("Presentation title", item.title, 8),
+            ("Session title", item.session_title, 8),
+            ("Room", item.room, 5),
+        ):
+            meaningful = {
+                part
+                for part in re.split(
+                    r"[^A-Z0-9]+", unicodedata.normalize("NFKC", value or "").upper()
+                )
+                if len(part) >= 4
+            }
+            hits = meaningful & filename_tokens
+            if hits:
+                score += min(points * len(hits), points * 2)
+                evidence.append(f"{label} token matched: {', '.join(sorted(hits))}")
+        if score:
+            ranked.append((score, item, evidence))
+    ranked.sort(key=lambda row: (-row[0], str(row[1].presentation_id)))
+    if not ranked:
+        return MatchResult(MediaMatchState.UNMATCHED, None, "No matching identity evidence")
+    numeric_tokens = {token for token in filename_tokens if token.isdigit()}
+    strong_id_candidates = {
+        pid for pid, hits in identifier_hits.items() if numeric_tokens & set(hits)
+    }
+    surname_candidate_ids = {
+        item.presentation_id
+        for score, item, evidence in ranked
+        if any("last name" in reason for reason in evidence)
+    }
+    conflict = bool(
+        strong_id_candidates
+        and surname_candidate_ids
+        and not (strong_id_candidates & surname_candidate_ids)
+    )
+    candidate_views = tuple(
+        {
+            "presentation_id": str(item.presentation_id),
+            "score": score,
+            "confidence": "high" if score >= 90 else "medium" if score >= 50 else "low",
+            "evidence": evidence,
+        }
+        for score, item, evidence in ranked[:10]
+    )
+    top_score = ranked[0][0]
+    tied = [item for score, item, _ in ranked if score == top_score]
+    if conflict:
+        ids = tuple(item.presentation_id for _, item, _ in ranked[:10])
         return MatchResult(
-            MediaMatchState.EXACT,
-            item.presentation_id,
-            "Exact expected filename match",
-            (item.presentation_id,),
+            MediaMatchState.AMBIGUOUS,
+            None,
+            "Conflicting presentation identifier and presenter evidence",
+            ids,
+            candidate_views,
+            "high",
+            True,
         )
-    if expected:
-        ids = tuple(sorted({item.presentation_id for item in expected}, key=str))
-        return MatchResult(MediaMatchState.AMBIGUOUS, None, "Ambiguous expected filename", ids)
-    return MatchResult(MediaMatchState.UNMATCHED, None, "No deterministic identity evidence")
+    if len(tied) > 1 or top_score < 50:
+        ids = tuple(item.presentation_id for _, item, _ in ranked[:10])
+        return MatchResult(
+            MediaMatchState.AMBIGUOUS,
+            None,
+            "Multiple or weak candidate matches require review",
+            ids,
+            candidate_views,
+            "medium" if top_score >= 50 else "low",
+        )
+    winner = ranked[0][1]
+    confidence = "high" if top_score >= 90 else "medium"
+    return MatchResult(
+        MediaMatchState.SUGGESTED,
+        winner.presentation_id,
+        "; ".join(ranked[0][2]),
+        tuple(item.presentation_id for _, item, _ in ranked[:10]),
+        candidate_views,
+        confidence,
+    )
 
 
 def operational_sort_key(

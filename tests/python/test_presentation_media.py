@@ -49,7 +49,7 @@ def test_matcher_prefers_longest_known_identifier_prefix_and_boundaries() -> Non
     }
     for filename, expected in examples.items():
         result = match_presentation(filename, candidates)
-        assert result.state is MediaMatchState.EXACT
+        assert result.state is MediaMatchState.SUGGESTED
         assert result.presentation_id == candidates[ids.index(expected)].presentation_id
         assert expected in result.reason
 
@@ -141,13 +141,51 @@ def test_matching_prefers_exact_identity_and_preserves_ambiguity() -> None:
     first = MatchCandidate(UUID(int=1), "UPM-STL01-A7K92F", "12345")
     second = MatchCandidate(UUID(int=2), "UPM-NYC01-B9Q12Z", "777")
     result = match_presentation("12345_Smith_slides.pptx", [first, second])
-    assert result.state is MediaMatchState.EXACT
+    assert result.state is MediaMatchState.SUGGESTED
     assert result.presentation_id == first.presentation_id
     duplicate = MatchCandidate(UUID(int=3), "UPM-OTHER", "12345")
     ambiguous = match_presentation("12345_deck.pdf", [first, duplicate])
     assert ambiguous.state is MediaMatchState.AMBIGUOUS
     assert ambiguous.presentation_id is None
     assert match_presentation("Smith.pptx", [first]).state is MediaMatchState.UNMATCHED
+
+
+def test_identifier_and_surname_produce_explained_high_suggestion() -> None:
+    lomow = MatchCandidate(
+        UUID(int=1),
+        "3261629",
+        "3261629",
+        title="AI Infrastructure",
+        presenter_family_name="Lomow",
+        presenter_given_name="Steven",
+        session_title="Infrastructure",
+        room="306AB",
+    )
+    other = MatchCandidate(UUID(int=2), "999", "999", presenter_family_name="Smith")
+    result = match_presentation("3261629-Lomow.pptx", [other, lomow])
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == lomow.presentation_id
+    assert result.confidence == "high"
+    assert "Presentation ID" in result.reason
+    assert "last name" in result.reason
+
+
+def test_unique_surname_suggests_but_ambiguous_surname_does_not() -> None:
+    unique = MatchCandidate(UUID(int=1), "101", presenter_family_name="Lomow")
+    assert match_presentation("Lomow.pptx", [unique]).state is MediaMatchState.SUGGESTED
+    duplicate = MatchCandidate(UUID(int=2), "102", presenter_family_name="Lomow")
+    result = match_presentation("Lomow.pptx", [unique, duplicate])
+    assert result.state is MediaMatchState.AMBIGUOUS
+    assert result.presentation_id is None
+
+
+def test_conflicting_strong_identifier_and_surname_requires_review() -> None:
+    identifier = MatchCandidate(UUID(int=1), "3261629", presenter_family_name="Smith")
+    surname = MatchCandidate(UUID(int=2), "999", presenter_family_name="Lomow")
+    result = match_presentation("3261629-Lomow.pptx", [identifier, surname])
+    assert result.state is MediaMatchState.AMBIGUOUS
+    assert result.has_conflict is True
+    assert result.presentation_id is None
 
 
 def test_operational_sorting_is_date_room_time_presenter_title_version() -> None:

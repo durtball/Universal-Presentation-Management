@@ -15,6 +15,7 @@ import type {
   SiteRecord,
   CentralMediaImport,
   CentralMediaWorkspace,
+  PresentationMatchCandidate,
   StorageOverview,
 } from "./types";
 
@@ -115,6 +116,8 @@ export function centralApi(csrfToken: string | null = null) {
       get<Row[]>(`/api/v1/admin/events/${eventId}/presentations`, signal),
     mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
       get<CentralMediaWorkspace>(`/api/v1/admin/events/${eventId}/media-imports`, signal),
+    mediaCandidates: (eventId: string, search = "", signal?: AbortSignal) =>
+      client.request<{ candidates: PresentationMatchCandidate[] }>(`/api/v1/admin/events/${eventId}/presentation-match-candidates`, { signal, retry: true, query: search ? { search } : undefined }),
     uploadMedia: (eventId: string, file: File, onProgress: (value: number) => void, relativePath?: string, onRetry?: (count: number) => void) =>
       uploadFile<CentralMediaImport>({ path: `/api/v1/admin/events/${eventId}/media-imports`, file, progress: onProgress, csrf: csrfToken, relativePath, retrying: onRetry }),
     assignMedia: (importId: string, presentationId: string) =>
@@ -122,6 +125,9 @@ export function centralApi(csrfToken: string | null = null) {
         `/api/v1/admin/media-imports/${importId}/assignment/${presentationId}`,
         { method: "PUT" },
       ),
+    confirmMedia: (items: Array<{ media_import_id: string; presentation_id: string }>) =>
+      client.request<{ results: Array<{ media_import_id: string; status: string; message?: string }> }>("/api/v1/admin/media-imports/confirmations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) }),
+    refreshMediaMatch: (importId: string) => client.request<CentralMediaImport>(`/api/v1/admin/media-imports/${importId}/match`, { method: "POST" }),
     retryMedia: (importId: string) => client.request<CentralMediaImport>(
       `/api/v1/admin/media-imports/${importId}/retry`, { method: "POST" },
     ),

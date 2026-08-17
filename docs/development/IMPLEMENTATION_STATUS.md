@@ -201,3 +201,7 @@
 - PDF conversion engine, sandboxing, derivative lifecycle, and failure/retry policy.
 - Backup/restore, retention, and disaster-recovery objectives for Central, Site, Signage, PostgreSQL, media, and trust material.
 - Full authentication/RBAC across Central, Site, operators, devices, and service identities, superseding temporary or partial boundaries where appropriate.
+
+### Operator-confirmed presentation media matching
+
+Central presentation uploads now retain Event-scoped, explained candidate rankings as suggestions rather than automatically creating PresentationVersions. The Event candidate API and shared review UI support presenter/session/Presentation search, changing a suggestion, re-running unresolved matching, individual confirmation, and explicit selected bulk confirmation with per-item results. Confirmation is Event-validated and retry-idempotent. The persistence-free matcher is shared with Site, but the equivalent Site unresolved-import review/confirmation API remains future integration work; Site-local direct uploads to an explicitly chosen Presentation continue to use existing offline-capable semantics.

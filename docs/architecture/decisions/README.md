@@ -19,3 +19,5 @@ Architecture Decision Records (ADRs) capture implementation decisions that refin
 | [ADR-0013](ADR-0013-deployment-local-media-storage-service.md) | Accepted | Deployment-local Media Storage service boundary |
 
 New decisions must not silently weaken Central/Site separation, Site offline autonomy, PostgreSQL requirements, or other master-architecture constraints.
+
+- [ADR-0014: Operator-authoritative presentation media matching](ADR-0014-operator-authoritative-media-matching.md) — automatic matching produces Event-scoped suggestions only; explicit individual or selected bulk operator confirmation creates assignments.

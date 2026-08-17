@@ -22,6 +22,7 @@ from upm_central.persistence.models import (
     PresentationVersion,
     StorageRoot,
     TransferJob,
+    utc_now,
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_central.persistence.queue import CentralQueue
@@ -285,27 +286,56 @@ class CentralMediaStagingService:
     def _automatic_match_and_assign(
         self, session: Session, record: PresentationMediaImport
     ) -> None:
-        presentations = session.scalars(
-            select(Presentation).where(Presentation.event_id == record.event_id)
+        rows = session.execute(
+            select(Presentation, ProgramSession, Person)
+            .outerjoin(ProgramSession, ProgramSession.session_id == Presentation.session_id)
+            .outerjoin(
+                PresentationPresenter,
+                PresentationPresenter.presentation_id == Presentation.presentation_id,
+            )
+            .outerjoin(
+                EventParticipation,
+                EventParticipation.event_participation_id
+                == PresentationPresenter.event_participation_id,
+            )
+            .outerjoin(Person, Person.person_id == EventParticipation.person_id)
+            .where(Presentation.event_id == record.event_id)
+            .order_by(
+                Presentation.presentation_id,
+                PresentationPresenter.primary_presenter.desc(),
+                PresentationPresenter.presenter_order,
+            )
         ).all()
-        result = match_presentation(
-            record.original_filename,
-            [
+        candidates = []
+        seen: set[UUID] = set()
+        for item, program_session, presenter in rows:
+            if item.presentation_id in seen:
+                continue
+            seen.add(item.presentation_id)
+            candidates.append(
                 MatchCandidate(
                     item.presentation_id,
                     item.presentation_identifier,
                     item.external_presentation_id,
+                    title=item.title,
+                    presenter_family_name=presenter.family_name if presenter else None,
+                    presenter_given_name=presenter.given_name if presenter else None,
+                    session_title=program_session.title if program_session else None,
+                    session_external_id=program_session.session_code if program_session else None,
+                    room=program_session.location_name if program_session else None,
+                    starts_at=item.scheduled_at
+                    or (program_session.starts_at if program_session else None),
                 )
-                for item in presentations
-            ],
+            )
+        result = match_presentation(
+            record.original_filename,
+            candidates,
         )
         record.match_state = result.state
         record.match_reason = result.reason
-        record.match_candidates = [str(item) for item in result.candidate_ids]
-        if result.state is MediaMatchState.EXACT and result.presentation_id:
-            self.assign(session, record, result.presentation_id, manual=False)
-        elif result.state in {MediaMatchState.AMBIGUOUS, MediaMatchState.UNMATCHED}:
-            record.import_state = MediaImportState.NEEDS_REVIEW
+        record.match_candidates = list(result.candidates)
+        # Matching is suggestion-only. Even an exact identifier never creates a version.
+        record.import_state = MediaImportState.NEEDS_REVIEW
 
     def assign(
         self,
@@ -314,6 +344,7 @@ class CentralMediaStagingService:
         presentation_id: UUID,
         *,
         manual: bool,
+        actor: str | None = None,
     ) -> None:
         presentation = session.get(Presentation, presentation_id)
         if presentation is None or presentation.event_id != record.event_id:
@@ -368,7 +399,9 @@ class CentralMediaStagingService:
         record.presentation_version_id = latest.presentation_version_id
         record.presentation_identifier = presentation.presentation_identifier
         record.external_presentation_id = presentation.external_presentation_id
-        record.match_state = MediaMatchState.MANUAL if manual else MediaMatchState.EXACT
+        record.match_state = MediaMatchState.CONFIRMED
+        record.confirmed_by = actor or "operator"
+        record.confirmed_at = utc_now()
         if manual:
             record.match_reason = "Operator manual assignment"
         record.canonical_filename = canonical_presentation_filename(

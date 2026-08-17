@@ -355,7 +355,9 @@ export interface CentralMediaImport extends Row {
   sha256?: string | null;
   match_state: string;
   match_reason?: string | null;
-  match_candidates: string[];
+  match_candidates: Array<{ presentation_id: string; score: number; confidence: "high" | "medium" | "low"; evidence: string[] }>;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
   import_state: string;
   sync_state: string;
   origin: string;
@@ -364,6 +366,12 @@ export interface CentralMediaImport extends Row {
   error_detail?: string | null;
   created_at: string;
   updated_at: string;
+}
+export interface PresentationMatchCandidate extends Row {
+  presentation_id: string; presentation_identifier: string; external_presentation_id?: string | null;
+  title: string; session_title?: string | null; session_external_id?: string | null;
+  room?: string | null; starts_at?: string | null;
+  presenters: Array<{ family_name?: string | null; given_name?: string | null; display_name: string }>;
 }
 export interface CentralMediaWorkspace extends Row {
   summary: Record<string, number>;

@@ -21,12 +21,18 @@ from upm_central.media_replication import (
 from upm_central.persistence.models import (
     AuditRecord,
     EventDeployment,
+    EventParticipation,
     MediaReplicationReceiveSession,
+    Person,
     Presentation,
     PresentationMediaImport,
+    PresentationPresenter,
     PresentationVersion,
     TransferJob,
     utc_now,
+)
+from upm_central.persistence.models import (
+    Session as ProgramSession,
 )
 from upm_central.presentation_media import (
     CentralMediaStagingService,
@@ -36,6 +42,7 @@ from upm_central.sync import authenticate_site
 from upm_shared.enums import (
     JobStatus,
     MediaImportState,
+    MediaMatchState,
     MediaReplicationState,
     MediaTransferState,
 )
@@ -58,6 +65,78 @@ class ReplicationCreate(BaseModel):
     media_type: str | None = Field(default=None, max_length=255)
 
 
+class MatchConfirmation(BaseModel):
+    media_import_id: UUID
+    presentation_id: UUID
+
+
+class MatchConfirmationBatch(BaseModel):
+    items: list[MatchConfirmation] = Field(min_length=1, max_length=1000)
+
+
+def _candidate_views(
+    session: Session, event_id: UUID, search: str | None = None
+) -> list[dict[str, object]]:
+    presentations = session.scalars(
+        select(Presentation)
+        .where(Presentation.event_id == event_id)
+        .order_by(Presentation.presentation_identifier)
+    ).all()
+    result = []
+    needle = (search or "").strip().casefold()
+    for item in presentations:
+        program_session = session.get(ProgramSession, item.session_id) if item.session_id else None
+        presenters = session.execute(
+            select(Person.family_name, Person.given_name)
+            .join(EventParticipation, EventParticipation.person_id == Person.person_id)
+            .join(
+                PresentationPresenter,
+                PresentationPresenter.event_participation_id
+                == EventParticipation.event_participation_id,
+            )
+            .where(PresentationPresenter.presentation_id == item.presentation_id)
+            .order_by(
+                PresentationPresenter.primary_presenter.desc(),
+                PresentationPresenter.presenter_order,
+            )
+        ).all()
+        view = {
+            "presentation_id": item.presentation_id,
+            "presentation_identifier": item.presentation_identifier,
+            "external_presentation_id": item.external_presentation_id,
+            "title": item.title,
+            "session_title": program_session.title if program_session else None,
+            "session_external_id": program_session.session_code if program_session else None,
+            "room": program_session.location_name if program_session else None,
+            "starts_at": item.scheduled_at
+            or (program_session.starts_at if program_session else None),
+            "presenters": [
+                {
+                    "family_name": family,
+                    "given_name": given,
+                    "display_name": ", ".join(filter(None, [family, given])),
+                }
+                for family, given in presenters
+            ],
+        }
+        haystack = " ".join(
+            str(value)
+            for value in [
+                item.presentation_identifier,
+                item.external_presentation_id,
+                item.title,
+                view["session_title"],
+                view["session_external_id"],
+                view["room"],
+                *(name for row in view["presenters"] for name in row.values()),
+            ]
+            if value
+        ).casefold()
+        if not needle or needle in haystack:
+            result.append(view)
+    return result[:500]
+
+
 def _view(item: PresentationMediaImport) -> dict[str, object]:
     return {
         "media_import_id": item.media_import_id,
@@ -76,6 +155,8 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "match_state": item.match_state,
         "match_reason": item.match_reason,
         "match_candidates": item.match_candidates,
+        "confirmed_by": item.confirmed_by,
+        "confirmed_at": item.confirmed_at,
         "import_state": item.import_state,
         "sync_state": item.sync_state,
         "transfer_job_id": item.transfer_job_id,
@@ -270,6 +351,30 @@ def register_presentation_media_routes(
         )
         return result
 
+    @app.get(
+        "/api/v1/admin/events/{event_id}/presentation-match-candidates",
+        dependencies=admin,
+        tags=["media"],
+    )
+    def candidates(
+        event_id: UUID,
+        session: DbSession,
+        search: Annotated[str | None, Query(max_length=255)] = None,
+    ) -> dict[str, object]:
+        return {"candidates": _candidate_views(session, event_id, search)}
+
+    @app.post(
+        "/api/v1/admin/media-imports/{media_import_id}/match", dependencies=admin, tags=["media"]
+    )
+    def refresh_match(media_import_id: UUID, session: DbSession) -> dict[str, object]:
+        item = session.get(PresentationMediaImport, media_import_id, with_for_update=True)
+        if item is None:
+            raise HTTPException(404, "media import not found")
+        if item.match_state is MediaMatchState.CONFIRMED or item.presentation_id:
+            return _view(item)
+        staging_service()._automatic_match_and_assign(session, item)
+        return _view(item)
+
     @app.put(
         "/api/v1/admin/media-imports/{media_import_id}/assignment/{presentation_id}",
         dependencies=admin,
@@ -283,6 +388,10 @@ def register_presentation_media_routes(
             raise HTTPException(404, "media import not found")
         if item.import_state in {MediaImportState.CANCELLED, MediaImportState.SITE_READY}:
             raise HTTPException(409, "media import can no longer be reassigned")
+        if item.match_state is MediaMatchState.CONFIRMED:
+            if item.presentation_id == presentation_id:
+                return _view(item)
+            raise HTTPException(409, "confirmed media cannot be reassigned")
         before = {
             "presentation_id": str(item.presentation_id) if item.presentation_id else None,
             "presentation_version_id": str(item.presentation_version_id)
@@ -290,7 +399,8 @@ def register_presentation_media_routes(
             else None,
             "match_state": str(item.match_state),
         }
-        staging_service().assign(session, item, presentation_id, manual=True)
+        actor = getattr(request.state, "admin_actor", "central-admin")
+        staging_service().assign(session, item, presentation_id, manual=True, actor=actor)
         session.add(
             AuditRecord(
                 actor_id=getattr(request.state, "admin_actor", "central-admin"),
@@ -309,6 +419,62 @@ def register_presentation_media_routes(
             )
         )
         return _view(item)
+
+    @app.post("/api/v1/admin/media-imports/confirmations", dependencies=admin, tags=["media"])
+    def confirm_batch(
+        body: MatchConfirmationBatch, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        actor = getattr(request.state, "admin_actor", "central-admin")
+        results = []
+        for requested in body.items:
+            try:
+                with session.begin_nested():
+                    item = session.get(
+                        PresentationMediaImport, requested.media_import_id, with_for_update=True
+                    )
+                    if item is None:
+                        raise MediaStagingError("media import not found", "not_found")
+                    if item.match_state is MediaMatchState.CONFIRMED:
+                        if item.presentation_id != requested.presentation_id:
+                            raise MediaStagingError(
+                                "media import was confirmed to another presentation",
+                                "already_confirmed",
+                            )
+                    else:
+                        staging_service().assign(
+                            session, item, requested.presentation_id, manual=True, actor=actor
+                        )
+                        session.add(
+                            AuditRecord(
+                                actor_id=actor,
+                                action="central.presentation_media.confirmed",
+                                target_type="presentation_media_import",
+                                target_id=item.media_import_id,
+                                site_id=item.destination_site_id,
+                                event_id=item.event_id,
+                                after_context={
+                                    "presentation_id": str(item.presentation_id),
+                                    "presentation_version_id": str(item.presentation_version_id),
+                                },
+                            )
+                        )
+                    results.append(
+                        {
+                            "media_import_id": requested.media_import_id,
+                            "status": "confirmed",
+                            "presentation_version_id": item.presentation_version_id,
+                        }
+                    )
+            except MediaStagingError as error:
+                results.append(
+                    {
+                        "media_import_id": requested.media_import_id,
+                        "status": "failed",
+                        "code": error.code,
+                        "message": str(error),
+                    }
+                )
+        return {"results": results}
 
     @app.post(
         "/api/v1/admin/media-imports/{media_import_id}/retry",

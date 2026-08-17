@@ -25,6 +25,8 @@ class PresentationIdentifierSource(StrEnum):
 
 
 class MediaMatchState(StrEnum):
+    SUGGESTED = "suggested"
+    CONFIRMED = "confirmed"
     EXACT = "exact"
     HIGH_CONFIDENCE = "high_confidence"
     AMBIGUOUS = "ambiguous"
