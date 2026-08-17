@@ -54,9 +54,8 @@ function attemptUpload<T>({ path, file, relativePath, query, csrf, progress, ide
     request.onabort = () => window.clearTimeout(watchdog);
     request.onload = () => {
       window.clearTimeout(watchdog);
-      request.status >= 200 && request.status < 300
-        ? resolve(request.response as T)
-        : reject(responseError(request));
+      if (request.status >= 200 && request.status < 300) resolve(request.response as T);
+      else reject(responseError(request));
     };
     request.send(file);
   });

@@ -25,7 +25,6 @@ from upm_central.media_replication import (
     finalize_replication_reference,
 )
 from upm_central.persistence.models import (
-    AuditRecord,
     Event,
     EventDeployment,
     EventParticipation,
@@ -221,7 +220,7 @@ def register_presentation_media_routes(
 
     @app.post(
         "/api/v1/admin/events/{event_id}/media-imports",
-        status_code=status.HTTP_202_ACCEPTED,
+        status_code=status.HTTP_201_CREATED,
         dependencies=admin,
         tags=["media"],
     )
@@ -457,33 +456,9 @@ def register_presentation_media_routes(
             if item.presentation_id == presentation_id:
                 return _view(item)
             raise HTTPException(409, "confirmed media cannot be reassigned")
-        before = {
-            "presentation_id": str(item.presentation_id) if item.presentation_id else None,
-            "presentation_version_id": str(item.presentation_version_id)
-            if item.presentation_version_id
-            else None,
-            "match_state": str(item.match_state),
-        }
         actor = getattr(request.state, "admin_actor", "central-admin")
-        staging_service().assign(session, item, presentation_id, manual=True, actor=actor)
-        session.add(
-            AuditRecord(
-                actor_id=getattr(request.state, "admin_actor", "central-admin"),
-                action="central.presentation_media.manual_assignment",
-                target_type="presentation_media_import",
-                target_id=item.media_import_id,
-                site_id=item.destination_site_id,
-                event_id=item.event_id,
-                before_context=before,
-                after_context={
-                    "presentation_id": str(item.presentation_id),
-                    "presentation_version_id": str(item.presentation_version_id),
-                    "match_state": str(item.match_state),
-                    "canonical_filename": item.canonical_filename,
-                },
-            )
-        )
-        return _view(item)
+        staging_service().queue_promotion(session, item, presentation_id, actor=actor)
+        return {**_view(item), "confirmation_state": "queued"}
 
     @app.post("/api/v1/admin/media-imports/confirmations", dependencies=admin, tags=["media"])
     def confirm_batch(
@@ -506,27 +481,18 @@ def register_presentation_media_routes(
                                 "already_confirmed",
                             )
                     else:
-                        staging_service().assign(
-                            session, item, requested.presentation_id, manual=True, actor=actor
-                        )
-                        session.add(
-                            AuditRecord(
-                                actor_id=actor,
-                                action="central.presentation_media.confirmed",
-                                target_type="presentation_media_import",
-                                target_id=item.media_import_id,
-                                site_id=item.destination_site_id,
-                                event_id=item.event_id,
-                                after_context={
-                                    "presentation_id": str(item.presentation_id),
-                                    "presentation_version_id": str(item.presentation_version_id),
-                                },
-                            )
+                        staging_service().queue_promotion(
+                            session,
+                            item,
+                            requested.presentation_id,
+                            actor=actor,
                         )
                     results.append(
                         {
                             "media_import_id": requested.media_import_id,
-                            "status": "confirmed",
+                            "status": "confirmed"
+                            if item.match_state is MediaMatchState.CONFIRMED
+                            else "queued",
                             "presentation_version_id": item.presentation_version_id,
                         }
                     )

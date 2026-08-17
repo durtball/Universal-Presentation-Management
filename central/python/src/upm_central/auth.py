@@ -6,8 +6,8 @@ import hmac
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session, selectinload
 
 from upm_central.persistence.models import AdminSession, AdminUser, utc_now
 
@@ -127,7 +127,11 @@ def create_browser_session(
 def resolve_browser_session(session: Session, token: str | None) -> AdminSession | None:
     if not token:
         return None
-    item = session.scalar(select(AdminSession).where(AdminSession.token_hash == _digest(token)))
+    item = session.scalar(
+        select(AdminSession)
+        .options(selectinload(AdminSession.user))
+        .where(AdminSession.token_hash == _digest(token))
+    )
     now = utc_now()
     if (
         item is None
@@ -136,8 +140,27 @@ def resolve_browser_session(session: Session, token: str | None) -> AdminSession
         or not item.user.active
     ):
         return None
-    item.last_seen_at = now
     return item
+
+
+def touch_browser_session_activity(
+    session: Session, session_id, *, interval: timedelta = timedelta(seconds=60)
+) -> bool:
+    """Persist non-critical activity metadata at most once per interval.
+
+    The conditional UPDATE is intentionally independent from authorization. Concurrent requests
+    do not first lock/read ORM state, and the caller commits this best-effort write immediately.
+    """
+    now = utc_now()
+    result = session.execute(
+        update(AdminSession)
+        .where(
+            AdminSession.admin_session_id == session_id,
+            AdminSession.last_seen_at < now - interval,
+        )
+        .values(last_seen_at=now)
+    )
+    return bool(result.rowcount)
 
 
 def csrf_matches(item: AdminSession, csrf_token: str | None) -> bool:

@@ -64,7 +64,7 @@ describe("presentation upload selection", () => {
       active += 1; maximum = Math.max(maximum, active);
       await Promise.resolve(); completed += 1; active -= 1;
     });
-    expect(maximum).toBe(2);
+    expect(maximum).toBe(6);
     expect(completed).toBe(1_000);
   });
 });

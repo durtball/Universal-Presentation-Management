@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from uuid import UUID, uuid4
@@ -184,13 +185,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         destination = storage.path(target, key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists():
-            temporary = destination.with_name(f".{destination.name}.{uuid4()}.partial")
-            shutil.copyfile(source, temporary)
-            if storage.sha256(temporary) != payload.sha256:
-                temporary.unlink(missing_ok=True)
-                raise StorageError("Committed object failed SHA-256 verification.")
-            os.link(temporary, destination)
-            temporary.unlink(missing_ok=True)
+            try:
+                # Same-filesystem publication is atomic and keeps staging recoverable until the
+                # application commits its canonical database reference.
+                os.link(source, destination)
+            except OSError as error:
+                if error.errno != errno.EXDEV:
+                    if destination.exists():
+                        pass
+                    else:
+                        raise
+                else:
+                    temporary = destination.with_name(f".{destination.name}.{uuid4()}.partial")
+                    try:
+                        with source.open("rb") as incoming, temporary.open("xb") as outgoing:
+                            shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+                            outgoing.flush()
+                            os.fsync(outgoing.fileno())
+                        if storage.sha256(temporary) != payload.sha256:
+                            raise StorageError("Committed object failed SHA-256 verification.")
+                        os.link(temporary, destination)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         return {
             "storage_target_id": str(target.storage_target_id),
             "storage_key": key,

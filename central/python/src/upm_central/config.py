@@ -29,7 +29,7 @@ class CentralDatabaseSettings(BaseSettings):
     storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
     storage_critical_free_percent: Annotated[float, Field(ge=0, le=100)] = 5.0
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888
-    staging_upload_concurrency: Annotated[int, Field(ge=1, le=64)] = 4
+    staging_upload_concurrency: Annotated[int, Field(ge=1, le=64)] = 8
     staging_retry_after_seconds: Annotated[int, Field(ge=1, le=300)] = 2
     transfer_block_bytes: Annotated[int, Field(ge=65_536, le=67_108_864)] = 4_194_304
     transfer_partial_retention_seconds: Annotated[int, Field(ge=3600)] = 604_800

@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, ProgrammingError
 from upm_central.config import CentralDatabaseSettings
 from upm_central.lifecycle import run_bulk_people_deletion, run_deletion
 from upm_central.persistence.database import create_central_engine, create_central_session_factory
-from upm_central.persistence.models import DeletionOperation
+from upm_central.persistence.models import DeletionOperation, ProcessingJob
 from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import JobStatus
@@ -39,7 +39,19 @@ def execute_processing_job(
         if media_processor is None:
             raise RuntimeError("presentation media processor is unavailable")
         media_import_id = work.payload.get("data", {}).get("media_import_id")
-        asyncio.run(media_processor.process(UUID(str(media_import_id))))
+        media_processor.analyze(UUID(str(media_import_id)))
+        return True
+    if work.job_type == "presentation_media.promote":
+        if media_processor is None:
+            raise RuntimeError("presentation media processor is unavailable")
+        data = work.payload.get("data", {})
+        asyncio.run(
+            media_processor.promote_and_assign(
+                UUID(str(data.get("media_import_id"))),
+                UUID(str(data.get("presentation_id"))),
+                actor=str(data.get("actor") or "central-admin"),
+            )
+        )
         return True
     if work.job_type not in {"lifecycle.delete_event", "lifecycle.delete_person"}:
         if work.job_type != "lifecycle.delete_people_bulk":
@@ -132,6 +144,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
     try:
         while not stop.is_set():
             ready_file.touch()
+            media_work_id = None
             with factory.begin() as session:
                 queue = CentralQueue(session)
                 queue.register_worker(
@@ -157,7 +170,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if kind == "processing":
+                    if kind == "processing" and work.job_type.startswith("presentation_media."):
+                        # Commit the durable claim and release this connection before matching or
+                        # calling Media Storage. Completion/failure uses a fresh short transaction.
+                        media_work_id = work.processing_job_id
+                    elif kind == "processing":
                         try:
                             with session.begin_nested():
                                 executed = execute_processing_job(
@@ -220,8 +237,48 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             continue
                         if not executed:
                             continue
-                    queue.complete(work, worker_id)
-                    log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
+                    if media_work_id is None:
+                        queue.complete(work, worker_id)
+                        log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
+            if media_work_id is not None:
+                try:
+                    with factory() as session:
+                        media_work = session.get(ProcessingJob, media_work_id)
+                        session.expunge(media_work)
+                    execute_processing_job(
+                        None,
+                        None,
+                        media_work,
+                        worker_id,
+                        media_processor,
+                    )
+                    with factory.begin() as session:
+                        media_work = session.get(ProcessingJob, media_work_id)
+                        CentralQueue(session).complete(media_work, worker_id)
+                    log(
+                        "job_completed",
+                        worker_id=worker_id,
+                        job_kind="processing",
+                        work_id=media_work_id,
+                    )
+                except Exception as exc:
+                    with factory.begin() as session:
+                        media_work = session.get(ProcessingJob, media_work_id)
+                        CentralQueue(session).fail(
+                            media_work,
+                            worker_id,
+                            error_code="presentation_media_processing_failed",
+                            message=str(exc),
+                            retryable=True,
+                            base_delay_seconds=settings.worker_retry_base_seconds,
+                            metadata={"error_type": type(exc).__name__},
+                        )
+                    log(
+                        "presentation_media_processing_failed",
+                        worker_id=worker_id,
+                        work_id=media_work_id,
+                        error_type=type(exc).__name__,
+                    )
             if once:
                 break
             stop.wait(settings.worker_poll_interval_seconds)

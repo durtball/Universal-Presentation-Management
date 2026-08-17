@@ -116,6 +116,21 @@ def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
         },
     ).json()
     assert committed["storage_key"] == f"objects/sha256/{digest[:2]}/{digest}"
+    replay = client.post(
+        "/api/v1/storage/objects/commit",
+        json={
+            "staging_target_id": allocation["storage_target_id"],
+            "staging_key": allocation["storage_key"],
+            "sha256": digest,
+        },
+    )
+    assert replay.status_code == 200
+    assert (
+        client.get(
+            f"/api/v1/storage/staging/{allocation['storage_target_id']}/{allocation['storage_key']}"
+        ).content
+        == payload
+    )
     assert (
         client.get(
             f"/api/v1/storage/objects/{committed['storage_target_id']}/{committed['storage_key']}"

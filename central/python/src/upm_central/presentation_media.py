@@ -21,6 +21,7 @@ from upm_central.persistence.models import (
     PresentationMediaImport,
     PresentationPresenter,
     PresentationVersion,
+    ProcessingJob,
     StorageRoot,
     TransferJob,
     utc_now,
@@ -292,35 +293,128 @@ class CentralMediaStagingService:
                 session.expunge(record)
                 return record
 
-    async def process(self, media_import_id: UUID) -> PresentationMediaImport:
-        """Promote and match one durable staged import independently of its source request."""
-        with self.factory.begin() as session:
+    def analyze(self, media_import_id: UUID) -> PresentationMediaImport:
+        """Match one staged import without promoting or assigning its media."""
+        try:
+            with self.factory.begin() as session:
+                record = session.get(PresentationMediaImport, media_import_id, with_for_update=True)
+                if record is None:
+                    raise MediaStagingError("media import not found", "not_found")
+                if record.import_state not in {
+                    MediaImportState.STAGED,
+                    MediaImportState.NEEDS_REVIEW,
+                }:
+                    session.expunge(record)
+                    return record
+                recognized = (
+                    Path(record.original_filename).suffix.lower()
+                    in SUPPORTED_PRESENTATION_EXTENSIONS
+                )
+                if recognized:
+                    self._automatic_match_and_assign(session, record)
+                else:
+                    record.match_state = MediaMatchState.UNMATCHED
+                    record.match_reason = "Unclassified media type preserved for operator review"
+                    record.import_state = MediaImportState.NEEDS_REVIEW
+                session.flush()
+                session.refresh(record)
+                session.expunge(record)
+                return record
+        except Exception as error:
+            with self.factory.begin() as session:
+                record = session.get(PresentationMediaImport, media_import_id)
+                if record is not None:
+                    record.match_state = MediaMatchState.UNMATCHED
+                    record.match_reason = "Analysis failed; staged media is preserved for review"
+                    record.import_state = MediaImportState.NEEDS_REVIEW
+                    record.error_code = "analysis_failed"
+                    record.error_detail = f"{type(error).__name__}: {error}"[:2048]
+            raise
+
+    def queue_promotion(
+        self,
+        session: Session,
+        record: PresentationMediaImport,
+        presentation_id: UUID,
+        *,
+        actor: str,
+    ) -> None:
+        presentation = session.get(Presentation, presentation_id)
+        if presentation is None or presentation.event_id != record.event_id:
+            raise MediaStagingError("presentation is not in the import event", "invalid_match")
+        if record.match_state is MediaMatchState.CONFIRMED:
+            if record.presentation_id != presentation_id:
+                raise MediaStagingError("media import is already confirmed", "already_confirmed")
+            return
+        if not record.sha256 or record.size_bytes is None or not record.staging_storage_root_id:
+            raise MediaStagingError("media import is not durably staged", "not_staged")
+        idempotency_key = f"{record.media_import_id}:{presentation_id}"
+        existing = session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.promote",
+                ProcessingJob.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            return
+        CentralQueue(session).enqueue_processing(
+            job_type="presentation_media.promote",
+            payload={
+                "data": {
+                    "media_import_id": str(record.media_import_id),
+                    "presentation_id": str(presentation_id),
+                    "actor": actor,
+                }
+            },
+            idempotency_key=idempotency_key,
+            required_capabilities=["cpu"],
+            max_attempts=5,
+        )
+
+    async def promote_and_assign(
+        self, media_import_id: UUID, presentation_id: UUID, *, actor: str
+    ) -> PresentationMediaImport:
+        """Idempotently promote staged bytes, then confirm inside a short transaction."""
+        with self.factory() as session:
             record = session.get(PresentationMediaImport, media_import_id)
             if record is None:
                 raise MediaStagingError("media import not found", "not_found")
-            if record.import_state not in {MediaImportState.STAGED, MediaImportState.NEEDS_REVIEW}:
+            if record.match_state is MediaMatchState.CONFIRMED:
+                if record.presentation_id != presentation_id:
+                    raise MediaStagingError(
+                        "media import is already confirmed", "already_confirmed"
+                    )
                 session.expunge(record)
                 return record
             target_id = record.staging_storage_root_id
             staging_key = record.staging_key
             sha256 = record.sha256
-            recognized = (
-                Path(record.original_filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
-            )
         if target_id is None or sha256 is None:
             raise MediaStagingError("staged media reference is incomplete", "invalid_staging")
+        # No PostgreSQL session or transaction is held during the external storage operation.
         committed = await self.storage.commit(str(target_id), staging_key, sha256)
         with self.factory.begin() as session:
-            record = session.get(PresentationMediaImport, media_import_id)
-            media_root = self._storage_root(session, committed, "media")
-            record.committed_storage_root_id = media_root.storage_root_id
-            record.committed_storage_key = committed["storage_key"]
-            if recognized:
-                self._automatic_match_and_assign(session, record)
-            else:
-                record.match_state = MediaMatchState.UNMATCHED
-                record.match_reason = "Unclassified media type preserved for operator review"
-                record.import_state = MediaImportState.NEEDS_REVIEW
+            record = session.get(PresentationMediaImport, media_import_id, with_for_update=True)
+            if record.match_state is not MediaMatchState.CONFIRMED:
+                media_root = self._storage_root(session, committed, "media")
+                record.committed_storage_root_id = media_root.storage_root_id
+                record.committed_storage_key = committed["storage_key"]
+                self.assign(session, record, presentation_id, manual=True, actor=actor)
+                session.add(
+                    AuditRecord(
+                        actor_id=actor,
+                        action="central.presentation_media.confirmed",
+                        target_type="presentation_media_import",
+                        target_id=record.media_import_id,
+                        site_id=record.destination_site_id,
+                        event_id=record.event_id,
+                        after_context={
+                            "presentation_id": str(record.presentation_id),
+                            "presentation_version_id": str(record.presentation_version_id),
+                            "committed_storage_key": record.committed_storage_key,
+                        },
+                    )
+                )
             session.flush()
             session.refresh(record)
             session.expunge(record)

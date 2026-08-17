@@ -6,10 +6,11 @@ import os
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from upm_central.persistence.models import (
+    AuditRecord,
     Event,
     PresentationMediaImport,
     ProcessingJob,
@@ -147,12 +148,12 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
         )
         assert replay.media_import_id == result.media_import_id
         assert storage.writes == 1
-        processed = await CentralMediaStagingService(factory, storage, 1024).process(
+        processed = CentralMediaStagingService(factory, storage, 1024).analyze(
             result.media_import_id
         )
         assert processed.import_state == MediaImportState.NEEDS_REVIEW
-        assert storage.commits == 1
-        assert (tmp_path / "committed").read_bytes() == payload
+        assert storage.commits == 0
+        assert not (tmp_path / "committed").exists()
     finally:
         with factory.begin() as session:
             session.query(ProcessingJob).filter(
@@ -176,4 +177,100 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
                     .where(StorageRoot.storage_root_id.in_(previously_enabled))
                     .values(enabled=True)
                 )
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_generated_500_file_batch_remains_staged_before_confirmation() -> None:
+    engine = create_engine(CENTRAL_URL)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id = new_uuid7()
+    staging_id = new_uuid7()
+    import_ids = []
+
+    class StorageClient:
+        commits = 0
+        sequence = 0
+
+        async def allocate_staging(self):
+            self.sequence += 1
+            return {
+                "storage_target_id": str(staging_id),
+                "storage_key": f"staging/generated-{self.sequence}.upload",
+                "name": "Generated staging",
+                "internal_path": "/storage/staging",
+            }
+
+        async def write_staging(self, target_id, key, chunks):
+            import hashlib
+
+            content = b"".join([chunk async for chunk in chunks])
+            return {
+                "storage_target_id": str(target_id),
+                "storage_key": key,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+
+        async def commit(self, *_args):
+            self.commits += 1
+            raise AssertionError("initial intake must not commit canonical media")
+
+    try:
+        with factory.begin() as session:
+            session.add(Event(event_id=event_id, name="Generated 500 batch", timezone="UTC"))
+        storage = StorageClient()
+        service = CentralMediaStagingService(factory, storage, 1024)
+        for index in range(500):
+            payload = f"generated-presentation-{index}".encode()
+
+            async def chunks(content=payload):
+                yield content
+
+            item = await service.stage(
+                event_id=event_id,
+                destination_site_id=None,
+                original_filename=f"unknown-{index}.pptx",
+                source_relative_path=f"batch/unknown-{index}.pptx",
+                content_type="application/vnd.ms-powerpoint",
+                idempotency_key=f"generated-500-{event_id}-{index}",
+                chunks=chunks(),
+                actor="batch-regression-test",
+            )
+            import_ids.append(item.media_import_id)
+        with factory() as session:
+            imports = session.scalars(
+                select(PresentationMediaImport).where(PresentationMediaImport.event_id == event_id)
+            ).all()
+            assert len(imports) == 500
+            assert all(item.import_state == MediaImportState.STAGED for item in imports)
+            assert all(item.staging_key and item.staging_storage_root_id for item in imports)
+            assert all(item.committed_storage_key is None for item in imports)
+            assert all(item.presentation_version_id is None for item in imports)
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ProcessingJob)
+                    .where(ProcessingJob.idempotency_key.in_([str(value) for value in import_ids]))
+                )
+                == 500
+            )
+            assert storage.commits == 0
+    finally:
+        with factory.begin() as session:
+            session.query(ProcessingJob).filter(
+                ProcessingJob.idempotency_key.in_([str(value) for value in import_ids])
+            ).delete(synchronize_session=False)
+            session.query(PresentationMediaImport).filter(
+                PresentationMediaImport.event_id == event_id
+            ).delete(synchronize_session=False)
+            session.query(AuditRecord).filter(AuditRecord.event_id == event_id).delete(
+                synchronize_session=False
+            )
+            session.query(Event).filter(Event.event_id == event_id).delete(
+                synchronize_session=False
+            )
+            session.query(StorageRoot).filter(StorageRoot.storage_root_id == staging_id).delete(
+                synchronize_session=False
+            )
         engine.dispose()

@@ -142,8 +142,9 @@
   Folder uploads now use two active request slots, bounded exponential retry for transient pressure,
   pause/resume and retry-failed controls, preserve non-junk unknown extensions for review, and use
   longest-boundary matching against known Event Presentation Identifiers and external IDs. Central
-  accepts uploads after durable staging, atomically queues the existing PostgreSQL processing job,
-  and performs media promotion and suggestion matching in the independently restartable worker.
+  accepts uploads after durable staging and atomically queues suggestion analysis in the existing
+  PostgreSQL worker. Canonical promotion is a separate durable job queued only by explicit operator
+  confirmation; the worker publishes storage before creating the confirmed PresentationVersion.
   Server admission bounds concurrent staging requests and returns retryable pressure without
   occupying the durable processing queue. Central retains durably staged bytes as needs-review
   records when matching/version post-processing fails.

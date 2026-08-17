@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
@@ -13,6 +14,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Re
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from upm_central.auth import (
@@ -23,6 +25,7 @@ from upm_central.auth import (
     hash_password,
     resolve_browser_session,
     rotate_csrf,
+    touch_browser_session_activity,
     verify_password,
 )
 from upm_central.config import CentralDatabaseSettings
@@ -81,6 +84,8 @@ from upm_shared.contracts.sync import (
     SyncBatchResponse,
 )
 from upm_shared.enums import EnrollmentState, EventDeploymentStatus, JobStatus
+
+logger = logging.getLogger(__name__)
 
 
 class HealthResponse(BaseModel):
@@ -202,7 +207,6 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
 
     def require_admin(
         request: Request,
-        session: DbSession,
         upm_admin_session: Annotated[str | None, Cookie()] = None,
         x_csrf_token: Annotated[str | None, Header()] = None,
         x_upm_admin_token: Annotated[str | None, Header()] = None,
@@ -211,7 +215,10 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         if x_upm_admin_token and hmac.compare_digest(x_upm_admin_token, get_settings().admin_token):
             request.state.admin_actor = "central-automation"
             return
-        browser_session = resolve_browser_session(session, upm_admin_session)
+        # Authentication uses a short, read-only session. It is closed before the route body,
+        # request streaming, or any external media-storage call begins.
+        with get_factory()() as auth_session:
+            browser_session = resolve_browser_session(auth_session, upm_admin_session)
         if browser_session is None:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED, detail="administrator authentication required"
@@ -221,6 +228,16 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         ):
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="invalid CSRF token")
         request.state.admin_actor = str(browser_session.user.admin_user_id)
+        # Activity is non-authoritative metadata. Persist it in a separate short transaction and
+        # never fail an otherwise valid request when this best-effort update is unavailable.
+        try:
+            with get_factory().begin() as activity_session:
+                touch_browser_session_activity(activity_session, browser_session.admin_session_id)
+        except SQLAlchemyError:
+            logger.warning(
+                "admin_session_activity_update_failed",
+                extra={"admin_session_id": str(browser_session.admin_session_id)},
+            )
 
     def session_view(item: AdminSession, csrf_token: str | None = None) -> dict[str, object]:
         result: dict[str, object] = {

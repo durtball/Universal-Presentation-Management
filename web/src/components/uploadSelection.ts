@@ -1,8 +1,8 @@
 export const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx", ".pdf"]);
-const configuredConcurrency = Number(import.meta.env.VITE_UPM_UPLOAD_CONCURRENCY ?? 2);
+const configuredConcurrency = Number(import.meta.env.VITE_UPM_UPLOAD_CONCURRENCY ?? 6);
 export const DEFAULT_UPLOAD_CONCURRENCY = Number.isInteger(configuredConcurrency)
-  ? Math.min(4, Math.max(1, configuredConcurrency))
-  : 2;
+  ? Math.min(8, Math.max(1, configuredConcurrency))
+  : 6;
 
 export interface SelectedUpload {
   id: string;
