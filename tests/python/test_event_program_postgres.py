@@ -527,6 +527,10 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         assert rematched.status_code == 200
         assert rematched.json()["match_state"] == "suggested"
         assert rematched.json()["presentation_id"] is None
+        assert rematched.json()["suggested_candidate"]["presentation_id"] == (
+            rematched.json()["match_candidates"][0]["presentation_id"]
+        )
+        assert rematched.json()["suggested_candidate"]["presenters"][0]["family_name"] == "Lomow"
         evidence = rematched.json()["match_candidates"][0]["evidence"]
         assert "Session ID 3261629 matched filename" in evidence
         assert "Presenter last name Lomow matched filename" in evidence

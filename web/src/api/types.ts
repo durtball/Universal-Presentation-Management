@@ -357,6 +357,7 @@ export interface CentralMediaImport extends Row {
   match_state: string;
   match_reason?: string | null;
   match_candidates: Array<{ presentation_id: string; score: number; confidence: "high" | "medium" | "low"; evidence: string[] }>;
+  suggested_candidate?: PresentationMatchCandidate | null;
   confirmed_by?: string | null;
   confirmed_at?: string | null;
   import_state: string;

@@ -175,7 +175,24 @@ def _candidate_views(
     return result
 
 
-def _view(item: PresentationMediaImport) -> dict[str, object]:
+def _view(
+    item: PresentationMediaImport, session: Session | None = None
+) -> dict[str, object]:
+    suggested_candidate = None
+    if (
+        session is not None
+        and item.match_state is MediaMatchState.SUGGESTED
+        and item.match_candidates
+    ):
+        try:
+            suggested_id = UUID(str(item.match_candidates[0]["presentation_id"]))
+        except (KeyError, TypeError, ValueError):
+            suggested_id = None
+        if suggested_id is not None:
+            candidates = _candidate_views(
+                session, item.event_id, presentation_ids={suggested_id}
+            )
+            suggested_candidate = candidates[0] if candidates else None
     return {
         "media_import_id": item.media_import_id,
         "batch_id": item.batch_id,
@@ -194,6 +211,7 @@ def _view(item: PresentationMediaImport) -> dict[str, object]:
         "match_state": item.match_state,
         "match_reason": item.match_reason,
         "match_candidates": item.match_candidates,
+        "suggested_candidate": suggested_candidate,
         "confirmed_by": item.confirmed_by,
         "confirmed_at": item.confirmed_at,
         "import_state": item.import_state,
@@ -468,7 +486,7 @@ def register_presentation_media_routes(
                 ),
                 "failed": sum(item.import_state == MediaImportState.FAILED for item in imports),
             },
-            "imports": [_view(item) for item in imports],
+            "imports": [_view(item, session) for item in imports],
         }
 
     @app.get("/api/v1/admin/media-imports/{media_import_id}", dependencies=admin, tags=["media"])
@@ -476,7 +494,7 @@ def register_presentation_media_routes(
         item = session.get(PresentationMediaImport, media_import_id)
         if item is None:
             raise HTTPException(404, "media import not found")
-        result = _view(item)
+        result = _view(item, session)
         result["version_history"] = (
             [
                 {
@@ -532,7 +550,7 @@ def register_presentation_media_routes(
         if item is None:
             raise HTTPException(404, "media import not found")
         if item.match_state is MediaMatchState.CONFIRMED or item.presentation_id:
-            return _view(item)
+            return _view(item, session)
         event = session.get(Event, item.event_id)
         missing = unmaterialized_imported_sessions(session, item.event_id)
         if missing:
@@ -543,7 +561,7 @@ def register_presentation_media_routes(
             )
             touch_event_program(session, event)
         staging_service()._automatic_match_and_assign(session, item)
-        return _view(item)
+        return _view(item, session)
 
     @app.post(
         "/api/v1/admin/events/{event_id}/presentation-materialization",
@@ -585,11 +603,11 @@ def register_presentation_media_routes(
             raise HTTPException(409, "media import can no longer be reassigned")
         if item.match_state is MediaMatchState.CONFIRMED:
             if item.presentation_id == presentation_id:
-                return _view(item)
+                return _view(item, session)
             raise HTTPException(409, "confirmed media cannot be reassigned")
         actor = getattr(request.state, "admin_actor", "central-admin")
         staging_service().queue_promotion(session, item, presentation_id, actor=actor)
-        return {**_view(item), "confirmation_state": "queued"}
+        return {**_view(item, session), "confirmation_state": "queued"}
 
     @app.post("/api/v1/admin/media-imports/confirmations", dependencies=admin, tags=["media"])
     def confirm_batch(
@@ -659,7 +677,7 @@ def register_presentation_media_routes(
         transfer.last_error = None
         item.import_state = MediaImportState.RETRY_WAIT
         item.retry_count += 1
-        return _view(item)
+        return _view(item, session)
 
     @app.post(
         "/api/v1/admin/media-imports/{media_import_id}/cancel",
@@ -673,7 +691,7 @@ def register_presentation_media_routes(
         if item.presentation_id or item.import_state == MediaImportState.SITE_READY:
             raise HTTPException(409, "assigned or delivered media cannot be cancelled")
         item.import_state = MediaImportState.CANCELLED
-        return _view(item)
+        return _view(item, session)
 
     def machine_transfer(
         transfer_session_id: UUID,
