@@ -88,15 +88,54 @@ class MediaBatchCreate(BaseModel):
 
 
 def _candidate_views(
-    session: Session, event_id: UUID, search: str | None = None
+    session: Session,
+    event_id: UUID,
+    search: str | None = None,
+    presentation_ids: set[UUID] | None = None,
 ) -> list[dict[str, object]]:
+    statement = select(Presentation).where(Presentation.event_id == event_id)
+    if presentation_ids:
+        statement = statement.where(Presentation.presentation_id.in_(presentation_ids))
+    needle = (search or "").strip()
+    if needle:
+        term = f"%{needle}%"
+        presenter_ids = (
+            select(PresentationPresenter.presentation_id)
+            .join(
+                EventParticipation,
+                EventParticipation.event_participation_id
+                == PresentationPresenter.event_participation_id,
+            )
+            .join(Person, Person.person_id == EventParticipation.person_id)
+            .where(
+                or_(
+                    Person.family_name.ilike(term),
+                    Person.given_name.ilike(term),
+                    Person.display_name.ilike(term),
+                )
+            )
+        )
+        session_ids = select(ProgramSession.session_id).where(
+            ProgramSession.event_id == event_id,
+            or_(
+                ProgramSession.session_code.ilike(term),
+                ProgramSession.title.ilike(term),
+                ProgramSession.location_name.ilike(term),
+            ),
+        )
+        statement = statement.where(
+            or_(
+                Presentation.presentation_identifier.ilike(term),
+                Presentation.external_presentation_id.ilike(term),
+                Presentation.title.ilike(term),
+                Presentation.session_id.in_(session_ids),
+                Presentation.presentation_id.in_(presenter_ids),
+            )
+        )
     presentations = session.scalars(
-        select(Presentation)
-        .where(Presentation.event_id == event_id)
-        .order_by(Presentation.presentation_identifier)
+        statement.order_by(Presentation.presentation_identifier).limit(50)
     ).all()
     result = []
-    needle = (search or "").strip().casefold()
     for item in presentations:
         program_session = session.get(ProgramSession, item.session_id) if item.session_id else None
         presenters = session.execute(
@@ -132,22 +171,8 @@ def _candidate_views(
                 for family, given, display_name in presenters
             ],
         }
-        haystack = " ".join(
-            str(value)
-            for value in [
-                item.presentation_identifier,
-                item.external_presentation_id,
-                item.title,
-                view["session_title"],
-                view["session_external_id"],
-                view["room"],
-                *(name for row in view["presenters"] for name in row.values()),
-            ]
-            if value
-        ).casefold()
-        if not needle or needle in haystack:
-            result.append(view)
-    return result[:500]
+        result.append(view)
+    return result
 
 
 def _view(item: PresentationMediaImport) -> dict[str, object]:
@@ -478,8 +503,26 @@ def register_presentation_media_routes(
         event_id: UUID,
         session: DbSession,
         search: Annotated[str | None, Query(max_length=255)] = None,
+        presentation_ids: Annotated[str | None, Query(max_length=2048)] = None,
     ) -> dict[str, object]:
-        return {"candidates": _candidate_views(session, event_id, search)}
+        try:
+            requested = (
+                {UUID(value) for value in presentation_ids.split(",") if value}
+                if presentation_ids
+                else None
+            )
+        except ValueError as error:
+            raise HTTPException(422, "invalid presentation_ids") from error
+        if requested and len(requested) > 50:
+            raise HTTPException(422, "at most 50 presentation_ids may be requested")
+        return {
+            "candidates": _candidate_views(
+                session,
+                event_id,
+                search,
+                requested,
+            )
+        }
 
     @app.post(
         "/api/v1/admin/media-imports/{media_import_id}/match", dependencies=admin, tags=["media"]

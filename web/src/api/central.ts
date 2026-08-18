@@ -116,8 +116,8 @@ export function centralApi(csrfToken: string | null = null) {
       get<Row[]>(`/api/v1/admin/events/${eventId}/presentations`, signal),
     mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
       get<CentralMediaWorkspace>(`/api/v1/admin/events/${eventId}/media-imports`, signal),
-    mediaCandidates: (eventId: string, search = "", signal?: AbortSignal) =>
-      client.request<{ candidates: PresentationMatchCandidate[] }>(`/api/v1/admin/events/${eventId}/presentation-match-candidates`, { signal, retry: true, query: search ? { search } : undefined }),
+    mediaCandidates: (eventId: string, search = "", signal?: AbortSignal, presentationIds: string[] = []) =>
+      client.request<{ candidates: PresentationMatchCandidate[] }>(`/api/v1/admin/events/${eventId}/presentation-match-candidates`, { signal, retry: true, query: { search: search || undefined, presentation_ids: presentationIds.length ? presentationIds.join(",") : undefined } }),
     createMediaBatch: (eventId: string, selectedCount: number, skippedItems: Array<{path:string;reason:string}>) =>
       client.request<import("./types").MediaImportBatch>(`/api/v1/admin/events/${eventId}/media-import-batches`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected_count: selectedCount, skipped_items: skippedItems }) }),
     mediaBatches: (eventId: string) => get<{items: import("./types").MediaImportBatch[]}>(`/api/v1/admin/events/${eventId}/media-import-batches`),
