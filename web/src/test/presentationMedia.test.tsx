@@ -139,7 +139,7 @@ describe("fluid Central media queue", () => {
 
   it("renders a paginated 500+ item queue without mounting every row", () => {
     render(<CentralReviewQueue initialItems={Array.from({ length: 501 }, (_, index) => row(index))} eventId="event" csrf="csrf" />);
-    fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "filename" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Filename" }));
     expect(screen.getByText("1–50 of 501")).toBeInTheDocument();
     expect(screen.getByText("deck-000.pptx")).toBeInTheDocument();
     expect(screen.queryByText("deck-500.pptx")).not.toBeInTheDocument();
@@ -167,5 +167,59 @@ describe("fluid Central media queue", () => {
     fireEvent.click(within(first).getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(screen.queryByText("deck-001.pptx")).not.toBeInTheDocument());
     expect(screen.getByText("deck-002.pptx")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "confirmed" } });
+    const confirmedRow = screen.getByText("deck-001.pptx").closest("tr")!;
+    expect(within(confirmedRow).getByLabelText("Select deck-001.pptx")).toBeDisabled();
+    expect(within(confirmedRow).queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+    expect(within(confirmedRow).getAllByText("Confirmed").length).toBeGreaterThan(0);
   });
+
+  it("recalculates selection after bulk confirmation and a newly rescanned match", async () => {
+    const unmatched = { ...row(2), match_state: "unmatched", suggested_candidate: null, match_candidates: [] };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ results: [{ media_import_id: "media-1", status: "queued" }] }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(row(2)), { status: 200, headers: { "Content-Type": "application/json" } }));
+    render(<CentralReviewQueue initialItems={[row(1), unmatched]} eventId="event" csrf="csrf" />);
+    fireEvent.click(screen.getByRole("button", { name: "Select All Good Matches" }));
+    expect(screen.getByLabelText("Select deck-001.pptx")).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Selected (1)" }));
+    await waitFor(() => expect(screen.queryByText("deck-001.pptx")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Confirm Selected (0)" })).toBeDisabled();
+    const unmatchedRow = screen.getByText("deck-002.pptx").closest("tr")!;
+    fireEvent.click(within(unmatchedRow).getByRole("button", { name: "Rescan" }));
+    await waitFor(() => expect(screen.getByLabelText("Select deck-002.pptx")).toBeEnabled());
+    fireEvent.click(screen.getByLabelText("Select deck-002.pptx"));
+    expect(screen.getByRole("button", { name: "Confirm Selected (1)" })).toBeEnabled();
+    fireEvent.click(screen.getByLabelText("Select deck-002.pptx"));
+    fireEvent.click(screen.getByRole("button", { name: "Select All Good Matches" }));
+    expect(screen.getByLabelText("Select deck-002.pptx")).toBeChecked();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves valid selections across sorting and filtering", () => {
+    render(<CentralReviewQueue initialItems={[row(1), row(2)]} eventId="event" csrf="csrf" />);
+    fireEvent.click(screen.getByLabelText("Select deck-001.pptx"));
+    fireEvent.click(screen.getByLabelText("Select deck-002.pptx"));
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Filename" }));
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "suggested" } });
+    expect(screen.getByLabelText("Select deck-001.pptx")).toBeChecked();
+    expect(screen.getByLabelText("Select deck-002.pptx")).toBeChecked();
+  });
+
+  it.each(["Filename", "File Size", "Received", "Source", "Status", "Suggested Presenter", "Suggested Session", "Suggested Presentation", "Confidence"])("sorts %s ascending then descending from the column header", (label) => {
+    const lowCandidate = { ...candidate, presentation_identifier: "A-1", title: "Alpha", session_title: "Alpha session", presenters: [{ display_name: "Alpha Presenter" }] };
+    const highCandidate = { ...candidate, presentation_identifier: "Z-1", title: "Zulu", session_title: "Zulu session", presenters: [{ display_name: "Zulu Presenter" }] };
+    const low = { ...row(1), original_filename: "alpha.pptx", size_bytes: 10, created_at: "2026-01-01T00:00:00Z", origin: "alpha", match_state: "confirmed", suggested_candidate: lowCandidate, match_candidates: [{ ...row(1).match_candidates[0], confidence: "low" as const }] };
+    const high = { ...row(2), original_filename: "zulu.pptx", size_bytes: 200, created_at: "2026-02-01T00:00:00Z", origin: "zulu", suggested_candidate: highCandidate };
+    render(<CentralReviewQueue initialItems={[high, low]} eventId="event" csrf="csrf" />);
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "all" } });
+    const header = screen.getByRole("button", { name: `Sort by ${label}` });
+    fireEvent.click(header);
+    expect(document.querySelector("tbody tr strong")?.textContent).toBe("alpha.pptx");
+    expect(header).toHaveTextContent("▲");
+    fireEvent.click(header);
+    expect(document.querySelector("tbody tr strong")?.textContent).toBe("zulu.pptx");
+    expect(header).toHaveTextContent("▼");
+  });
+
 });

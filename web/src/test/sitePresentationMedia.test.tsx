@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { siteApi } from "../api/site";
 import { SitePresentationMedia } from "../pages/SitePresentationMedia";
@@ -53,6 +53,11 @@ describe("Site presentation media canonical matching", () => {
     ));
     expect(intake).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("No media needs review")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "confirmed" } });
+    const confirmedRow = screen.getByText("3542488-Sadeghi.pptx").closest("tr")!;
+    expect(within(confirmedRow).getByLabelText("Select 3542488-Sadeghi.pptx")).toBeDisabled();
+    expect(within(confirmedRow).getByLabelText("Canonical match for 3542488-Sadeghi.pptx")).toBeDisabled();
+    expect(within(confirmedRow).queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
   });
 
   it("uses bounded server lookup for presenter and canonical identifier searches", async () => {
@@ -80,4 +85,22 @@ describe("Site presentation media canonical matching", () => {
       expect.any(String), "3542488", expect.any(AbortSignal),
     ));
   });
+
+  it("sorts Site queue columns without clearing valid selections", async () => {
+    mockSite();
+    const secondCandidate = { ...candidate, presentation_id: "55555555-5555-5555-5555-555555555555", presentation_identifier: "Z-2", title: "Zulu", presenters: ["Zulu Presenter"], session: "Zulu Session" };
+    const second = { ...intakeItem, media_object_id: "66666666-6666-6666-6666-666666666666", filename: "zulu.pptx", size_bytes: 4096, received_at: "2026-02-01T00:00:00Z", suggestion: secondCandidate };
+    const first = { ...intakeItem, filename: "alpha.pptx", size_bytes: 10, received_at: "2026-01-01T00:00:00Z" };
+    vi.spyOn(siteApi, "mediaIntake").mockResolvedValue({ items: [second, first], total: 2, limit: 50, offset: 0 });
+    render(<SitePresentationMedia />);
+    const checkbox = await screen.findByLabelText("Select alpha.pptx");
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Sort by File Size" }));
+    expect(document.querySelector("tbody tr strong")?.textContent).toBe("alpha.pptx");
+    expect(checkbox).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Sort by File Size" }));
+    expect(document.querySelector("tbody tr strong")?.textContent).toBe("zulu.pptx");
+    expect(screen.getByLabelText("Select alpha.pptx")).toBeChecked();
+  });
+
 });
