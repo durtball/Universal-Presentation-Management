@@ -36,12 +36,14 @@ from upm_central.persistence.models import (
     PresentationMediaImportBatch,
     PresentationPresenter,
     PresentationVersion,
+    ProcessingJob,
     TransferJob,
     utc_now,
 )
 from upm_central.persistence.models import (
     Session as ProgramSession,
 )
+from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import (
     CentralMediaStagingService,
     MediaStagingError,
@@ -55,6 +57,7 @@ from upm_shared.enums import (
     MediaReplicationState,
     MediaTransferState,
 )
+from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageUnavailable
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,38 @@ class MatchConfirmationBatch(BaseModel):
 class MediaBatchCreate(BaseModel):
     selected_count: int = Field(ge=1, le=100000)
     skipped_items: list[dict[str, object]] = Field(default_factory=list, max_length=100000)
+
+
+def _rescan_progress(
+    session: Session, operation_id: UUID, delivered_count: int = 0
+) -> dict[str, object]:
+    jobs = session.scalars(
+        select(ProcessingJob).where(
+            ProcessingJob.job_type == "presentation_media.process",
+            ProcessingJob.payload["data"]["rescan_operation_id"].astext == str(operation_id),
+        )
+    ).all()
+    complete = sum(job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED} for job in jobs)
+    completed_jobs = sorted(
+        (job for job in jobs if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}),
+        key=lambda job: (job.completed_at or job.updated_at, job.processing_job_id),
+    )
+    completed_ids = [
+        UUID(str(job.payload["data"]["media_import_id"]))
+        for job in completed_jobs[delivered_count:]
+    ]
+    updated = session.scalars(
+        select(PresentationMediaImport).where(
+            PresentationMediaImport.media_import_id.in_(completed_ids)
+        )
+    ).all() if completed_ids else []
+    return {
+        "operation_id": operation_id,
+        "complete": complete,
+        "total": len(jobs),
+        "finished": complete == len(jobs),
+        "items": [_view(item, session) for item in updated],
+    }
 
 
 def _candidate_views(
@@ -603,6 +638,65 @@ def register_presentation_media_routes(
                 requested,
             )
         }
+
+    @app.post(
+        "/api/v1/admin/events/{event_id}/media-imports/rescan",
+        dependencies=admin,
+        tags=["media"],
+    )
+    def rescan_unmatched(event_id: UUID, session: DbSession) -> dict[str, object]:
+        active = session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.process",
+                ProcessingJob.payload["data"]["event_id"].astext == str(event_id),
+                ProcessingJob.payload["data"]["rescan_operation_id"].astext.is_not(None),
+                ProcessingJob.status.in_(
+                    [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT]
+                ),
+            ).limit(1)
+        )
+        if active is not None:
+            return _rescan_progress(
+                session, UUID(str(active.payload["data"]["rescan_operation_id"]))
+            )
+        operation_id = new_uuid7()
+        unresolved = session.scalars(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.event_id == event_id,
+                PresentationMediaImport.presentation_id.is_(None),
+                PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+                PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+            )
+        ).all()
+        queue = CentralQueue(session)
+        for item in unresolved:
+            queue.enqueue_processing(
+                job_type="presentation_media.process",
+                payload={
+                    "data": {
+                        "media_import_id": str(item.media_import_id),
+                        "event_id": str(event_id),
+                        "rescan_operation_id": str(operation_id),
+                    }
+                },
+                idempotency_key=f"rescan:{operation_id}:{item.media_import_id}",
+                required_capabilities=["cpu"],
+                max_attempts=5,
+            )
+        return _rescan_progress(session, operation_id)
+
+    @app.get(
+        "/api/v1/admin/media-rescans/{operation_id}", dependencies=admin, tags=["media"]
+    )
+    def rescan_status(
+        operation_id: UUID,
+        session: DbSession,
+        delivered_count: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, object]:
+        progress = _rescan_progress(session, operation_id, delivered_count)
+        if progress["total"] == 0:
+            raise HTTPException(404, "media rescan not found")
+        return progress
 
     @app.post(
         "/api/v1/admin/media-imports/{media_import_id}/match", dependencies=admin, tags=["media"]

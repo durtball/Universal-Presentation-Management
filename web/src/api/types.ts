@@ -369,6 +369,13 @@ export interface CentralMediaImport extends Row {
   created_at: string;
   updated_at: string;
 }
+export interface MediaRescanProgress extends Row {
+  operation_id: string;
+  complete: number;
+  total: number;
+  finished: boolean;
+  items: CentralMediaImport[];
+}
 export interface MediaImportBatch extends Row {
   batch_id: string; event_id: string; selected_count: number; registered_count: number;
   queued_count: number; uploading_count: number; staged_count: number; processing_count: number;

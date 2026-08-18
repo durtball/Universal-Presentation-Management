@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MediaUploadDialog, PresentationMediaDetail, ReplicationStatus } from "../components/presentationMedia";
-import { goodMatchIds, MatchControl, selectedConfirmations } from "../pages/PresentationMedia";
+import { CentralReviewQueue, goodMatchIds, MatchControl, selectedConfirmations } from "../pages/PresentationMedia";
 
 describe("presentation media workflows", () => {
   it("queues multiple files and reports upload completion", async () => {
@@ -130,4 +130,42 @@ describe("operator-confirmed media selection", () => {
     expect(selectedConfirmations(rows, new Set(["one", "none"]), new Map([["one", "replacement"]]))).toEqual([{ media_import_id: "one", presentation_id: "replacement" }]);
   });
 
+});
+
+
+describe("fluid Central media queue", () => {
+  const candidate = { presentation_id: "11111111-1111-1111-1111-111111111111", presentation_identifier: "P-1", title: "Talk", session_title: "Session", room: "Room A", presenters: [{ display_name: "Sam Speaker" }] };
+  const row = (index: number) => ({ event_id: "22222222-2222-2222-2222-222222222222", media_import_id: `media-${index}`, original_filename: `deck-${String(index).padStart(3, "0")}.pptx`, size_bytes: 2048, match_state: "suggested", suggested_candidate: candidate, match_candidates: [{ presentation_id: candidate.presentation_id, score: 200, confidence: "high" as const, evidence: ["Identifier matched"] }], import_state: "needs_review", sync_state: "local", origin: "central", retry_count: 0, created_at: `2026-01-01T00:${String(index % 60).padStart(2, "0")}:00Z`, updated_at: "2026-01-01" });
+
+  it("renders a paginated 500+ item queue without mounting every row", () => {
+    render(<CentralReviewQueue initialItems={Array.from({ length: 501 }, (_, index) => row(index))} eventId="event" csrf="csrf" />);
+    fireEvent.change(screen.getByLabelText("Sort"), { target: { value: "filename" } });
+    expect(screen.getByText("1–50 of 501")).toBeInTheDocument();
+    expect(screen.getByText("deck-000.pptx")).toBeInTheDocument();
+    expect(screen.queryByText("deck-500.pptx")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(50);
+  });
+
+  it("shows durable rescan progress and merges newly discovered suggestions", async () => {
+    const unmatched = { ...row(3), match_state: "unmatched", suggested_candidate: null, match_candidates: [] };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ operation_id: "scan", complete: 0, total: 1, finished: false, items: [] }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ operation_id: "scan", complete: 1, total: 1, finished: true, items: [row(3)] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    render(<CentralReviewQueue initialItems={[unmatched]} eventId="event" csrf="csrf" />);
+    fireEvent.click(screen.getByRole("button", { name: "Rescan All Unmatched" }));
+    expect(await screen.findByText(/Rescanning unmatched media — 0 \/ 1/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 \/ 1 complete/, {}, { timeout: 2000 })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "suggested" } });
+    expect(screen.getByText("Sam Speaker")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes a confirmed row in place and preserves the other row", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ...row(1), match_state: "confirmed" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    render(<CentralReviewQueue initialItems={[row(1), row(2)]} eventId="event" csrf="csrf" />);
+    const first = screen.getByText("deck-001.pptx").closest("tr")!;
+    fireEvent.click(within(first).getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(screen.queryByText("deck-001.pptx")).not.toBeInTheDocument());
+    expect(screen.getByText("deck-002.pptx")).toBeInTheDocument();
+  });
 });

@@ -51,7 +51,7 @@ describe("Site presentation media canonical matching", () => {
     await waitFor(() => expect(confirm).toHaveBeenCalledWith(
       intakeItem.media_object_id, candidate.presentation_id,
     ));
-    await waitFor(() => expect(intake).toHaveBeenCalledTimes(2));
+    expect(intake).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("No media needs review")).toBeInTheDocument();
   });
 
@@ -63,6 +63,8 @@ describe("Site presentation media canonical matching", () => {
     });
     const lookup = vi.spyOn(siteApi, "presentationLookup").mockResolvedValue({ items: [candidate] });
     render(<SitePresentationMedia />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rescan All Unmatched" }));
+    await waitFor(() => expect(siteApi.mediaIntake).toHaveBeenCalledTimes(2));
     fireEvent.click(await screen.findByRole("button", { name: "Find…" }));
     const search = screen.getByLabelText("Search Session / Presenter");
     fireEvent.change(search, { target: { value: "Sadeghi" } });

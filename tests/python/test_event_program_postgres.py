@@ -26,12 +26,14 @@ from upm_central.persistence.models import (
     PresentationPresenter,
     PresentationSession,
     PresentationVersion,
+    ProcessingJob,
     SessionParticipant,
     Site,
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_shared.enums import (
     EnrollmentState,
+    JobStatus,
     MediaImportState,
     MediaMatchState,
     SyncState,
@@ -532,6 +534,19 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         )
         assert rematched.json()["suggested_candidate"]["presenters"][0]["family_name"] == "Lomow"
         evidence = rematched.json()["match_candidates"][0]["evidence"]
+        rescan = client.post(
+            f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
+        )
+        assert rescan.status_code == 200
+        assert rescan.json()["total"] == 1
+        assert rescan.json()["complete"] == 0
+        with Session(engine) as session:
+            job = session.scalar(select(ProcessingJob).where(
+                ProcessingJob.payload["data"]["rescan_operation_id"].astext
+                == rescan.json()["operation_id"]
+            ))
+            assert job is not None
+            assert job.payload["data"]["media_import_id"] == str(media_id)
         assert "Session ID 3261629 matched filename" in evidence
         assert "Presenter last name Lomow matched filename" in evidence
         with Session(engine) as session:
@@ -576,6 +591,18 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["match_state"] == "confirmed"
+        with Session(engine) as session:
+            queued_rescan = session.scalar(select(ProcessingJob).where(
+                ProcessingJob.payload["data"]["rescan_operation_id"].astext
+                == rescan.json()["operation_id"]
+            ))
+            queued_rescan.status = JobStatus.SUCCEEDED
+            session.commit()
+        preserved = client.post(
+            f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
+        )
+        assert preserved.status_code == 200
+        assert preserved.json()["total"] == 0
         with Session(engine) as session:
             assert (
                 session.scalar(select(func.count(PresentationVersion.presentation_version_id))) == 1
