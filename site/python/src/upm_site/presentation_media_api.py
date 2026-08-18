@@ -84,6 +84,15 @@ def _candidate_rows(session: Session, event_id: UUID, search: str, limit: int,
                 Presentation.title.ilike(f"%{needle}%"),
                 ProgramSession.session_code.ilike(f"%{needle}%"),
                 ProgramSession.title.ilike(f"%{needle}%"),
+                ProgramSession.location_name.ilike(f"%{needle}%"),
+                ProgramSession.session_id.in_(
+                    select(RoomAssignment.session_id)
+                    .join(Room, Room.room_id == RoomAssignment.room_id)
+                    .where(
+                        RoomAssignment.active.is_(True),
+                        Room.label.ilike(f"%{needle}%"),
+                    )
+                ),
                 Presentation.presentation_id.in_(
                     select(PresentationPresenter.presentation_id)
                     .join(EventParticipation, EventParticipation.event_participation_id
@@ -107,19 +116,34 @@ def _candidate_rows(session: Session, event_id: UUID, search: str, limit: int,
         .order_by(PresentationPresenter.primary_presenter.desc(), PresentationPresenter.presenter_order)
     ).all() if ids else []
     names: dict[UUID, list[str]] = {}
+    primary_names: dict[UUID, tuple[str | None, str | None]] = {}
     for presentation_id, display, given, family in presenter_rows:
         names.setdefault(presentation_id, []).append(display or " ".join(filter(None, [given, family])))
+        primary_names.setdefault(presentation_id, (given, family))
+    session_ids = [program_session.session_id for _, program_session in rows if program_session]
+    room_names = dict(session.execute(
+        select(RoomAssignment.session_id, Room.label)
+        .join(Room, Room.room_id == RoomAssignment.room_id)
+        .where(
+            RoomAssignment.session_id.in_(session_ids),
+            RoomAssignment.active.is_(True),
+        )
+    ).all()) if session_ids else {}
     return [{
         "presentation_id": item.presentation_id,
         "presentation_identifier": item.presentation_identifier,
         "external_presentation_id": item.external_presentation_id,
         "title": item.title,
         "presenters": names.get(item.presentation_id, []),
+        "presenter_given_name": primary_names.get(item.presentation_id, (None, None))[0],
+        "presenter_family_name": primary_names.get(item.presentation_id, (None, None))[1],
         "session_id": program_session.session_id if program_session else None,
         "session_code": program_session.session_code if program_session else None,
         "session_title": program_session.title if program_session else None,
+        "session": program_session.title if program_session else None,
         "starts_at": item.scheduled_at or (program_session.starts_at if program_session else None),
-        "room": program_session.location_name if program_session else None,
+        "room": (room_names.get(program_session.session_id) or program_session.location_name
+                 if program_session else None),
     } for item, program_session in rows]
 
 
@@ -276,8 +300,10 @@ def register_presentation_media_routes(
             UUID(str(item["presentation_id"])), str(item["presentation_identifier"]),
             str(item["external_presentation_id"]) if item["external_presentation_id"] else None,
             title=str(item["title"]),
-            presenter_family_name=(str(item["presenters"][0]).split()[-1]
-                                   if item["presenters"] else None),
+            presenter_family_name=(str(item["presenter_family_name"])
+                                   if item["presenter_family_name"] else None),
+            presenter_given_name=(str(item["presenter_given_name"])
+                                  if item["presenter_given_name"] else None),
             session_title=str(item["session_title"]) if item["session_title"] else None,
             session_external_id=str(item["session_code"]) if item["session_code"] else None,
             room=str(item["room"]) if item["room"] else None,

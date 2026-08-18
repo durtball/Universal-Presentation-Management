@@ -220,3 +220,25 @@ def test_operational_sorting_is_date_room_time_presenter_title_version() -> None
         ),
     )
     assert [row[2] for row in ordered] == ["Brown", "Smith", "Smith"]
+
+
+def test_site_filename_evidence_resolves_canonical_sadeghi_presentation() -> None:
+    presentation_id = UUID("11111111-1111-1111-1111-111111111111")
+    result = match_presentation(
+        "3542488-Sadeghi.pptx",
+        [
+            MatchCandidate(
+                presentation_id=presentation_id,
+                presentation_identifier="P-3542488",
+                presenter_family_name="Sadeghi",
+                presenter_given_name="Sara",
+                session_title="Sadeghi Clinical Update",
+                session_external_id="3542488",
+                room="Ballroom A",
+                title="Clinical Update",
+            )
+        ],
+    )
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == presentation_id
+    assert result.confidence == "high"
