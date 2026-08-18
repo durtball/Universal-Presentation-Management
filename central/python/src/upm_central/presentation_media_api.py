@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -28,6 +28,7 @@ from upm_central.persistence.models import (
     Event,
     EventDeployment,
     EventParticipation,
+    MediaObjectReplica,
     MediaReplicationReceiveSession,
     Person,
     Presentation,
@@ -511,6 +512,67 @@ def register_presentation_media_routes(
             else []
         )
         return result
+
+    @app.get(
+        "/api/v1/admin/presentation-versions/{presentation_version_id}/download",
+        dependencies=admin,
+        tags=["media"],
+    )
+    async def download_presentation_version(
+        presentation_version_id: UUID, session: DbSession
+    ) -> StreamingResponse:
+        item = session.scalar(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.presentation_version_id == presentation_version_id,
+                PresentationMediaImport.committed_storage_root_id.is_not(None),
+                PresentationMediaImport.committed_storage_key.is_not(None),
+            )
+        )
+        receiver = (
+            session.scalar(
+                select(MediaReplicationReceiveSession).where(
+                    MediaReplicationReceiveSession.presentation_version_id
+                    == presentation_version_id,
+                    MediaReplicationReceiveSession.finalized_media_object_id.is_not(None),
+                    MediaReplicationReceiveSession.storage_target_id.is_not(None),
+                )
+            )
+            if item is None
+            else None
+        )
+        if item is None and receiver is None:
+            raise HTTPException(404, "current presentation media is not available")
+        storage = AsyncMediaStorageClient(
+            settings().media_storage_url, settings().media_storage_token
+        )
+        if item is not None:
+            filename, size, mime_type = item.original_filename, item.size_bytes, item.mime_type
+            target_id, object_key = item.committed_storage_root_id, item.committed_storage_key
+        else:
+            replica = session.get(MediaObjectReplica, receiver.finalized_media_object_id)
+            if replica is None:
+                raise HTTPException(404, "current presentation media is not available")
+            filename, size, mime_type = (
+                receiver.original_filename,
+                receiver.expected_size,
+                receiver.media_type,
+            )
+            target_id, object_key = receiver.storage_target_id, replica.object_key
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Content-Length": str(size),
+            "X-Content-Type-Options": "nosniff",
+        }
+        return StreamingResponse(
+            storage.stream_object(
+                target_id,
+                object_key,
+                0,
+                size or 0,
+            ),
+            media_type=mime_type or "application/octet-stream",
+            headers=headers,
+        )
 
     @app.get(
         "/api/v1/admin/events/{event_id}/presentation-match-candidates",

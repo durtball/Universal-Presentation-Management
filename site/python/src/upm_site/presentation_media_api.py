@@ -4,9 +4,11 @@
 
 from collections.abc import Callable, Iterator
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -25,6 +27,7 @@ from upm_shared.enums import (
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import OutboxPayload
+from upm_shared.media_storage_client import AsyncMediaStorageClient
 from upm_shared.presentation_media import (
     CanonicalPresentationMetadata,
     MatchCandidate,
@@ -43,6 +46,7 @@ from upm_site.persistence.models import (
     Presentation,
     PresentationAsset,
     PresentationPresenter,
+    PresentationSession,
     PresentationVersion,
     Room,
     RoomAssignment,
@@ -151,9 +155,38 @@ def register_presentation_media_routes(
     app: FastAPI,
     db: Callable[[], Iterator[Session]],
     transaction: Callable[[], Iterator[Session]],
+    settings: Callable[[], object],
 ) -> None:
     ReadSession = Annotated[Session, Depends(db)]
     WriteSession = Annotated[Session, Depends(transaction)]
+
+    @app.get("/api/v1/presentation-versions/{presentation_version_id}/download", tags=["media"])
+    async def download_presentation_version(
+        presentation_version_id: UUID, session: ReadSession
+    ) -> StreamingResponse:
+        media = session.scalar(
+            select(MediaObject)
+            .join(PresentationAsset, PresentationAsset.media_object_id == MediaObject.media_object_id)
+            .where(
+                PresentationAsset.presentation_version_id == presentation_version_id,
+                PresentationAsset.kind == AssetKind.ORIGINAL,
+                MediaObject.availability == MediaAvailability.AVAILABLE,
+                MediaObject.deleted_at.is_(None),
+            )
+        )
+        if media is None:
+            raise HTTPException(404, "current presentation media is not available")
+        config = settings()
+        storage = AsyncMediaStorageClient(config.media_storage_url, config.media_storage_token)
+        return StreamingResponse(
+            storage.stream_object(media.storage_target_id, media.object_key, 0, media.size_bytes or 0),
+            media_type=media.mime_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(media.original_filename)}",
+                "Content-Length": str(media.size_bytes),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post("/api/v1/events/{event_id}/presentations", status_code=201, tags=["media"])
     def create_local_presentation(
@@ -617,9 +650,53 @@ def register_presentation_media_routes(
         items = []
         for item in presentations:
             program_session = sessions.get(item.session_id)
+            associated_sessions = session.scalars(
+                select(ProgramSession)
+                .join(PresentationSession, PresentationSession.session_id == ProgramSession.session_id)
+                .where(
+                    PresentationSession.presentation_id == item.presentation_id,
+                    PresentationSession.active.is_(True),
+                )
+                .order_by(PresentationSession.sort_order, ProgramSession.starts_at)
+            ).all()
+            if program_session and all(
+                value.session_id != program_session.session_id for value in associated_sessions
+            ):
+                associated_sessions.insert(0, program_session)
             version = version_by_presentation.get(item.presentation_id)
             asset = asset_by_version.get(version.presentation_version_id) if version else None
             current_media = media.get(asset.media_object_id) if asset else None
+            confirmation = session.scalar(
+                select(AuditRecord)
+                .where(
+                    AuditRecord.action == "site.presentation_media.confirmed",
+                    AuditRecord.target_id == (current_media.media_object_id if current_media else None),
+                )
+                .order_by(AuditRecord.occurred_at.desc())
+                .limit(1)
+            ) if current_media else None
+            version_history = []
+            for historical_version in session.scalars(
+                select(PresentationVersion)
+                .where(PresentationVersion.presentation_id == item.presentation_id)
+                .order_by(PresentationVersion.version_number.desc())
+            ):
+                historical_media = session.scalar(
+                    select(MediaObject)
+                    .join(PresentationAsset, PresentationAsset.media_object_id == MediaObject.media_object_id)
+                    .where(
+                        PresentationAsset.presentation_version_id == historical_version.presentation_version_id,
+                        PresentationAsset.kind == AssetKind.ORIGINAL,
+                    )
+                )
+                version_history.append({
+                    "presentation_version_id": historical_version.presentation_version_id,
+                    "version_number": historical_version.version_number,
+                    "filename": historical_media.original_filename if historical_media else None,
+                    "size_bytes": historical_media.size_bytes if historical_media else None,
+                    "received_at": historical_media.created_at if historical_media else None,
+                    "availability": historical_media.availability if historical_media else "missing",
+                })
             transfer = transfer_by_media.get(current_media.media_object_id) if current_media else None
             delivery = "not_delivered"
             if transfer and transfer.status is JobStatus.SUCCEEDED:
@@ -641,8 +718,29 @@ def register_presentation_media_routes(
                 "readiness": readiness, "delivery_state": delivery,
                 "source": current_media.category if current_media else None,
                 "received_at": current_media.created_at if current_media else None,
+                "confirmed_at": confirmation.occurred_at if confirmation else None,
+                "confirmed_by": confirmation.actor_id if confirmation else None,
                 "updated_at": max(item.updated_at, current_media.updated_at) if current_media else item.updated_at,
                 "filename": current_media.original_filename if current_media else None,
+                "size_bytes": current_media.size_bytes if current_media else None,
+                "mime_type": current_media.mime_type if current_media else None,
+                "sha256": current_media.content_hash if current_media else None,
+                "download_url": (
+                    f"/api/v1/presentation-versions/{version.presentation_version_id}/download"
+                    if current_media and current_media.availability is MediaAvailability.AVAILABLE
+                    else None
+                ),
+                "sessions": [
+                    {
+                        "session_id": value.session_id,
+                        "session_code": value.session_code,
+                        "title": value.title,
+                        "starts_at": value.starts_at,
+                        "room": rooms.get(value.session_id) or value.location_name,
+                    }
+                    for value in associated_sessions
+                ],
+                "version_history": version_history,
             })
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 

@@ -705,6 +705,6 @@ pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></bo
 
     register_program_routes(app, get_session)
     register_operations_routes(app, get_session, transaction)
-    register_presentation_media_routes(app, get_session, transaction)
+    register_presentation_media_routes(app, get_session, transaction, get_settings)
     register_log_routes(app, get_session)
     return app

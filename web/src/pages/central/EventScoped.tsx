@@ -7,6 +7,7 @@ import { EventDeploymentDialog } from "../../components/EventDeploymentDialog";
 import { Empty, ErrorSurface, Loading } from "../../components/Feedback";
 import { Page, Panel } from "../../components/Page";
 import { StatusBadge } from "../../components/StatusBadge";
+import { formatBytes, formatDate } from "../../components/presentationMedia";
 import { useApi } from "../../hooks/useApi";
 import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
@@ -125,9 +126,10 @@ const definitions: Record<
       {
         key: "sessions",
         label: "Sessions",
-        value: (row) => (Array.isArray(row.sessions) ? row.sessions.length : 0),
-        numeric: true,
+        value: (row) => Array.isArray(row.sessions) ? row.sessions.map((value) => `${String((value as Row).title || (value as Row).session_id)} · ${formatDate((value as Row).starts_at as string)} · ${String((value as Row).room || "—")}`).join("; ") : "—",
       },
+      { key: "file", label: "Current file", value: (row) => { const media = Array.isArray(row.media_versions) ? row.media_versions[0] as Row : undefined; return media ? `${String(media.original_filename)} · ${formatBytes(media.size_bytes as number)} · ${formatDate(media.received_at as string)}` : "—"; } },
+      { key: "version", label: "Version", value: (row) => { const media = Array.isArray(row.media_versions) ? row.media_versions[0] as Row : undefined; return media ? `v${String(media.version_number)}` : "—"; } },
       {
         key: "presenters",
         label: "Presenters",
@@ -145,6 +147,7 @@ export function EventScoped({ type }: { type: keyof typeof definitions }) {
   const api = useMemo(() => centralApi(csrfToken), [csrfToken]);
   const events = useApi((signal) => api.events(signal), [api]);
   const [eventId, setEventId] = useState("");
+  const [selectedPresentation, setSelectedPresentation] = useState<Row>();
   const selected = eventId || events.data?.[0]?.event_id || "";
   const records = useApi(
     (signal) =>
@@ -187,6 +190,7 @@ export function EventScoped({ type }: { type: keyof typeof definitions }) {
               )
             }
             label={definition.title}
+            actions={type === "presentations" ? (row) => <><button className="button button--small" onClick={() => setSelectedPresentation(row)}>View Details</button>{Array.isArray(row.media_versions) && (row.media_versions[0] as Row | undefined)?.download_url ? <a className="button button--small" href={String((row.media_versions[0] as Row).download_url)}>Download current</a> : null}<button className="button button--small" disabled title="No Central workstation/Agent context is available">Open unavailable</button></> : undefined}
           />
         )}
       </>
@@ -198,8 +202,15 @@ export function EventScoped({ type }: { type: keyof typeof definitions }) {
       description={definition.description}
     >
       <AdminBoundary>{content}</AdminBoundary>
+      {selectedPresentation && <PresentationDetails row={selectedPresentation} onClose={() => setSelectedPresentation(undefined)} />}
     </Page>
   );
+}
+
+function PresentationDetails({ row, onClose }: { row: Row; onClose: () => void }) {
+  const sessions = Array.isArray(row.sessions) ? row.sessions as Row[] : [];
+  const versions = Array.isArray(row.media_versions) ? row.media_versions as Row[] : [];
+  return <div className="dialog-backdrop"><section className="dialog media-detail" role="dialog" aria-modal="true"><header><div><span className="eyebrow">{String(row.presentation_identifier || "Presentation")}</span><h2>{String(row.title)}</h2></div><button className="button" onClick={onClose}>Close</button></header><dl className="detail-grid"><div><dt>Presenter(s)</dt><dd>{Array.isArray(row.presenters) ? row.presenters.map((value) => String((value as Row).display_name)).join(", ") : "—"}</dd></div><div><dt>Readiness</dt><dd>{String(row.workflow_status)}</dd></div></dl><h3>Associated sessions</h3>{sessions.map((value) => <p key={String(value.session_id)}><strong>{String(value.title || value.session_id)}</strong><br/><small>{String(value.session_code || "No external ID")} · {formatDate(value.starts_at as string)} · {String(value.room || "No room")}</small></p>)}<h3>Version history</h3>{versions.length ? versions.map((value, index) => <article key={String(value.presentation_version_id)}><strong>v{String(value.version_number)}{index === 0 ? " — Current" : ""}</strong><dl className="detail-grid"><div><dt>Original filename</dt><dd>{String(value.original_filename)}</dd></div><div><dt>Type / size</dt><dd>{String(value.mime_type || "Unknown")} · {formatBytes(value.size_bytes as number)}</dd></div><div><dt>Received / source</dt><dd>{formatDate(value.received_at as string)} · {String(value.source || "—")}</dd></div><div><dt>Confirmed</dt><dd>{formatDate(value.confirmed_at as string)} · {String(value.confirmed_by || "—")}</dd></div><div><dt>SHA-256</dt><dd><code>{String(value.sha256 || "—")}</code></dd></div></dl>{index === 0 && value.download_url ? <a className="button button--small" href={String(value.download_url)}>Download current</a> : null}</article>) : <p>No confirmed versions.</p>}</section></div>;
 }
 
 export function EventDetail({ event, onChanged }: { event: EventRecord; onChanged?:()=>void }) {

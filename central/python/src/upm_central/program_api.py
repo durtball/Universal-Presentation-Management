@@ -19,10 +19,13 @@ from upm_central.persistence.models import (
     ExternalIdentifier,
     ImportBatch,
     ImportRow,
+    MediaReplicationReceiveSession,
     Person,
     Presentation,
+    PresentationMediaImport,
     PresentationPresenter,
     PresentationSession,
+    PresentationVersion,
     ReconciliationDecision,
     SessionParticipant,
 )
@@ -232,7 +235,36 @@ def _session_view(item: ProgramSession) -> dict[str, object]:
     }
 
 
-def _presentation_view(item: Presentation) -> dict[str, object]:
+def _presentation_view(item: Presentation, session: Session | None = None) -> dict[str, object]:
+    media_versions = []
+    if session is not None:
+        for version in session.scalars(
+            select(PresentationVersion)
+            .where(PresentationVersion.presentation_id == item.presentation_id)
+            .order_by(PresentationVersion.version_number.desc())
+        ):
+            media = session.scalar(select(PresentationMediaImport).where(
+                PresentationMediaImport.presentation_version_id == version.presentation_version_id
+            ))
+            replica = session.scalar(select(MediaReplicationReceiveSession).where(
+                MediaReplicationReceiveSession.presentation_version_id == version.presentation_version_id,
+                MediaReplicationReceiveSession.finalized_media_object_id.is_not(None),
+            )) if media is None else None
+            if media or replica:
+                media_versions.append({
+                    "presentation_version_id": version.presentation_version_id,
+                    "version_number": version.version_number,
+                    "original_filename": media.original_filename if media else replica.original_filename,
+                    "canonical_filename": media.canonical_filename if media else replica.canonical_filename,
+                    "size_bytes": media.size_bytes if media else replica.expected_size,
+                    "mime_type": media.mime_type if media else replica.media_type,
+                    "sha256": media.sha256 if media else replica.sha256,
+                    "received_at": media.created_at if media else replica.created_at,
+                    "source": media.origin if media else "site_replication",
+                    "confirmed_at": media.confirmed_at if media else replica.created_at,
+                    "confirmed_by": media.confirmed_by if media else "site-operator",
+                    "download_url": f"/api/v1/admin/presentation-versions/{version.presentation_version_id}/download",
+                })
     return {
         "presentation_id": item.presentation_id,
         "event_id": item.event_id,
@@ -254,9 +286,15 @@ def _presentation_view(item: Presentation) -> dict[str, object]:
                 "association_type": link.association_type,
                 "sort_order": link.sort_order,
                 "primary_session": link.primary_session,
+                "title": program_session.title if program_session else None,
+                "session_code": program_session.session_code if program_session else None,
+                "starts_at": program_session.starts_at if program_session else None,
+                "room": program_session.location_name if program_session else None,
             }
             for link in item.session_links
+            for program_session in [session.get(ProgramSession, link.session_id) if session else None]
         ],
+        "media_versions": media_versions,
         "presenters": [
             {
                 "presentation_presenter_id": link.presentation_presenter_id,
@@ -716,7 +754,7 @@ def register_program_routes(
     @app.get("/api/v1/admin/events/{event_id}/presentations", dependencies=admin, tags=["program"])
     def list_presentations(event_id: UUID, session: DbSession) -> list[dict[str, object]]:
         return [
-            _presentation_view(item)
+            _presentation_view(item, session)
             for item in session.scalars(
                 select(Presentation)
                 .where(Presentation.event_id == event_id)
