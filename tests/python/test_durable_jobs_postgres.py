@@ -20,6 +20,7 @@ from upm_site.persistence.models import (
     WorkerIdentity,
 )
 from upm_site.persistence.queue import SiteQueue
+from upm_site.worker import enqueue_startup_maintenance
 
 CENTRAL_URL = os.getenv("UPM_CENTRAL_DATABASE_URL")
 SITE_URL = os.getenv("UPM_SITE_DATABASE_URL")
@@ -304,3 +305,29 @@ def test_outbox_idempotency_is_unique(site_factory: sessionmaker[Session], site_
         SiteQueue(session).enqueue_outbox(**values)
     with pytest.raises(IntegrityError), site_factory.begin() as session:
         SiteQueue(session).enqueue_outbox(**values)
+
+
+@pytest.mark.parametrize("role", ["site-worker", "site-sync"])
+def test_startup_maintenance_uses_canonical_site_identity(
+    site_factory: sessionmaker[Session], site_id, role: str
+) -> None:
+    with site_factory.begin() as session:
+        job = enqueue_startup_maintenance(
+            session,
+            site_id=site_id,
+            retention_days=30,
+        )
+        assert job is not None, role
+        assert job.site_id == site_id
+        assert job.idempotency_key.startswith("operational-logs-prune:")
+
+    with site_factory.begin() as session:
+        # Both process modes share the same daily idempotency key and must not duplicate the job.
+        assert (
+            enqueue_startup_maintenance(
+                session,
+                site_id=site_id,
+                retention_days=30,
+            )
+            is None
+        )

@@ -9,9 +9,11 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from threading import Event
+from uuid import UUID
 
 import httpx
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from upm_shared.enums import JobStatus, MediaReplicationState
 from upm_shared.identifiers import new_uuid7
@@ -34,9 +36,40 @@ from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
 
+STARTUP_MAINTENANCE_LOCK_ID = 7_091_625_311
+
 
 def log(event: str, **context: object) -> None:
     print(json.dumps({"event": event, **context}, default=str), flush=True)
+
+
+def enqueue_startup_maintenance(
+    session: Session,
+    *,
+    site_id: UUID,
+    retention_days: int,
+) -> ProcessingJob | None:
+    """Idempotently enqueue Site-scoped startup work for either worker role."""
+    # The general worker and sync process commonly start together. Serialize only this tiny
+    # check/insert boundary so they cannot race on the durable idempotency constraint.
+    session.execute(select(func.pg_advisory_xact_lock(STARTUP_MAINTENANCE_LOCK_ID)))
+    prune_key = f"operational-logs-prune:{utc_now().date().isoformat()}"
+    existing = session.scalar(
+        select(ProcessingJob).where(
+            ProcessingJob.site_id == site_id,
+            ProcessingJob.job_type == "operational_logs.prune",
+            ProcessingJob.idempotency_key == prune_key,
+        )
+    )
+    if existing is not None:
+        return None
+    return SiteQueue(session).enqueue_processing(
+        site_id=site_id,
+        job_type="operational_logs.prune",
+        payload={"data": {"retention_days": retention_days}},
+        idempotency_key=prune_key,
+        required_capabilities=["cpu"],
+    )
 
 
 def run(*, sync: bool = False, once: bool = False) -> int:
@@ -61,7 +94,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         ready_file = Path(tempfile.gettempdir()) / ready_file.name
     with factory.begin() as session:
         session.execute(text("SELECT 1"))
-        bootstrap_identity(session, settings)
+        site, _registration = bootstrap_identity(session, settings)
         startup_queue = SiteQueue(session)
         startup_queue.register_worker(
             worker_id=worker_id,
@@ -70,22 +103,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             service_role=role,
             capabilities=capabilities,
         )
-        prune_key = f"operational-logs-prune:{utc_now().date().isoformat()}"
-        if (
-            session.scalar(
-                select(ProcessingJob).where(
-                    ProcessingJob.job_type == "operational_logs.prune",
-                    ProcessingJob.idempotency_key == prune_key,
-                )
-            )
-            is None
-        ):
-            startup_queue.enqueue_processing(
-                job_type="operational_logs.prune",
-                payload={"data": {"retention_days": settings.operational_log_retention_days}},
-                idempotency_key=prune_key,
-                required_capabilities=["cpu"],
-            )
+        enqueue_startup_maintenance(
+            session,
+            site_id=site.site_id,
+            retention_days=settings.operational_log_retention_days,
+        )
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
