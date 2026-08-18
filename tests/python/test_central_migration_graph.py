@@ -71,5 +71,5 @@ def test_storage_root_revision_upgrade_is_reversible() -> None:
 
 def test_site_media_storage_reference_has_one_head() -> None:
     script = site_script()
-    assert script.get_heads() == ["aa12bc34de56"]
+    assert script.get_heads() == ["bc34de56fa78"]
     assert script.get_revision("d42f7a91c6e3").down_revision == "c18d3f7a92e1"

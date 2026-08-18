@@ -16,6 +16,8 @@ import { People } from "./pages/central/People";
 import { Sites } from "./pages/central/Sites";
 import { RoomMappings } from "./pages/central/RoomMappings";
 import { PresentationMedia } from "./pages/PresentationMedia";
+import { SitePresentationMedia } from "./pages/SitePresentationMedia";
+import { SitePresentations } from "./pages/SitePresentations";
 import { StoragePage } from "./pages/Storage";
 import { LogsPage } from "./pages/Logs";
 import {
@@ -105,7 +107,8 @@ function SiteApp() {
         <Route path="/admin/rooms" element={<SiteRooms />} />
         <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
         <Route path="/admin/storage" element={<StoragePage mode="site" />} />
-        <Route path="/admin/media" element={<PresentationMedia mode="site" />} />
+        <Route path="/admin/media" element={<SitePresentationMedia />} />
+        <Route path="/admin/presentations" element={<SitePresentations />} />
         <Route path="/admin/logs" element={<LogsPage mode="site" />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>

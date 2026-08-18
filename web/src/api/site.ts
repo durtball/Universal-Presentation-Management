@@ -78,6 +78,16 @@ export const siteApi = {
   media: (signal?: AbortSignal) => get<SiteMedia[]>("/api/v1/media", signal),
   mediaWorkspace: (eventId: string, signal?: AbortSignal) =>
     get<SiteMediaWorkspace>(`/api/v1/events/${eventId}/media`, signal),
+  mediaIntake: (eventId: string, query: Record<string, string | number | undefined>, signal?: AbortSignal) =>
+    siteClient.request<{items: Row[]; total: number; limit: number; offset: number}>(`/api/v1/events/${eventId}/media/intake`, { query, signal, retry: true }),
+  presentationLookup: (eventId: string, search: string, signal?: AbortSignal) =>
+    siteClient.request<{items: Row[]}>(`/api/v1/events/${eventId}/presentation-lookup`, { query: { search, limit: 25 }, signal, retry: true }),
+  confirmMedia: (mediaId: string, presentationId: string) =>
+    siteClient.request<Row>(`/api/v1/media/${mediaId}/confirmation`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ presentation_id: presentationId }) }),
+  confirmMediaBatch: (items: {media_object_id: string; presentation_id: string}[]) =>
+    siteClient.request<{results: Row[]}>("/api/v1/media/confirmations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) }),
+  presentationOperations: (eventId: string, query: Record<string, string | number | undefined>, signal?: AbortSignal) =>
+    siteClient.request<{items: Row[]; total: number; limit: number; offset: number}>(`/api/v1/events/${eventId}/presentations/operations`, { query, signal, retry: true }),
   matchMedia: (eventId: string, filename: string, signal?: AbortSignal) =>
     siteClient.request<Row>(`/api/v1/events/${eventId}/media/match`, {
       signal, retry: true, query: { filename },

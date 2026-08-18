@@ -24,6 +24,7 @@ const siteNav = [
   ["/admin/rooms", "Rooms"],
   ["/admin/storage", "Storage"],
   ["/admin/media", "Presentation Media"],
+  ["/admin/presentations", "Presentations"],
   ["/admin/logs", "Logs"],
 ];
 

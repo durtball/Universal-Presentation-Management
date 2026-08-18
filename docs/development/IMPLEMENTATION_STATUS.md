@@ -147,7 +147,11 @@
   confirmation; the worker publishes storage before creating the confirmed PresentationVersion.
   Server admission bounds concurrent staging requests and returns retryable pressure without
   occupying the durable processing queue. Central retains durably staged bytes as needs-review
-  records when matching/version post-processing fails.
+  records when matching/version post-processing fails. Site Presentation Media is a bounded,
+  paginated reconciliation queue with compact rows and debounced server-side candidate lookup.
+  Explicit individual or bulk confirmation creates the next version of the selected logical
+  Presentation and removes it from active intake. The separate Site Presentations page reports
+  canonical readiness independently from latest room-delivery state.
   Concurrent revision reconciliation, complete Site audit/outbox handlers, Site RBAC, guarded
   unmatched deletion/rename, and complete bulk Central-to-Site deployment controls remain incomplete.
   Running-stack end-to-end verification is still required before calling the overall workflow

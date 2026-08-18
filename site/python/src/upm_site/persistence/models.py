@@ -722,6 +722,7 @@ class MediaObject(SiteRecordMixin, SiteBase):
             "availability <> 'available'",
             name="available_metadata_complete",
         ),
+        Index("ix_site_media_event_intake", "event_id", "deleted_at", "created_at"),
     )
 
     media_object_id: Mapped[UUID] = mapped_column(
@@ -770,6 +771,7 @@ class PresentationAsset(SiteRecordMixin, SiteBase):
             "(kind = 'derivative' AND source_asset_id IS NOT NULL)",
             name="derivative_source",
         ),
+        Index("ix_site_presentation_assets_media", "media_object_id"),
     )
 
     presentation_asset_id: Mapped[UUID] = mapped_column(
