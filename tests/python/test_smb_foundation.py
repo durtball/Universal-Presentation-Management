@@ -38,3 +38,18 @@ def test_central_and_site_have_independent_smb_state() -> None:
     assert "site-smb-state:/var/lib/samba/private" in site
     assert "central-smb-presentations:/shares/presentations:ro" in central
     assert "site-smb-presentations:/shares/presentations:ro" in site
+
+
+def test_smb_services_join_edge_and_internal_networks_without_exposing_postgres() -> None:
+    for deployment in ("central", "site"):
+        compose = (ROOT / f"docker-compose.{deployment}.yml").read_text()
+        service = compose.split(f"  {deployment}-smb:", 1)[1].split(
+            f"\n  {deployment}-discovery:", 1
+        )[0]
+        postgres = compose.split(f"  {deployment}-postgres:", 1)[1].split("\nnetworks:", 1)[0]
+        assert f"- {deployment}-edge" in service
+        assert f"- {deployment}-internal" in service
+        assert f'UPM_{deployment.upper()}_SMB_BIND_ADDRESS' in service
+        assert ':445:445"' in service
+        assert "ports:" not in postgres
+        assert f"  {deployment}-internal:\n    internal: true" in compose

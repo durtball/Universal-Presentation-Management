@@ -18,7 +18,9 @@ services:
       - central-smb-incoming:/shares/incoming
       - central-smb-trash:/shares/trash
       - central-smb-state:/var/lib/samba/private
-    networks: [central-internal]
+    networks:
+      - central-edge
+      - central-internal
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 10s

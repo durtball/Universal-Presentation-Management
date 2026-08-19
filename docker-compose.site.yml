@@ -18,7 +18,9 @@ services:
       - site-smb-incoming:/shares/incoming
       - site-smb-trash:/shares/trash
       - site-smb-state:/var/lib/samba/private
-    networks: [site-internal]
+    networks:
+      - site-edge
+      - site-internal
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 10s

@@ -199,3 +199,46 @@ def test_caddy_routes_api_before_shared_frontend(deployment: str) -> None:
     assert "port 8080" in caddyfile
     assert "refresh 5s" in caddyfile
     assert caddyfile.index("handle /api/*") < caddyfile.index("dynamic a")
+
+
+@pytest.mark.parametrize("deployment", ["central", "site"])
+def test_smb_port_is_published_through_edge_without_weakening_internal_network(
+    deployment: str,
+) -> None:
+    bind_address = "192.0.2.45"
+    config = compose_config(
+        f"docker-compose.{deployment}.yml",
+        {f"UPM_{deployment.upper()}_SMB_BIND_ADDRESS": bind_address},
+    )
+    service = config["services"][f"{deployment}-smb"]
+
+    assert set(service["networks"]) == {
+        f"{deployment}-edge",
+        f"{deployment}-internal",
+    }
+    assert service["ports"] == [
+        {
+            "mode": "ingress",
+            "target": 445,
+            "published": "445",
+            "protocol": "tcp",
+            "host_ip": bind_address,
+        }
+    ]
+    assert config["networks"][f"{deployment}-internal"]["internal"] is True
+    assert config["networks"][f"{deployment}-edge"].get("internal", False) is False
+    assert "ports" not in config["services"][f"{deployment}-postgres"]
+
+
+def test_colocated_smb_stacks_keep_independent_configurable_host_addresses() -> None:
+    central = compose_config(
+        "docker-compose.central.yml", {"UPM_CENTRAL_SMB_BIND_ADDRESS": "192.0.2.10"}
+    )
+    site = compose_config(
+        "docker-compose.site.yml", {"UPM_SITE_SMB_BIND_ADDRESS": "192.0.2.11"}
+    )
+
+    assert central["services"]["central-smb"]["ports"][0]["host_ip"] == "192.0.2.10"
+    assert site["services"]["site-smb"]["ports"][0]["host_ip"] == "192.0.2.11"
+    assert central["services"]["central-smb"]["ports"][0]["published"] == "445"
+    assert site["services"]["site-smb"]["ports"][0]["published"] == "445"
