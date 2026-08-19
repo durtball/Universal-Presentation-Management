@@ -31,10 +31,16 @@ from upm_central.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
 )
 from upm_central.smb_intake import (
+    RETIRE_JOB as SMB_RETIRE_JOB,
+)
+from upm_central.smb_intake import (
     SCAN_JOB as SMB_SCAN_JOB,
 )
 from upm_central.smb_intake import (
     enqueue_reconciliation as enqueue_smb_reconciliation,
+)
+from upm_central.smb_intake import (
+    enqueue_retirement as enqueue_smb_retirement,
 )
 from upm_central.smb_intake import (
     ingest as ingest_smb,
@@ -42,6 +48,7 @@ from upm_central.smb_intake import (
 from upm_central.smb_intake import (
     reconcile as reconcile_smb,
 )
+from upm_central.smb_intake import retire as retire_smb
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
@@ -215,7 +222,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     if kind == "processing" and (
                         work.job_type.startswith("presentation_media.")
-                        or work.job_type in {SMB_SCAN_JOB, SMB_INGEST_JOB}
+                        or work.job_type in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB}
                     ):
                         # Commit the durable claim and release this connection before matching or
                         # calling Media Storage. Completion/failure uses a fresh short transaction.
@@ -287,6 +294,9 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         queue.complete(work, worker_id)
                         log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
             if media_work_id is not None:
+                smb_ingested = False
+                smb_ingested_sha256 = None
+                retirement_result = None
                 try:
                     with factory() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
@@ -302,10 +312,42 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 scan_interval_seconds=settings.smb_intake_scan_interval_seconds,
                                 current_job_id=media_work.processing_job_id,
                             )
+                    elif media_work.job_type == SMB_INGEST_JOB:
+                        ingested = ingest_smb(media_work, media_processor, storage_client)
+                        smb_ingested = True
+                        smb_ingested_sha256 = ingested.sha256
                     else:
-                        ingest_smb(media_work, media_processor, storage_client)
+                        retirement_result = retire_smb(media_work, storage_client)
                     with factory.begin() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
+                        if smb_ingested:
+                            enqueue_smb_retirement(
+                                session, media_work, sha256=smb_ingested_sha256
+                            )
+                        if retirement_result is not None:
+                            data = media_work.payload["data"]
+                            record_log(
+                                session,
+                                service="central-worker",
+                                severity=(
+                                    "warning"
+                                    if retirement_result.get("source_changed")
+                                    else "info"
+                                ),
+                                event_type=(
+                                    "smb.intake.retirement_skipped"
+                                    if retirement_result.get("source_changed")
+                                    else "smb.intake.source_retired"
+                                ),
+                                message=(
+                                    "SMB Incoming source changed and was retained"
+                                    if retirement_result.get("source_changed")
+                                    else "SMB Incoming source retired after durable staging"
+                                ),
+                                event_id=UUID(data["event_id"]),
+                                worker_id=worker_id,
+                                context={"relative_path": data["relative_path"]},
+                            )
                         CentralQueue(session).complete(media_work, worker_id)
                     log(
                         "job_completed",
@@ -316,10 +358,15 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                 except Exception as exc:
                     with factory.begin() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
+                        retirement_failed = media_work.job_type == SMB_RETIRE_JOB
                         CentralQueue(session).fail(
                             media_work,
                             worker_id,
-                            error_code="presentation_media_processing_failed",
+                            error_code=(
+                                "smb_retirement_failed"
+                                if retirement_failed
+                                else "presentation_media_processing_failed"
+                            ),
                             message=str(exc),
                             retryable=True,
                             base_delay_seconds=settings.worker_retry_base_seconds,
@@ -340,15 +387,27 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             session,
                             service="central-worker",
                             severity="error",
-                            event_type="presentation_media_processing_failed",
-                            message=str(exc)[:1024],
+                            event_type=(
+                                "smb.intake.retirement_failed"
+                                if retirement_failed
+                                else "presentation_media_processing_failed"
+                            ),
+                            message=(
+                                "SMB Incoming source retirement failed and remains retryable"
+                                if retirement_failed
+                                else str(exc)[:1024]
+                            ),
                             batch_id=media_import.batch_id if media_import else None,
                             media_import_id=media_import_id,
                             event_id=media_import.event_id if media_import else None,
                             worker_id=worker_id,
                             context={
                                 "work_id": str(media_work_id),
-                                "error_code": getattr(exc, "code", "processing_failed"),
+                                "error_code": (
+                                    "smb_retirement_failed"
+                                    if retirement_failed
+                                    else getattr(exc, "code", "processing_failed")
+                                ),
                                 "exception_type": type(exc).__name__,
                                 "attempt": media_work.attempt_count,
                                 "max_attempts": media_work.max_attempts,

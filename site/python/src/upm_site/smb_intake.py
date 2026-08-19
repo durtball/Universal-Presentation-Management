@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 
 from upm_shared.enums import JobStatus, MediaCategory
 from upm_shared.identifiers import new_uuid7
-from upm_shared.media_storage_client import MediaStorageClient
+from upm_shared.media_storage_client import (
+    MediaStorageClient,
+    MediaStorageOperationError,
+)
 from upm_shared.smb_intake import event_and_filename, incoming_identity, intake_candidate
 from upm_site.media.ingestion import IngestionRequest
 from upm_site.operational_logs import record_log
@@ -20,6 +23,7 @@ from upm_site.persistence.queue import SiteQueue
 
 SCAN_JOB = "smb.incoming.reconcile"
 INGEST_JOB = "smb.incoming.ingest"
+RETIRE_JOB = "smb.incoming.retire"
 ACTIVE = (JobStatus.PENDING, JobStatus.RETRY_WAIT, JobStatus.RUNNING)
 
 
@@ -177,5 +181,40 @@ def ingest(work, ingestion_service, storage: MediaStorageClient, *, chunk_bytes:
             chunks(),
         )
     )
-    storage.complete_smb_incoming(relative, size_bytes=size, modified_ns=modified)
     return result
+
+
+def enqueue_retirement(session: Session, work, *, sha256: str) -> ProcessingJob:
+    data = work.payload["data"]
+    return SiteQueue(session).enqueue_processing(
+        site_id=work.site_id,
+        job_type=RETIRE_JOB,
+        payload={
+            "data": {
+                "site_id": data["site_id"],
+                "event_id": data["event_id"],
+                "relative_path": data["relative_path"],
+                "size_bytes": int(data["size_bytes"]),
+                "modified_ns": int(data["modified_ns"]),
+                "sha256": sha256,
+            }
+        },
+        idempotency_key=f"smb-retire:{work.idempotency_key}",
+        required_capabilities=["cpu"],
+        max_attempts=8,
+    )
+
+
+def retire(work, storage: MediaStorageClient) -> dict:
+    data = work.payload["data"]
+    try:
+        return storage.complete_smb_incoming(
+            data["relative_path"],
+            size_bytes=int(data["size_bytes"]),
+            modified_ns=int(data["modified_ns"]),
+            sha256=data["sha256"],
+        )
+    except MediaStorageOperationError as error:
+        if error.code == "incoming_source_changed":
+            return {"removed": False, "source_changed": True}
+        raise

@@ -14,11 +14,15 @@ from upm_central.persistence.models import Event, ProcessingJob, utc_now
 from upm_central.persistence.queue import CentralQueue
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
-from upm_shared.media_storage_client import MediaStorageClient
+from upm_shared.media_storage_client import (
+    MediaStorageClient,
+    MediaStorageOperationError,
+)
 from upm_shared.smb_intake import event_and_filename, incoming_identity, intake_candidate
 
 SCAN_JOB = "smb.incoming.reconcile"
 INGEST_JOB = "smb.incoming.ingest"
+RETIRE_JOB = "smb.incoming.retire"
 ACTIVE = (JobStatus.PENDING, JobStatus.RETRY_WAIT, JobStatus.RUNNING)
 
 
@@ -158,5 +162,38 @@ def ingest(work, staging_service, storage: MediaStorageClient, *, chunk_bytes: i
             source_share="Incoming",
         )
     )
-    storage.complete_smb_incoming(relative, size_bytes=size, modified_ns=modified)
     return item
+
+
+def enqueue_retirement(session: Session, work, *, sha256: str) -> ProcessingJob:
+    data = work.payload["data"]
+    return CentralQueue(session).enqueue_processing(
+        job_type=RETIRE_JOB,
+        payload={
+            "data": {
+                "event_id": data["event_id"],
+                "relative_path": data["relative_path"],
+                "size_bytes": int(data["size_bytes"]),
+                "modified_ns": int(data["modified_ns"]),
+                "sha256": sha256,
+            }
+        },
+        idempotency_key=f"smb-retire:{work.idempotency_key}",
+        required_capabilities=["cpu"],
+        max_attempts=8,
+    )
+
+
+def retire(work, storage: MediaStorageClient) -> dict:
+    data = work.payload["data"]
+    try:
+        return storage.complete_smb_incoming(
+            data["relative_path"],
+            size_bytes=int(data["size_bytes"]),
+            modified_ns=int(data["modified_ns"]),
+            sha256=data["sha256"],
+        )
+    except MediaStorageOperationError as error:
+        if error.code == "incoming_source_changed":
+            return {"removed": False, "source_changed": True}
+        raise

@@ -82,14 +82,26 @@ class MediaStorageClient:
             raise MediaStorageUnavailable("SMB Incoming file is unavailable.") from error
 
     def complete_smb_incoming(
-        self, relative_path: str, *, size_bytes: int, modified_ns: int
+        self, relative_path: str, *, size_bytes: int, modified_ns: int, sha256: str
     ) -> dict:
         encoded = quote(relative_path, safe="/")
-        return self.request_with_json(
-            "POST",
-            f"/api/v1/storage/smb/incoming/{encoded}/complete",
-            {"size_bytes": size_bytes, "modified_ns": modified_ns},
-        )
+        try:
+            response = httpx.post(
+                f"{self.base_url}/api/v1/storage/smb/incoming/{encoded}/complete",
+                headers=self.headers,
+                json={"size_bytes": size_bytes, "modified_ns": modified_ns, "sha256": sha256},
+                timeout=self.timeout,
+            )
+            if response.status_code == 409:
+                raise MediaStorageOperationError(
+                    "Incoming file changed during intake", 409, "incoming_source_changed"
+                )
+            response.raise_for_status()
+            return response.json()
+        except MediaStorageOperationError:
+            raise
+        except (httpx.HTTPError, ValueError) as error:
+            raise MediaStorageUnavailable("Media Storage service is unavailable.") from error
 
     def append_staging(self, target_id: UUID | str, key: str, offset: int, content: bytes) -> dict:
         try:

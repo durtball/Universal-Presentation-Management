@@ -40,10 +40,16 @@ from upm_site.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
 )
 from upm_site.smb_intake import (
+    RETIRE_JOB as SMB_RETIRE_JOB,
+)
+from upm_site.smb_intake import (
     SCAN_JOB as SMB_SCAN_JOB,
 )
 from upm_site.smb_intake import (
     enqueue_reconciliation as enqueue_smb_reconciliation,
+)
+from upm_site.smb_intake import (
+    enqueue_retirement as enqueue_smb_retirement,
 )
 from upm_site.smb_intake import (
     ingest as ingest_smb,
@@ -51,6 +57,7 @@ from upm_site.smb_intake import (
 from upm_site.smb_intake import (
     reconcile as reconcile_smb,
 )
+from upm_site.smb_intake import retire as retire_smb
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
 
@@ -198,6 +205,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     elif kind == "processing" and work.job_type == SMB_INGEST_JOB:
                         try:
                             result = ingest_smb(work, ingestion_service, storage_client)
+                            enqueue_smb_retirement(session, work, sha256=result.content_hash)
                             record_log(
                                 session,
                                 service="site-worker",
@@ -238,6 +246,43 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                     "error_type": type(error).__name__,
                                 },
                             )
+                            continue
+                    elif kind == "processing" and work.job_type == SMB_RETIRE_JOB:
+                        try:
+                            retirement = retire_smb(work, storage_client)
+                            record_log(
+                                session,
+                                service="site-worker",
+                                severity=(
+                                    "warning" if retirement.get("source_changed") else "info"
+                                ),
+                                event_type=(
+                                    "smb.intake.retirement_skipped"
+                                    if retirement.get("source_changed")
+                                    else "smb.intake.source_retired"
+                                ),
+                                message=(
+                                    "SMB Incoming source changed and was retained"
+                                    if retirement.get("source_changed")
+                                    else "SMB Incoming source retired after durable staging"
+                                ),
+                                site_id=work.site_id,
+                                event_id=UUID(work.payload["data"]["event_id"]),
+                                worker_id=worker_id,
+                                context={
+                                    "relative_path": work.payload["data"]["relative_path"]
+                                },
+                            )
+                        except Exception as error:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="smb_retirement_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            log("smb_retirement_failed", work_id=work_id, detail=str(error)[:2048])
                             continue
                     elif kind == "processing" and work.job_type == "smb.user.revoke":
                         SmbControlClient(

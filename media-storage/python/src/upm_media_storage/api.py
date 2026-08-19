@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import shutil
 from uuid import UUID, uuid4
@@ -26,6 +27,7 @@ class IncomingCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     size_bytes: int = Field(ge=0)
     modified_ns: int = Field(ge=0)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -125,6 +127,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"removed": True, "already_missing": True}
         stat = path.stat()
         if stat.st_size != payload.size_bytes or stat.st_mtime_ns != payload.modified_ns:
+            raise HTTPException(409, "Incoming file changed during intake")
+        if payload.sha256 is not None:
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != payload.sha256:
+                raise HTTPException(409, "Incoming file changed during intake")
+        final_stat = path.stat()
+        if (
+            final_stat.st_dev != stat.st_dev
+            or final_stat.st_ino != stat.st_ino
+            or final_stat.st_size != stat.st_size
+            or final_stat.st_mtime_ns != stat.st_mtime_ns
+        ):
             raise HTTPException(409, "Incoming file changed during intake")
         path.unlink()
         return {"removed": True, "already_missing": False}
