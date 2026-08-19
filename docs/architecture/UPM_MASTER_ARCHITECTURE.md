@@ -3,300 +3,342 @@
 
 **Document status:** Authoritative architecture source of truth  
 **Product:** Universal Presentation Management (UPM)  
-**Repository:** `durtball/Universal-Presentation-Management`  
-**Architecture principle:** Design the complete target system first, then implement it incrementally without replacing the architecture later.
-
----
-
-## Document navigation and interpretation
-
-This document defines the **target architecture**. It does not claim every described capability is implemented. Current evidence-based status is maintained in the [Feature Matrix](../product/FEATURE_MATRIX.md) and [Implementation Status](../development/IMPLEMENTATION_STATUS.md); product intent is organized in [Product Requirements](../product/PRODUCT_REQUIREMENTS.md).
-
-Accepted implementation decisions refine this specification without replacing it:
-
-- [ADR-0001: Backend and persistence stack](decisions/ADR-0001-backend-persistence-stack.md)
-- [ADR-0002: Site-authoritative configurable media storage](decisions/ADR-0002-site-media-storage.md)
-- [ADR-0003: PostgreSQL durable jobs and transactional outbox](decisions/ADR-0003-postgresql-durable-jobs-and-outbox.md)
-- [ADR-0004: Site media ingestion and filesystem finalization](decisions/ADR-0004-site-media-ingestion-finalization.md)
-- [ADR-0005: Container migration gates](decisions/ADR-0005-container-migration-gates.md)
-- [ADR-0006: Central/Site registration and synchronization](decisions/ADR-0006-central-site-registration-and-sync.md)
-- [ADR-0007: Versioned event deployment snapshots](decisions/ADR-0007-event-deployment-snapshots.md)
-- [ADR-0008: Shared React admin frontends](decisions/ADR-0008-shared-react-admin-frontends.md)
-- [ADR-0009: Site room materialization from deployed program locations](decisions/ADR-0009-site-room-materialization.md)
-- [ADR-0011: Resumable presentation media transfer and replication](decisions/ADR-0011-resumable-media-transfer-and-replication.md)
-- [ADR-0013: Deployment-local Media Storage service boundary](decisions/ADR-0013-deployment-local-media-storage-service.md)
-
-Historical ADRs must not be rewritten to make later decisions retroactive. A significant change requires a new or superseding ADR.
+**Repository:** `durtball/Universal-Presentation-Management`
 
 ---
 
 ## 1. Purpose
 
-Universal Presentation Management (UPM) is a new product and a complete rebuild of the previous SpeakerReady system.
+Universal Presentation Management (UPM) is a new distributed presentation-management platform and a clean rebuild of SpeakerReady.
 
-The existing SpeakerReady codebase is a **requirements and lessons-learned reference only**. It is not the architectural foundation for UPM.
+SpeakerReady may be used only as a requirements reference, operational-workflow reference, and lessons-learned reference.
 
-UPM is designed for production use in conference, hotel, event, meeting-room, and speaker-ready-room environments where presentation files, presenters, rooms, clients, kiosks, signage, synchronization, and multi-site control must remain reliable even when network connectivity is degraded or unavailable.
+**Do not copy SpeakerReady's architecture.**
 
-The system must be modular, observable, independently testable, restartable, and replaceable by service without destabilizing the rest of the platform.
+This document defines UPM's architectural invariants, system boundaries, authority model, and target architecture.
 
----
+It does not claim that every described capability is currently implemented.
 
-## 2. Core Architecture Principles
-
-UPM must follow these principles throughout implementation:
-
-1. **No temporary architecture**
-   - Do not build a short-lived "v1 now, redesign later" system.
-   - Milestones fill in the predetermined target architecture.
-
-2. **Central and Site are separate systems**
-   - UPM Central and UPM Site are distinct, independently deployable containerized systems.
-   - They may run side by side on the same physical Linux server but must not be merged into one application process or one database.
-
-3. **Site autonomy**
-   - Every production Site must remain fully operational during WAN or Central outages.
-   - Local workflows cannot depend on live access to Central.
-
-4. **PostgreSQL from day one**
-   - Central and Site both use PostgreSQL.
-   - Their databases remain logically and operationally separate.
-
-5. **API-driven coordination**
-   - Sites communicate with Central through explicit secure APIs.
-   - Sites must never connect directly to Central PostgreSQL.
-
-6. **Existing Network only**
-   - UPM is designed for customer/event networks.
-   - Do not build a separate managed-network mode as a core product requirement.
-
-7. **Caddy as the standard edge layer**
-   - Caddy provides reverse proxying and TLS termination.
-   - UPM must maintain a narrow relationship with Caddy rather than embedding certificate-management logic throughout the product.
-
-8. **Background jobs for heavy operations**
-   - File processing, conversion, synchronization, hashing, previews, replication, indexing, and similar operations run through durable workers/jobs.
-
-9. **Server-authoritative operational state**
-   - Device assignments, room assignments, presentation associations, and operational permissions are authoritative at the server layer.
-
-10. **Strong observability**
-    - Health, logs, metrics, job state, synchronization state, device state, storage state, and transfer state must be visible to administrators.
+Implementation status and detailed product requirements belong in their respective product and development documentation.
 
 ---
 
-## 3. Product Topology
+## 2. Architecture Philosophy
 
-UPM consists of the following major product components:
+UPM is designed as one coherent target architecture implemented incrementally.
 
-- UPM Central
-- UPM Site
-- UPM Agent
-- UPM Room Client / room endpoint
-- UPM Kiosk
-- UPM Signage
-- Shared contracts and schemas
-- Central and Site PostgreSQL databases
-- Background worker services
-- Media and storage services
-- Synchronization services
+Do not build disposable intermediate architectures with the intention of replacing them later.
+
+Milestones add capability to the target architecture rather than introducing temporary alternatives.
+
+Implementation must preserve established:
+
+- Central/Site separation
+- Site autonomy
+- service boundaries
+- database ownership
+- authority boundaries
+- identity rules
+- synchronization contracts
+- media ownership
+- durable processing
+- security boundaries
+- deployment boundaries
+
+Significant changes to these architectural contracts require deliberate architectural review and an ADR where appropriate.
+
+---
+
+## 3. Architectural Invariants
+
+The following rules apply throughout UPM.
+
+### 3.1 Central and Site are separate systems
+
+UPM Central and UPM Site are independently deployable and independently restartable systems.
+
+They may run on the same physical Linux server, but they remain separate deployments with separate:
+
+- PostgreSQL databases
+- migration histories
+- service lifecycles
+- configuration
+- storage ownership
+- operational state
+
+Do not merge Central and Site into one application or database.
+
+### 3.2 Site autonomy
+
+A production UPM Site must remain operational during loss of WAN or Central connectivity.
+
+Routine active-show operation must not require a live Central call after required deployment data and media have synchronized.
+
+### 3.3 Explicit distributed-system boundaries
+
+Sites must never connect directly to Central PostgreSQL.
+
+Central must never depend on direct access to a Site database.
+
+Cross-boundary communication uses explicit, secure, versioned APIs, events, synchronization mechanisms, and media-transfer contracts.
+
+This rule applies even when Central and Site are running on the same physical machine.
+
+### 3.4 PostgreSQL
+
+Central and Site use PostgreSQL.
+
+Persistent schema changes use explicit Alembic migrations.
+
+Central and Site maintain independent migration graphs.
+
+Do not introduce SQLite as an application persistence shortcut.
+
+### 3.5 UUID identity
+
+Internal persistent entities use PostgreSQL UUID identity.
+
+New distributed identifiers should use UUIDv7 where applicable.
+
+Names, labels, filenames, imported strings, room names, presentation titles, and spreadsheet row numbers are not identity.
+
+### 3.6 Server-authoritative operational state
+
+Operational assignments are authoritative at the appropriate server layer.
+
+This includes:
+
+- room assignments
+- device assignments
+- presentation associations
+- delivery state
+- operational permissions
+
+A reconnecting client must not overwrite newer server-authoritative state with stale cached state.
+
+### 3.7 Durable processing
+
+Restart-sensitive, retryable, heavy, asynchronous, or show-critical work uses the established PostgreSQL durable job/outbox architecture.
+
+Do not substitute process-local or in-memory background tasks for work requiring durable execution.
+
+### 3.8 Modular services
+
+Services should be:
+
+- single-purpose
+- independently testable
+- independently restartable
+- observable
+- replaceable without destabilizing unrelated services
+
+Do not collapse unrelated responsibilities into a monolithic application or container.
+
+### 3.9 Original media preservation
+
+Original presentation/media files are preserved.
+
+Conversions and processing operations create linked derivatives rather than replacing source media.
+
+### 3.10 Security is explicit
+
+Authentication, authorization, machine trust, service trust, secrets, enrollment, and transport security are architectural concerns and must not be added as afterthoughts.
+
+Secrets must never be committed to Git.
+
+---
+
+## 4. Product Topology
+
+UPM consists of several cooperating components.
+
+### UPM Central
+
+Global control plane responsible for areas including:
+
+- Sites
+- Events
+- permanent identity
+- global configuration
+- deployments
+- aggregate visibility
+- cross-site synchronization coordination
+- optional media replication
+- global administration
+
+### UPM Site
+
+Local operational authority for a physical venue, hotel, or event location.
+
+A Site owns the local operational environment required to run an event independently.
+
+### UPM Agent
+
+Windows-compatible managed operational client used for presentation, device, transfer, and room workflows.
+
+### UPM Room Client / Room Endpoint
+
+Room presentation endpoint used for delivery, verification, launching, status, and primary/backup workflows.
+
+### UPM Kiosk
+
+Site-connected presenter/check-in workflow client.
+
+### UPM Signage
+
+Digital-signage subsystem supporting scheduled, event-aware, and non-event-aware signage.
+
+### Shared platform services
+
+UPM also includes:
+
+- PostgreSQL databases
+- Media Storage services
+- workers
+- synchronization services
+- shared contracts
 - Caddy edge services
-- Browser-based administration and operations interfaces
+- browser administration interfaces
 
 ---
 
-## 4. UPM Central
+## 5. Central Architecture
 
-UPM Central is the global control plane for managing multiple Sites, events, identity records, global configuration, aggregate visibility, synchronization coordination, and cross-site operations.
+UPM Central:
 
-### Central requirements
+- runs on Linux;
+- is containerized;
+- uses PostgreSQL;
+- is fully operable through a browser;
+- uses Caddy as the standard edge proxy/TLS layer;
+- communicates with Sites through explicit secure services;
+- maintains global identities and global/multi-site configuration;
+- coordinates deployments and synchronization;
+- provides aggregate health and operational visibility.
 
-UPM Central must:
+Central must not become a required dependency for Site-local active-show operation.
 
-- Run on Linux.
-- Be deployed through Docker containers.
-- Be fully operable through a browser-based HTML interface.
-- Require no Windows desktop application for core administration.
-- Use PostgreSQL.
-- Use Caddy as the edge proxy/TLS termination layer.
-- Coordinate Sites through secure HTTPS APIs and preferably mTLS for machine-to-machine trust.
-- Maintain global identity records.
-- Maintain cross-site/event visibility.
-- Support optional media replication from Sites.
-- Track Site health and synchronization status.
-- Never require direct access to Site databases.
+### Central-hosted Site
 
-### Central-hosted Site capability
+A Central Linux server may also host a UPM Site.
 
-UPM Central may also operate as a fully functional UPM Site when Site capability is enabled on the Central Linux/Docker server.
+When enabled, it runs the **same reusable Site deployment stack** used by a standalone Site.
 
-When enabled:
+The co-located Site maintains its own:
 
-- Central runs the exact same reusable Site deployment profile used by standalone Site appliances.
-- The Central-hosted Site has its own Site-local PostgreSQL database/context.
-- The Central-hosted Site has its own authoritative media storage.
-- The Central-hosted Site has its own workers, Site API, room/device coordination, kiosks, signage, and operational state.
-- Central and the co-located Site remain separate deployments with separate lifecycles, storage, configuration, and database boundaries.
-- Communication between Central and the co-located Site still occurs through explicit services/APIs rather than through hidden shared-state assumptions.
+- Site PostgreSQL database
+- migrations
+- configuration
+- media
+- workers
+- API
+- synchronization state
+- device/room state
+- operational lifecycle
 
-There must not be a special-case Central-only Site implementation.
-
----
-
-## 5. UPM Site
-
-UPM Site is the operational system for a physical hotel, venue, or event location.
-
-### Site requirements
-
-A production UPM Site must:
-
-- Run on Linux.
-- Be containerized from the beginning.
-- Use PostgreSQL.
-- Maintain authoritative local media storage.
-- Run local APIs.
-- Run local workers.
-- Coordinate local UPM Agents, room endpoints, kiosks, and signage.
-- Remain fully functional during loss of WAN or Central connectivity.
-- Queue synchronization work while disconnected and resume safely when connectivity returns.
-- Provide browser-based administration and operational interfaces.
-- Avoid direct dependency on Central for event-day operations.
-
-### Site authority
-
-During event operations, the Site is authoritative for:
-
-- Local device state
-- Room assignments
-- Presentation placement
-- Local media availability
-- Local transfer state
-- Local kiosk state
-- Local signage state
-- Local processing jobs
-- Local room readiness
-- Local operational actions
+Do not create a special Central-only implementation of Site functionality.
 
 ---
 
-## 6. Central-to-Site Synchronization
+## 6. Site Architecture
 
-Central and Site operate as distributed systems.
+UPM Site is the local operational system.
 
-### Synchronization model
+A production Site:
 
-Use:
+- runs on Linux;
+- is containerized;
+- uses PostgreSQL;
+- owns authoritative local operational media;
+- runs local APIs and workers;
+- coordinates local clients and endpoints;
+- provides browser-based operations;
+- continues operating without Central;
+- queues synchronization work during disconnection;
+- safely reconciles after connectivity returns.
 
-- Event-driven synchronization
-- Globally unique internal IDs
-- Explicit ownership fields
-- Explicit event ownership
-- Explicit Site ownership
-- Idempotent operations
-- Durable outbound queues
-- Durable inbound processing
-- Retry with backoff
-- Conflict detection
-- Audit history
-- Checkpointing
-- Resumable transfers
-- Clear sync status reporting
+During active operations, Site is authoritative for local operational state including:
 
-Internal entity identifiers use PostgreSQL-native UUID columns. New identifiers are generated as UUIDv7 in the application/domain layer so Central, Sites, and disconnected clients can create globally unique IDs without sequential database coordination. Names, labels, titles, filenames, and imported row numbers are not identity keys.
-On program deployment, a Site may use an imported location label as deterministic match evidence or
-as the initial display label for a newly generated UUIDv7 Room. It must preserve existing UUIDs,
-leave ambiguous matches unresolved, and retain Site-owned manual mapping overrides as specified in
-[ADR-0009](decisions/ADR-0009-site-room-materialization.md).
-
-### Connectivity expectations
-
-The design must assume:
-
-- Temporary WAN outages
-- High latency
-- Packet loss
-- Central restarts
-- Site restarts
-- Long periods of disconnection
-- Files changing while transfers are in progress
-- Devices reconnecting with stale state
-
-### Database isolation
-
-Central and Site must not share a PostgreSQL instance as a logical shortcut.
-
-Even if they run on the same physical host:
-
-- Central database remains Central-owned.
-- Site database remains Site-owned.
-- Shared state crosses boundaries through defined APIs/events.
-
-The registration and synchronization foundation uses permanent Site UUID identity,
-per-Site revocable application credentials, durable monotonic sequences, receiver receipts,
-and per-direction checkpoints. Sites push Site-owned events and poll for Central-owned events,
-so Central does not require inbound connectivity to a Site. See
-[ADR-0006](decisions/ADR-0006-central-site-registration-and-sync.md).
-
-Event/show assignment uses a Central-owned deployment record per Event + Site, immutable complete
-snapshot revisions, and the existing protocol-v1 outbox transport. A Site may advance directly to a
-newer complete revision after an outage, never rolls back for a stale revision, retains local event
-and deployment history on revocation, and reports applied revision and operational summaries through
-Site-owned status events. See
-[ADR-0007](decisions/ADR-0007-event-deployment-snapshots.md).
+- devices
+- room assignments
+- presentation placement
+- media availability
+- delivery state
+- kiosk state
+- signage execution state
+- local jobs
+- local readiness
+- local operational actions
 
 ---
 
-## 7. Identity Architecture
+## 7. Synchronization Architecture
 
-UPM uses permanent person identities.
+Central and Site must be treated as distributed systems.
 
-### Permanent person UUID
+Synchronization uses:
 
-A person UUID is a permanent Central identity record.
+- globally unique identifiers
+- explicit ownership
+- durable outbound state
+- durable inbound processing
+- idempotency
+- retry with backoff
+- conflict handling
+- checkpoints
+- auditability
+- resumable media transfer
+- visible synchronization state
 
-The same person should be matched to the same `person_id` when they participate in future events.
+Sites must remain safe under:
 
-Event participation records must reference the permanent person identity rather than creating a new person identity for every show.
+- WAN outages
+- high latency
+- packet loss
+- service restarts
+- extended disconnection
+- duplicate delivery
+- stale reconnecting clients
+- interrupted transfers
 
-### Person matching
+Central-to-Site and Site-to-Central synchronization must respect explicit authority and ownership rules.
 
-Person matching must never rely only on display name.
-
-The identity system should support multiple matching signals, such as:
-
-- Primary email
-- Alternate email
-- Phone
-- Organization
-- External source identifiers
-- Event-import identifiers
-- Historical identity links
-- Administrator-confirmed matches
-
-Ambiguous matches must not be silently merged.
-
-### Person deletion
-
-UPM Central must provide an authorized identity-management area where administrators can deliberately delete a permanent person record.
-
-Deletion must:
-
-- Be explicit
-- Require confirmation
-- Display dependency impact
-- Respect audit requirements
-- Avoid accidental cascade deletion of unrelated historical records
-- Never occur automatically when an event is archived
-- Never occur automatically when Site data is cleaned up
+See the applicable synchronization ADRs for protocol details.
 
 ---
 
-## 8. Event, Session, Presenter, and Presentation Data Model
+## 8. Identity Architecture
 
-The domain model must normalize relationships rather than embed everything in one presentation row.
+UPM Central owns permanent person identity.
 
-Core entities should include, at minimum:
+A permanent `person_id` persists across events.
+
+Event participation references permanent identity rather than creating a new person identity for every event.
+
+Person matching may use evidence including:
+
+- email
+- alternate email
+- phone
+- organization
+- external identifiers
+- import identifiers
+- historical links
+- administrator-confirmed matches
+
+Display names alone are insufficient identity evidence.
+
+Ambiguous identities must not be silently merged.
+
+Permanent-person deletion is a deliberate protected Central operation and must not occur automatically through event deletion, archival, Site cleanup, or routine synchronization.
+
+---
+
+## 9. Core Domain Model
+
+UPM uses normalized relationships.
+
+Core concepts include:
 
 - Person
 - Event
@@ -317,721 +359,437 @@ Core entities should include, at minimum:
 - Sync event
 - Audit record
 
-### Relationship expectations
+Relationships must support real event workflows, including:
 
-A person can:
+- multiple presenters per session
+- multiple sessions per presenter
+- multiple presentations
+- presentation version history
+- room changes
+- schedule changes
+- original and derivative assets
+- primary and backup delivery
 
-- Participate in multiple events
-- Present in multiple sessions
-- Have multiple presentations
-- Serve multiple roles
-
-A session can:
-
-- Have multiple presenters
-- Have multiple presentations
-- Move between rooms
-- Be rescheduled
-
-A presentation can:
-
-- Have multiple versions
-- Have original and derivative files
-- Be assigned to rooms
-- Be mirrored to backup endpoints
-- Exist with processing states
-- Have preview/converted derivatives
+Do not collapse these concepts into a single presentation or schedule record.
 
 ---
 
-## 9. Presentation Workflow
+## 10. Presentation Architecture
 
-UPM must retain the proven entry-based workflow while also adding an open-file workflow.
+UPM supports two parallel presentation/media workflows.
 
-### Entry-based workflow
+### Entry-based presentations
 
-Used for scheduled sessions and roster-linked presentations.
+Scheduled presentations linked to program data.
 
-Supports:
+They may be associated with:
 
-- Presenter association
-- Session association
-- Room association
-- Revision tracking
-- Status tracking
-- Primary/backup delivery
-- Check-in
-- Room readiness
-- Historical tracking
+- presenters
+- sessions
+- rooms
+- presentation versions
+- delivery state
+- readiness state
 
-### Open-file workflow
+### Open-file assets
 
-Supports assets without roster/database entries, including:
+Ad hoc assets that do not require a scheduled Presentation record.
 
-- Walk-in slides
-- Images
-- Videos
-- Logos
-- Holding slides
-- Sponsor content
-- Emergency assets
-- Ad hoc media
+Examples include:
 
-Open-file assets must be manageable through the Site file browser and upload flow without requiring a presentation entry.
+- walk-in slides
+- images
+- video
+- logos
+- holding slides
+- sponsor assets
+- emergency content
+- miscellaneous event media
 
-They must remain clearly distinguishable from entry-linked presentations.
+Open-file assets remain distinct from scheduled Presentation entities while using appropriate shared media/storage infrastructure.
 
 ---
 
-## 10. File and Media Architecture
+## 11. Presentation Media Matching
 
-Each Site owns authoritative local media required for its operations.
+Presentation Media is an intake and reconciliation workflow rather than the permanent operational home of a confirmed presentation.
 
-Site media storage is administrator-configurable through Site-owned storage targets. Each target has a globally unique `storage_target_id` and refers to a host-provided filesystem root or mount. The Linux host/infrastructure layer owns partitioning, formatting, mounting, RAID, and hardware management; UPM does not implement those functions.
+Matching is **suggestion-driven and operator-authoritative**.
 
-Media locations reference a `storage_target_id` plus a validated logical relative object key rather than treating an absolute operating-system path as media identity. Sites may configure multiple targets, but UPM does not automatically pool them or invent placement policy. Storage health, runtime capacity observations, and configurable warning/critical thresholds must be visible independently for each target.
+UPM may:
 
-Detailed storage decisions are recorded in [ADR-0002](decisions/ADR-0002-site-media-storage.md).
+- discover candidates
+- rank candidates
+- display confidence/evidence
+- allow bulk selection of suggested matches
 
-Central and every Site run an independent deployment-local Media Storage service as specified by
-[ADR-0013](decisions/ADR-0013-deployment-local-media-storage-service.md). Only that service receives
-explicit persistent storage mounts and owns filesystem mechanics; application services use its
-authenticated internal API and retain domain authority in their own PostgreSQL database.
+UPM must not automatically finalize a presentation assignment without explicit operator confirmation.
 
-Site ingestion uses same-target staging, generated logical object keys, SHA-256 verification,
-explicit availability states, no-replace atomic publication, and recovery reconciliation as
-recorded in [ADR-0004](decisions/ADR-0004-site-media-ingestion-finalization.md).
+Unmatched or uncertain valid files remain available for operator review and are not considered ingestion failures.
 
-### Media requirements
-
-The media subsystem must support:
-
-- Original-file preservation
-- Version history
-- File hashing
-- Duplicate detection
-- File metadata
-- Processing state
-- Derivative linking
-- Resumable transfer
-- Transfer verification
-- Partial-transfer recovery
-- Replication policy
-- Storage health visibility
-
-### Server file browser
-
-UPM Site must include a more complete server-side file browser for managing presentation and media assets.
-
-The file browser should support:
-
-- Browsing
-- Upload
-- Rename
-- Move
-- Copy
-- Delete with safeguards
-- Metadata inspection
-- Entry linking
-- Open-file assets
-- Search
-- Processing state
-- Transfer state
+Once confirmed, media enters the canonical Presentation / PresentationVersion / PresentationAsset workflow.
 
 ---
 
-## 11. Presentation Format Support
+## 12. Media and Storage Architecture
 
-The presentation runtime and ingestion architecture must be prepared for all initial target formats:
+Each deployment owns the storage required for its responsibilities.
 
-- PowerPoint
-- Google Slides
-- Canva
-- Figma Slides
-- Keynote
-- PDF
+Central and every Site run an independent deployment-local Media Storage service.
 
-The architecture must not assume static-slide rendering is sufficient.
+The Media Storage service owns filesystem mechanics and explicit storage mounts.
 
-Long-term target playback fidelity includes:
+Application services retain domain authority in PostgreSQL and interact with Media Storage through authenticated internal APIs.
 
-- Slide transitions
-- Object/build animations
-- Click-triggered reveals
-- Timed reveals
-- Embedded video
-- Audio where applicable
-- Sequencing
-- Timing behavior
-- High visual fidelity to source presentation behavior
+Media identity must not depend on absolute operating-system paths.
 
----
+Storage references use stable storage identities and validated logical object keys.
 
-## 12. PDF Conversion
+The media architecture supports:
 
-UPM must provide reliable server-side PDF conversion for supported presentation/document formats.
+- original preservation
+- hashing
+- versioning
+- derivatives
+- metadata
+- duplicate detection
+- resumable transfer
+- verification
+- processing state
+- storage health
+- recovery
 
-Requirements:
-
-- Preserve the original file.
-- Create a linked PDF derivative.
-- Track conversion status.
-- Track errors.
-- Support retries.
-- Expose the PDF in the admin UI.
-- Allow preview.
-- Allow download.
-- Allow print.
-- Allow sending the PDF derivative to room devices.
-- Never replace the original source file.
+Detailed storage mechanics belong in the storage ADRs and subsystem documentation.
 
 ---
 
-## 13. UPM Agent
+## 13. File Access and SMB
 
-UPM Agent is a Windows 11-compatible operational client.
+SMB may provide operator-friendly filesystem access, but it is not the sole critical UPM transfer mechanism.
 
-It must:
+SMB must:
 
-- Support Windows 11.
-- Discover and connect to the correct Site.
-- Authenticate securely.
-- Receive server-authoritative assignments.
-- Support presentation transfer.
-- Support resumable transfers.
-- Recover automatically after Site restarts or network interruptions.
-- Expose connection and diagnostics state.
-- Avoid getting stuck on offline/error pages after transient failures.
+- support current Windows security expectations;
+- use authenticated access;
+- avoid insecure legacy protocols;
+- reconnect reliably;
+- respect UPM media authority and lifecycle rules.
 
-### Presentation synchronization
+Managed SMB views may expose canonical presentation media through operator-friendly folder structures without changing canonical media identity.
 
-UPM Agent should support synchronized presentation behavior between primary and backup endpoints when enabled.
-
-The system should provide:
-
-- Optional primary/backup sync
-- Shared presentation state
-- Coordinated open/start behavior
-- Room-operator controls
-- Safe desynchronization recovery
+The UPM API/media-transfer architecture remains the authoritative application transfer mechanism.
 
 ---
 
-## 14. UPM Room Client / Room Endpoint
+## 14. Presentation Processing
 
-Room endpoints are Windows 11 clients used to present or control content in meeting rooms.
+Heavy media operations run through durable workers.
 
-They must support:
+Examples include:
 
-- Server-authoritative room assignment
-- Primary and backup designation
-- Presentation delivery
-- Presentation open/launch
-- Status reporting
-- Recovery after reconnect
-- Local file verification
-- Operator visibility
-- Synchronization options between primary and backup systems
-
----
-
-## 15. UPM Kiosk
-
-UPM Kiosk is used for check-in and speaker/presenter workflows.
-
-It must:
-
-- Run on Windows 11 where required.
-- Connect to the local Site.
-- Remain functional during Central outages.
-- Use Site-local data.
-- Support branding configuration.
-- Respect global branding fallback behavior.
-
-### Branding hierarchy
-
-UPM must provide:
-
-- Global Branding
-- Speaker Upload Page branding
-- Speaker Kiosk branding
-- Signage Kiosk branding
-
-Global branding acts as the default.
-
-A page-specific setting overrides Global only when a local value is explicitly configured.
-
----
-
-## 16. UPM Signage
-
-UPM Signage supports timed and operational event signage. It is an independently deployable Docker service stack, separate from UPM Central and the core UPM Site application.
-
-Signage may run alongside a Site, on separate Linux hardware, or on redundant Signage nodes without changing the service and authority boundaries. It must use Site-local PostgreSQL-backed state and locally available signage media, and it must continue operating if Central or the main Site API is temporarily unavailable. Signage must never connect directly to Central PostgreSQL.
-
-Its data model remains distinct from presentation-operation tables and includes, as appropriate:
-
-- Displays and display assignments
-- Templates
-- Playlists
-- Schedules
-- Content and assets
-- Temporary/manual overrides
-- Devices and status
-- Render state
-
-Central owns global and multi-site signage configuration, templates, content, playlists, schedules, deployments, visibility, and aggregate health. Site owns local display assignments, execution state, temporary overrides, and local health. A temporary local override may supersede a deployed schedule and then expire back to normal scheduling.
-
-A signage display may be assigned to a room, but it does not become the room. Rooms and displays use separate UUID identities even when their labels are similar.
-
-Signage content should support automatic display based on:
-
-- Time
-- Session state
-- Room state
-- Event schedule
-
-Presentation media workflows may be manual or automatic depending on configuration.
-
-Signage must remain operational from Site-local data during WAN/Central outages.
-
----
-
-## 17. Upload and Ingestion
-
-UPM should support multiple ingestion paths.
-
-Target ingestion methods include:
-
-- Browser upload
-- UPM Agent upload
-- File-browser import
-- Open-file import
-- AirDrop-compatible ingestion
-- Inbound email attachment ingestion
-- External event-data imports
-
-### Email ingestion
-
-The architecture should allow a Site or approved ingestion service to receive inbound email and import eligible attachments into the upload workflow.
-
-This must include:
-
-- Sender validation options
-- Attachment restrictions
-- File-type validation
-- Audit trail
-- Malware/security processing hooks
-- Clear destination rules
-
----
-
-## 18. Import Architecture
-
-UPM must support structured imports such as Excel/CSV event exports.
-
-Imports must be treated as ingestion jobs rather than direct database overwrites.
-
-Import flow should include:
-
-1. File upload
-2. Parsing
-3. Validation
-4. Mapping
-5. Identity matching
-6. Duplicate detection
-7. Preview
-8. Administrator approval when needed
-9. Transactional commit
-10. Import audit record
-
-Imports should support stable external IDs where supplied.
-
----
-
-## 19. Jobs and Workers
-
-Heavy operations must not block API/web processes.
-
-Examples of worker-managed operations:
-
-- File hashing
+- hashing
 - PDF conversion
-- Presentation processing
-- Preview generation
-- Media replication
-- Large file copy
-- Central/Site synchronization
-- Email ingestion
-- Import parsing
-- Search indexing
-- Archive generation
-- Backup preparation
+- preview generation
+- media analysis
+- replication
+- large file operations
+- import parsing
+- indexing
 
-### Job requirements
+Processing must preserve original media.
 
-Jobs must have:
+Generated files are linked derivatives with explicit status and error information.
 
-- Durable state
-- Unique job IDs
-- Progress reporting
-- Retry policy
-- Error details
-- Cancellation where safe
-- Idempotency where possible
-- Created/start/end timestamps
-- Worker identity
-- Operator-visible status
-
-Central and Site use their own PostgreSQL-backed durable job tables and transactional outboxes. Workers claim eligible work transactionally with non-blocking row locks, leases, heartbeats, retry scheduling, idempotency metadata, priority, and capability matching. Central and Site queues remain isolated with their respective databases. Detailed decisions are recorded in [ADR-0003](decisions/ADR-0003-postgresql-durable-jobs-and-outbox.md).
+GPU acceleration may be used when available and beneficial, but required core UPM workflows must not depend on GPU availability.
 
 ---
 
-## 20. Transfer Architecture
+## 15. Transfer Architecture
 
-Presentation transfer must be designed for large files and unreliable networks.
+Large presentation files and unreliable networks are expected operating conditions.
 
-Requirements:
+Transfer architecture supports:
 
-- Resumable upload/download
-- Chunking where appropriate
-- Hash verification
-- File-size verification
-- Partial-transfer recovery
-- Retry
-- Bandwidth-aware behavior
-- Configurable concurrency
-- Network-saturation awareness
-- Clear progress indicators
+- resumability
+- chunking where appropriate
+- expected-size verification
+- SHA-256 verification
+- retries
+- partial-transfer recovery
+- configurable concurrency
+- progress visibility
+- independent destination progress
 
-Transfers should be able to adapt based on network saturation rather than blindly consuming all available bandwidth.
+Site-to-Central and Central-to-Site transfers respect the established synchronization direction and trust model.
 
-Binary media transfer extends ADR-0006 without changing its network direction. Sites initiate all
-connections to Central: Central-to-Site delivery is a Site-initiated authenticated pull, while
-Site-to-Central replication is a Site-initiated authenticated push. Central does not require inbound
-reachability to Sites, including co-located Sites. Both directions use stable UUIDv7 transfer
-sessions, durable contiguous byte offsets, expected size, and full-file SHA-256 verification. The
-existing per-Site credential authenticates the Site, followed by independent authorization of the
-Site/Event/deployment/transfer relationship. See
-[ADR-0011](decisions/ADR-0011-resumable-media-transfer-and-replication.md).
-
-Partial receive files remain private receiver-owned staging until idempotent verification and
-finalization. Each destination Site has independent transfer progress. Local Site readiness and
-media replication are separate states: locally verified media remains usable while Central is
-offline or replication is pending/failed.
+A Site's local readiness must not depend on optional Central media replication completing.
 
 ---
 
-## 21. Network Diagnostics
+## 16. Client and Device Architecture
 
-UPM Agent should include built-in network diagnostics.
+Managed clients authenticate to the appropriate Site and receive server-authoritative configuration.
 
-Diagnostics should support:
+Clients must tolerate:
 
-- iperf-based testing
-- Practical Site-to-Agent bandwidth tests
-- Latency
-- Upload throughput
-- Download throughput
-- Packet loss where available
-- Retransmissions where available
-- Interface used
-- Local IP
-- Server IP
-- Timestamp
-- Pass/warn/fail summary
+- Site restarts
+- address changes
+- temporary connectivity loss
+- stale cached state
+- interrupted transfers
 
-Results must be visible in the Site/admin UI.
+Clients must reconnect and reconcile rather than becoming permanently stuck in an offline/error state.
+
+Windows operational clients target Windows 11 compatibility.
+
+Detailed Agent, Room Client, Kiosk, and Signage behavior belongs in the appropriate subsystem requirements.
 
 ---
 
-## 22. Existing Network Requirements
+## 17. Signage Architecture
 
-UPM is an Existing Network product.
+UPM Signage is a distinct subsystem and must not be implemented by overloading presentation-operation tables.
 
-It must work reliably on:
+Signage supports concepts such as:
 
-- Corporate networks
-- Hotel networks
-- Event production VLANs
-- Private LANs
-- DHCP networks
-- Static-address deployments
-- Routed networks
+- displays
+- display assignments
+- templates
+- playlists
+- schedules
+- content/assets
+- temporary overrides
+- render state
+- device health
 
-The architecture must tolerate:
+Rooms and signage displays retain separate UUID identities even when labels are similar.
 
-- Address changes
-- DNS delay
-- Device reconnects
-- Temporary service outages
+Signage may be:
 
-Discovery must not depend on fragile one-time assumptions.
+- event-aware;
+- schedule-driven;
+- manually overridden; or
+- configured independently of events.
 
----
-
-## 23. Security Architecture
-
-Security must be built in from the beginning.
-
-### Machine/device trust
-
-Use secure device enrollment.
-
-Potential mechanisms include:
-
-- Enrollment tokens
-- Device certificates
-- Site trust records
-- mTLS for service-to-service connections
-- Revocation
-- Expiration
-- Rotation
-
-### Authentication and authorization
-
-UPM must support role-based permissions.
-
-Roles should distinguish at least:
-
-- Administrator
-- Operator
-- Restricted operational user
-
-General principle:
-
-- Operator has individual operational controls.
-- Administrator has full control.
-- Operators may allow configured actions.
-- Administrators can override where policy permits.
-
-### Secrets
-
-Secrets must:
-
-- Never be committed to Git
-- Be delivered through environment/configuration mechanisms
-- Support rotation
-- Be separated by deployment
-- Avoid shared universal credentials
+Site-local signage operation must continue during Central/WAN outages once required configuration and media are locally available.
 
 ---
 
-## 24. TLS and Caddy
+## 18. Ingestion Architecture
 
-Caddy is the standard UPM edge proxy/TLS termination layer.
+UPM supports multiple ingestion sources, including:
 
-### Certificate strategy
+- browser upload
+- Agent upload
+- SMB Incoming
+- server/file-browser import
+- open-file import
+- structured event-data imports
+- future AirDrop-compatible ingestion
+- future inbound email attachment ingestion
 
-Use:
+Ingestion must preserve valid media even when matching or metadata reconciliation is uncertain.
 
-- Public ACME certificates where customer DNS/public reachability is available
-- Internal/private CA certificates for local/private deployments
-
-UPM should configure what it needs from Caddy, but certificate-management logic must not be spread throughout application services.
-
----
-
-## 25. Browser Interfaces
-
-UPM Central and UPM Site core interfaces must be browser-based.
-
-Central and Site functionality must remain available even if any optional Windows management client is absent.
-
-### Optional Windows Central client
-
-A future Windows-based Central interface may exist, but it must only be a client/front end.
-
-It must not contain required Central logic.
-
-### Themes and motion
-
-Central and Site browser interfaces provide two interchangeable presentation layers over the same markup and functionality:
-
-- **UPM Glass:** the premium/default dark, translucent, restrained-neon, softly glowing, rounded, Windows 11-inspired presentation.
-- **UPM Classic:** a technician-oriented Windows 95/98-inspired presentation with flat gray panels, square controls, classic title bars/icons, high contrast, high information density, and minimal decoration.
-
-These are CSS/theme layers, not separate applications.
-
-Motion settings are **Full**, **Reduced**, and **Off**. The interface honors `prefers-reduced-motion`; animation is event-driven and must not use constant decorative motion that wastes resources or distracts operators.
+Invalid association is not equivalent to invalid media.
 
 ---
 
-## 26. Container Architecture
+## 19. Structured Imports
 
-UPM Central and UPM Site use Docker from the beginning.
+Structured imports such as Excel/CSV event exports are ingestion workflows, not direct database overwrites.
 
-Central and Site server-side APIs, workers, synchronization services, and related processing services use Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2.x, psycopg 3, Alembic, PostgreSQL, and uv-managed `pyproject.toml` projects. OpenAPI and JSON Schema provide language-neutral external contracts. This decision does not select a technology for Windows clients.
+Typical stages include:
 
-Central and Site remain separate applications with separate persistence metadata, sessions, configuration, and migration histories. See [ADR-0001](decisions/ADR-0001-backend-persistence-stack.md).
+1. upload;
+2. parse;
+3. validate;
+4. map;
+5. match identity;
+6. detect duplicates;
+7. preview/review where required;
+8. commit;
+9. retain provenance/audit information.
 
-### Central service boundaries
+Stable external identifiers should be preserved when supplied.
 
-Expected Central deployment includes separate services such as:
+Valid source rows must not be silently discarded merely because automatic reconciliation is uncertain.
+
+---
+
+## 20. Jobs and Workers
+
+Central and Site maintain independent PostgreSQL-backed durable work queues.
+
+Durable jobs should support, as appropriate:
+
+- unique IDs
+- state
+- progress
+- retries
+- retry scheduling
+- leases
+- worker identity
+- timestamps
+- errors
+- idempotency
+- priority
+- capability matching
+- cancellation where safe
+
+Heavy or show-critical work must not depend on API-process lifetime.
+
+---
+
+## 21. Security and Trust
+
+Security is part of the base architecture.
+
+UPM should support:
+
+- secure device enrollment
+- revocable machine identity
+- service authentication
+- role-based authorization
+- credential rotation
+- deployment-separated secrets
+- TLS
+- mTLS where appropriate
+
+At minimum, permissions distinguish administrative and operational roles.
+
+Do not use universal shared credentials as a platform shortcut.
+
+---
+
+## 22. Caddy and TLS
+
+Caddy is the standard UPM edge proxy and TLS termination layer.
+
+Certificate strategy may use:
+
+- public ACME certificates where appropriate;
+- internal/private CA certificates for private deployments.
+
+UPM maintains a narrow integration with Caddy.
+
+Certificate-management behavior must not be duplicated throughout application services.
+
+---
+
+## 23. Browser Administration
+
+Core Central and Site administration is browser-based.
+
+No Windows desktop application may be required for core Central or Site administration.
+
+Optional native management clients may exist only as clients of the server-side architecture.
+
+### Themes
+
+UPM supports interchangeable presentation layers over the same functionality:
+
+- **UPM Glass**
+- **UPM Classic**
+
+Themes are CSS/presentation layers rather than separate applications.
+
+Motion supports:
+
+- Full
+- Reduced
+- Off
+
+The UI honors `prefers-reduced-motion`.
+
+---
+
+## 24. Container and Service Architecture
+
+UPM server deployments use Docker.
+
+Central and Site are separate application stacks.
+
+Typical Central services include:
 
 - caddy
 - central-api
 - central-web
 - central-worker
 - central-sync
+- central-media-storage
 - central-postgres
 
-### Site service boundaries
-
-Expected Site deployment includes separate services such as:
+Typical Site services include:
 
 - caddy
 - site-api
 - site-web
 - site-worker
 - site-sync
+- site-media-storage
 - site-postgres
 
-Additional services may be introduced where they create a clear single-purpose boundary.
+Additional single-purpose services may be introduced when justified by a clear service boundary.
 
-Do not collapse unrelated concerns into a monolithic container.
-
----
-
-## 27. Repository Architecture
-
-UPM should use a monorepo.
-
-Recommended top-level structure:
-
-```text
-docs/
-  architecture/
-    decisions/
-  api/
-  deployment/
-  development/
-
-central/
-  api/
-  web/
-  workers/
-  sync/
-
-site/
-  api/
-  web/
-  workers/
-  media/
-  device-management/
-
-signage/
-  api/
-  web/
-  workers/
-  scheduler/
-  renderer/
-  sync/
-
-clients/
-  agent/
-  kiosk/
-  signage/
-  room-client/
-
-shared/
-  contracts/
-  models/
-  schemas/
-  utilities/
-
-database/
-  central/
-    migrations/
-  site/
-    migrations/
-  signage/
-    migrations/
-
-infrastructure/
-  central/
-  site/
-  signage/
-  caddy/
-  docker/
-
-scripts/
-
-tests/
-  integration/
-  sync/
-  system/
-```
-
-The repository should also contain:
-
-- `.gitignore`
-- `.editorconfig`
-- `.env.example`
-- Central Compose definition
-- Site Compose definition
-- GitHub Actions
-- Bootstrap scripts
-- Architecture documentation
+Do not merge unrelated services merely to reduce container count.
 
 ---
 
-## 28. Database Migrations
+## 25. Server Technology Baseline
 
-Database changes must use explicit migrations.
+Unless superseded by an accepted architecture decision, UPM server components use the established stack:
 
-Requirements:
+- Python 3.13
+- FastAPI
+- Pydantic v2
+- SQLAlchemy 2.x
+- psycopg 3
+- Alembic
+- PostgreSQL
+- uv-managed `pyproject.toml` projects
+- OpenAPI / JSON Schema for external contracts
 
-- Central migrations and Site migrations are separate.
-- No ad hoc production schema modification.
-- Migrations are versioned.
-- Migration state is observable.
-- Backup/recovery procedures account for migration versions.
-- Downgrade/rollback strategy should be defined where feasible.
-- Alembic is the migration framework for the Python server stack.
-- Central and Site use separate Alembic configurations and independent revision graphs; neither database must be reachable to migrate the other.
-- Container deployments run version-matched, one-shot migration services before starting APIs,
-  workers, or synchronization processes. Central and Site migration gates remain independent;
-  see [ADR-0005](decisions/ADR-0005-container-migration-gates.md).
+Technology choices for Windows clients may differ where appropriate.
 
 ---
 
-## 29. Observability
+## 26. Database Migrations
 
-Central and Site each own a deployment-local structured operational event store. Operational events
-are distinct from audit records: audit proves deliberate changes, while operational logs explain
-service, job, upload, device, and delivery outcomes under configurable retention. Typed correlation
-identifiers support Event, batch, media import, Presentation, version, Session, Room, Device, and
-worker investigation. Site log access never depends on Central connectivity.
+Persistent database changes use explicit versioned migrations.
 
-Large presentation-media selections create durable batch identity and authoritative per-file intake
-rows. The browser retains the complete logical set and uses windowed rendering rather than truncation.
-Batch counters derive from individual durable records, and lifecycle events correlate through batch
-and media-import UUIDs.
+Central and Site:
 
-UPM must provide meaningful operational visibility.
+- have separate Alembic configurations;
+- maintain independent revision graphs;
+- do not require the other database to migrate;
+- use deployment migration gates before dependent application services start.
 
-Track:
+Avoid ad hoc production schema changes.
 
-- Service health
-- Database health
-- Worker health
-- Queue depth
-- Job failures
-- Device connectivity
-- Device versions
-- Site connectivity
-- Central connectivity
-- Sync lag
-- Transfer throughput
-- Failed transfers
-- Storage usage
-- Media-processing failures
-- Conversion failures
-- API errors
-- Authentication failures
+---
 
-Operators should be able to distinguish:
+## 27. Observability
+
+UPM must expose meaningful operational state.
+
+Relevant areas include:
+
+- service health
+- database health
+- workers
+- queue depth
+- jobs
+- storage
+- synchronization
+- Sites
+- devices
+- transfers
+- media processing
+- conversion
+- authentication
+- API failures
+
+Operators must be able to distinguish conditions such as:
 
 - Healthy
 - Warning
@@ -1040,388 +798,227 @@ Operators should be able to distinguish:
 - Degraded
 - Synchronizing
 
+Operational events and audit records are separate concerns.
+
 ---
 
-## 30. Logging and Audit
+## 28. Audit
 
-Application logs and audit records are different concerns.
+Audit records document meaningful administrative and operational changes.
 
-### Logs
+Examples include:
 
-Logs support troubleshooting and observability.
+- identity merge/deletion
+- presentation deletion
+- room reassignment
+- device enrollment/revocation
+- configuration changes
+- permission changes
+- import approval
+- manual synchronization actions
 
-### Audit records
+Audit records should retain appropriate actor, action, timestamp, target, Site/Event context, and before/after information.
 
-Audit records track meaningful administrative and operational changes.
+---
+
+## 29. Backup and Recovery
+
+Central and each Site require independent backup and recovery procedures.
+
+Backup scope may include:
+
+- PostgreSQL
+- configuration
+- authoritative metadata
+- required media
+- identity data
+- audit records
+- required secure configuration/certificate material
+
+Site recovery must not require restoring Central first.
+
+Recovery procedures must be testable.
+
+---
+
+## 30. Existing Network Architecture
+
+UPM is designed for existing customer/event networks.
+
+It must tolerate environments including:
+
+- corporate networks
+- hotel networks
+- event VLANs
+- private LANs
+- DHCP
+- static addressing
+- routed networks
+
+The system must tolerate address changes, DNS delays, reconnects, service restarts, latency, and temporary outages.
+
+Do not introduce a separate Managed Network product architecture.
+
+---
+
+## 31. Software Update Policy
+
+Production application updates are explicitly controlled.
+
+UPM must not perform disruptive automatic application upgrades during active events.
+
+Windows client reliability configuration may suppress or defer disruptive operating-system behavior where administratively permitted.
+
+---
+
+## 32. Testing Architecture
+
+UPM requires testing at multiple levels.
+
+### Unit
 
 Examples:
 
-- Identity merge
-- Identity deletion
-- Presentation deletion
-- Room reassignment
-- Device enrollment
-- Device revocation
-- Configuration change
-- User permission change
-- Manual sync action
-- Import approval
+- domain logic
+- validation
+- transformations
+- identity matching
+- synchronization logic
+- media/path logic
 
-Audit data should include:
+### Integration
 
-- Actor
-- Action
-- Timestamp
-- Target
-- Site
-- Event
-- Before/after context where appropriate
-
----
-
-## 31. Backup and Recovery
-
-Central and every Site require defined backup and restore procedures.
-
-Backups should include:
-
-- PostgreSQL
-- Configuration
-- Authoritative media metadata
-- Critical Site media according to policy
-- Identity records at Central
-- Audit records
-- Required certificates/configuration material according to secure backup policy
-
-Recovery must be tested.
-
-Sites should be recoverable independently from Central.
-
----
-
-## 32. Software Updates
-
-Production updates are controlled.
-
-The current requirement is:
-
-- Manual software updates only unless the policy is explicitly changed later.
-
-UPM must not perform disruptive automatic application upgrades during events.
-
-Windows clients should also be configured for show reliability where approved.
-
----
-
-## 33. Windows 11 Reliability
-
-UPM Agent, UPM Kiosk, UPM Signage, and room endpoints must support Windows 11.
-
-The installer may apply approved reliability configuration, including:
-
-- Suppressing disruptive restarts during event operation
-- Deferring updates where administratively permitted
-- Hardening SMB compatibility
-- Supporting current Windows security defaults
-- Ensuring required local services/configuration are present
-
-Changes must be explicit and auditable.
-
----
-
-## 34. SMB and File Sharing
-
-Where SMB is used:
-
-- Support current Windows 11 security defaults.
-- Avoid insecure legacy protocols.
-- Use authenticated access.
-- Support stable reconnect behavior.
-- Do not make SMB the sole transfer mechanism for critical UPM workflows.
-
-The UPM API/transfer architecture remains the primary long-term application transfer mechanism.
-
----
-
-## 35. Development and Test Hardware Topology
-
-Current development/test environment:
-
-### UPM Central
-
-**MINISFORUM MS-01**
-- Linux
-- 32 GB RAM
-- NVIDIA RTX 3050 GPU
-- Runs UPM Central/database services
-- May also run the reusable UPM Site stack
-- GPU may be used for local LLM tasks and suitable processing offload
-
-### Development machine
-
-**Desktop computer**
-- Development/build workstation only
-- UPM must never depend on this machine for runtime operations
-
-### Independent UPM Site
-
-**Laptop #1**
-- Current Site development/test machine
-- Temporary Windows 11 Site host during early development if needed
-- Production Site target remains Linux/Docker
-
-### Additional laptops
-
-Used for:
-
-- UPM Agents
-- UPM Kiosks
-- UPM Signage
-- Primary room endpoints
-- Backup room endpoints
-- Failure/reconnect tests
-- Multi-device tests
-
-### Required topology testing
-
-Central and standalone Site must be tested as genuinely independent systems.
-
-Tests must include:
-
-- Disconnecting Site from Central
-- Disconnecting Central from WAN
-- Reconnecting after extended outage
-- Running Central-hosted Site capability
-- Comparing standalone and co-located Site behavior
-- Client reconnect after server reboot
-- Transfer interruption and resume
-
----
-
-## 36. GPU / Compute Offload
-
-The MS-01 includes an RTX 3050 GPU.
-
-UPM architecture should allow suitable processing tasks to use GPU acceleration when beneficial without making GPU availability a hard runtime dependency.
-
-Potential uses include:
-
-- Local LLM services
-- Media analysis
-- Thumbnail/image processing
-- Future presentation analysis
-- Future AI-assisted ingestion
-
-CPU fallback must remain possible for required core functions.
-
-Core PostgreSQL, API, synchronization, worker, and local Site operations take priority over optional AI, LLM, and noncritical accelerated workloads during resource pressure. Future GPU-capable workers may advertise capability requirements, but GPU availability must not be required for core UPM operation.
-
----
-
-## 37. Testing Strategy
-
-Testing must exist at multiple layers.
-
-### Unit tests
-
-For:
-
-- Domain logic
-- Validation
-- Data transformation
-- Identity matching
-- Sync logic
-- File metadata logic
-
-### Integration tests
-
-For:
+Examples:
 
 - PostgreSQL
 - APIs
-- Workers
-- File processing
-- Transfers
-- Authentication
+- workers
+- Media Storage
+- authentication
+- transfers
 - Caddy routing
 
-### Distributed-system tests
+### Distributed-system
 
-For:
+Examples:
 
-- Central/Site outage
-- Reconnect
-- Retry
-- Duplicate event delivery
-- Sync conflicts
-- Long disconnection
-- Partial transfer
-- Restart during transfer
+- Central outage
+- Site outage
+- reconnect
+- duplicate delivery
+- conflict handling
+- extended disconnection
+- interrupted transfer
+- restart during work
 
-### System tests
+### System
 
-For:
+Examples:
 
 - Agent
 - Kiosk
 - Signage
-- Room clients
-- Primary/backup workflows
-- End-to-end event operations
+- Room Client
+- primary/backup workflows
+- end-to-end show operation
+
+Tests requiring binary fixtures should generate them at runtime rather than committing generated binary artifacts unless a binary is an intentional repository dependency.
 
 ---
 
-## 38. CI/CD
+## 33. Repository Architecture
 
-GitHub Actions should validate the repository automatically.
+UPM uses a monorepo.
 
-Initial CI should include:
+Major repository areas should remain clearly separated by responsibility, including:
 
-- Repository structure validation
-- Formatting
-- Linting
-- Unit tests
-- Integration tests where feasible
-- Docker Compose validation
-- Secret scanning
-- Dependency/security scanning where practical
+- Central
+- Site
+- Signage
+- clients
+- shared contracts/utilities
+- Central migrations
+- Site migrations
+- infrastructure
+- documentation
+- tests
 
-Production deployment remains explicitly controlled.
-
----
-
-## 39. Development Workflow
-
-Normal development should use branches and pull requests.
-
-Recommended flow:
-
-```text
-Codex / developer change
-        ↓
-local automated validation
-        ↓
-commit
-        ↓
-push branch
-        ↓
-GitHub Actions
-        ↓
-review
-        ↓
-merge to main
-```
-
-`main` should remain stable.
-
-Architecture-changing work must update this specification before or with the implementation change.
+Repository organization may evolve as implementation grows, provided architectural service and ownership boundaries remain intact.
 
 ---
 
-## 40. Architecture Governance
+## 34. Architecture Governance
 
 This document is the architectural source of truth.
 
-When code and this document disagree:
+Accepted ADRs refine specific implementation decisions.
 
-1. Determine whether the architecture has intentionally changed.
-2. If architecture changed, update this document explicitly.
-3. If architecture did not change, correct the implementation.
+Historical ADRs must not be rewritten to make later decisions retroactive.
 
-Codex and other automated development agents should be instructed to read this document before major work.
+A significant architectural change requires a new or superseding ADR where appropriate.
 
-Recommended instruction:
+When implementation and architecture disagree:
 
-```text
-Read docs/architecture/UPM_MASTER_ARCHITECTURE.md completely before making changes.
+1. determine whether architecture intentionally changed;
+2. if it changed, document and approve the architectural change;
+3. otherwise, correct the implementation.
 
-The Master Architecture Specification is authoritative.
-Do not introduce architecture that conflicts with it.
+### Agent documentation policy
 
-If a requested implementation appears to require an architectural change,
-stop and explain the conflict before proceeding.
-```
+Codex and other automated development agents must follow the documentation-loading policy defined in the repository root `AGENTS.md`.
+
+The Master Architecture remains authoritative, but agents should load only the architecture sections and ADRs relevant to the requested work unless the task is genuinely cross-cutting.
+
+Do **not** require automated agents to read this entire document for every routine bug, UI change, naming change, test fix, or narrowly scoped implementation task.
 
 ---
 
-## 41. Non-Goals and Prohibited Shortcuts
+## 35. Prohibited Architectural Shortcuts
 
 Do not:
 
-- Treat the old SpeakerReady monolith as the new foundation.
-- Build Central and Site as one application.
-- Let Sites connect directly to Central PostgreSQL.
-- Require Central availability for local Site operation.
-- Create a temporary SQLite architecture.
-- Store important application state only in client machines.
-- Use presentation names as identity keys.
-- Merge people solely because names match.
-- Overwrite originals during conversion.
-- Depend on a Windows Central desktop app for administration.
-- Introduce automatic disruptive upgrades.
-- Make the development desktop a runtime dependency.
-- Use a future "v2 redesign" as an excuse for architectural shortcuts.
+- use SpeakerReady's monolithic architecture as the UPM foundation;
+- merge Central and Site into one application;
+- merge Central and Site databases;
+- let Site or clients read Central PostgreSQL directly;
+- require Central for routine Site-local active-show operation;
+- introduce SQLite as temporary application persistence;
+- treat labels or filenames as identity;
+- merge people solely because display names match;
+- replace originals during conversion;
+- store authoritative operational state only on clients;
+- depend on a Windows Central application for core administration;
+- make a development workstation a runtime dependency;
+- use automatic disruptive production upgrades;
+- bypass durable jobs for restart-sensitive/show-critical work;
+- introduce parallel implementations when a canonical subsystem already exists;
+- justify architectural shortcuts as something to fix in a future "v2."
 
 ---
 
-## 42. Implementation Milestone Philosophy
+## 36. Architecture Documentation Map
 
-Implementation may be incremental, but the architecture is fixed.
+Detailed architecture should be divided into focused subsystem documents so developers and automated agents can load only relevant context.
 
-A milestone may implement only a subset of capabilities, but the subset must fit the final architecture.
+Recommended structure:
 
-For example:
+```text
+docs/
+  architecture/
+    UPM_MASTER_ARCHITECTURE.md
 
-- An early milestone may implement only Central identity APIs.
-- A later milestone may add Site synchronization.
-- Another milestone may add presentation conversion.
+    components/
+      central-site.md
+      data-identity.md
+      media-storage.md
+      synchronization.md
+      clients-devices.md
+      signage.md
+      security-network.md
+      deployment-runtime.md
+      jobs-observability.md
+      testing-development.md
 
-Those milestones must use the final service boundaries, identity model, database direction, sync concepts, and deployment strategy.
-
-Milestones add capability. They do not replace the architecture.
-
----
-
-## 43. Immediate Repository Foundation
-
-The first repository implementation should establish:
-
-- Architecture documentation
-- Monorepo folder structure
-- Central service boundaries
-- Site service boundaries
-- Shared contracts directory
-- Separate database migration roots
-- Infrastructure folders
-- Docker Compose skeletons
-- Caddy configuration skeletons
-- Environment templates
-- Bootstrap scripts
-- GitHub Actions
-- Testing roots
-
-Application business logic should be added only after this foundation is validated.
-
----
-
-## 44. Final Architectural Objective
-
-UPM should behave as a professional distributed presentation-management platform where:
-
-- Each Site can run an event independently.
-- Central provides global control without becoming a single point of operational failure.
-- Presentation assets are reliable and traceable.
-- People retain durable identity across events.
-- Large files transfer safely.
-- Clients recover automatically.
-- Failures are visible.
-- Services have clear boundaries.
-- Security is explicit.
-- The deployment model is consistent.
-- The architecture remains understandable years after initial implementation.
-
-This document governs the implementation until deliberately amended.
-
-### Operator authority for presentation media matching
-
-Presentation media matching is suggestion-driven and operator-authoritative. UPM may automatically discover and rank candidate Presentation matches, but it may not finalize a media assignment without explicit operator confirmation. Operators may bulk-confirm explicitly selected high-confidence suggestions. Uncertain matching preserves valid uploaded media for review and is not an ingest failure. Central and Site apply this rule against their deployment-local Event program data and canonical Presentation / PresentationVersion model.
+    decisions/
+      README.md
+      ADR-xxxx-*.md
