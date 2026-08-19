@@ -57,8 +57,8 @@ def test_smb_services_join_edge_and_internal_networks_without_exposing_postgres(
 
 def test_startup_repairs_share_roots_without_recursive_reownership() -> None:
     entrypoint = (ROOT / "smb-edge/entrypoint.sh").read_text()
-    assert "chgrp upm_read_only /shares/presentations" in entrypoint
-    assert "chmod 2755 /shares/presentations" in entrypoint
+    assert "chgrp upm_read_only /shares/presentations" not in entrypoint
+    assert "chmod 2755 /shares/presentations" not in entrypoint
     assert "chgrp upm_operator /shares/incoming" in entrypoint
     assert "chmod 2775 /shares/incoming" in entrypoint
     assert "chgrp upm_administrator /shares/trash" in entrypoint
@@ -98,16 +98,52 @@ def test_health_rejects_incorrect_share_group_or_mode(monkeypatch) -> None:
         api.os,
         "stat",
         lambda path: SimpleNamespace(
-            st_gid=gids[api.SHARE_REQUIREMENTS[path][0]],
-            st_mode=api.SHARE_REQUIREMENTS[path][1],
+            st_gid=(
+                gids[api.SHARE_REQUIREMENTS[path][0]]
+                if path in api.SHARE_REQUIREMENTS
+                else 0
+            ),
+            st_mode=(
+                api.SHARE_REQUIREMENTS[path][1]
+                if path in api.SHARE_REQUIREMENTS
+                else 0o40755
+            ),
         ),
     )
     assert api.share_permission_errors() == []
 
-    monkeypatch.setattr(api.os, "stat", lambda _path: SimpleNamespace(st_gid=0, st_mode=0o755))
+    monkeypatch.setattr(api.os, "stat", lambda _path: SimpleNamespace(st_gid=0, st_mode=0o40755))
     errors = api.share_permission_errors()
     assert any("incorrect group" in error for error in errors)
     assert any("expected 2775" in error for error in errors)
+
+
+def test_health_validates_read_only_presentations_without_requiring_ownership(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import upm_smb_edge.api as api
+
+    gids = {"upm_operator": 101, "upm_administrator": 102}
+    monkeypatch.setattr(api.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=gids[name]))
+
+    def stat_path(path: str):
+        if path == "/shares/presentations":
+            return SimpleNamespace(st_gid=0, st_mode=0o40755)
+        group, mode = api.SHARE_REQUIREMENTS[path]
+        return SimpleNamespace(st_gid=gids[group], st_mode=0o40000 | mode)
+
+    monkeypatch.setattr(api.os, "stat", stat_path)
+    assert api.share_permission_errors() == []
+
+    def inaccessible_presentations(path: str):
+        if path == "/shares/presentations":
+            return SimpleNamespace(st_gid=0, st_mode=0o40700)
+        return stat_path(path)
+
+    monkeypatch.setattr(api.os, "stat", inaccessible_presentations)
+    assert api.share_permission_errors() == [
+        "/shares/presentations: mode 0700, requires read/traverse access"
+    ]
 
 
 def test_higher_roles_receive_incoming_filesystem_group(monkeypatch) -> None:

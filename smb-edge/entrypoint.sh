@@ -4,10 +4,9 @@ set -eu
 : "${UPM_SMB_INTERFACES:=lo eth0}"
 for group in read_only technician operator manager administrator; do addgroup -S "upm_$group" 2>/dev/null || true; done
 mkdir -p /shares/presentations /shares/incoming /shares/trash /var/lib/samba/private
-# Repair only the share roots on every start. Do not recursively chown persistent content: existing
-# file ownership is audit/history evidence, while setgid makes new directories inherit correctly.
-chgrp upm_read_only /shares/presentations
-chmod 2755 /shares/presentations
+# Presentations is an intentionally read-only Media Storage-owned mount. Validate it through the
+# health endpoint, but never mutate it here. Repair only the writable share roots; setgid makes new
+# directories inherit correctly without recursively changing persistent ownership/history.
 chgrp upm_operator /shares/incoming
 chmod 2775 /shares/incoming
 chgrp upm_administrator /shares/trash

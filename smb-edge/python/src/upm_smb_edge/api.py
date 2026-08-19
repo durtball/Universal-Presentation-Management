@@ -16,9 +16,13 @@ from upm_smb_edge.accounts import assign_role
 TOKEN = os.environ.get("UPM_SMB_CONTROL_TOKEN", "")
 USERNAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SHARE_REQUIREMENTS = {
-    "/shares/presentations": ("upm_read_only", 0o2755),
     "/shares/incoming": ("upm_operator", 0o2775),
     "/shares/trash": ("upm_administrator", 0o2770),
+}
+READ_ONLY_SHARE_REQUIREMENTS = {
+    # Media Storage owns this read-only mount. Samba only needs directory traversal/read access and
+    # must not require an ownership repair that cannot succeed from the edge container.
+    "/shares/presentations": 0o555,
 }
 
 
@@ -50,6 +54,17 @@ def safe(value: str) -> str:
 
 def share_permission_errors() -> list[str]:
     errors = []
+    for path, required_access in READ_ONLY_SHARE_REQUIREMENTS.items():
+        try:
+            details = os.stat(path)
+        except FileNotFoundError:
+            errors.append(f"{path}: missing path")
+            continue
+        mode = stat.S_IMODE(details.st_mode)
+        if not stat.S_ISDIR(details.st_mode):
+            errors.append(f"{path}: not a directory")
+        elif mode & required_access != required_access:
+            errors.append(f"{path}: mode {mode:04o}, requires read/traverse access")
     for path, (group_name, required_mode) in SHARE_REQUIREMENTS.items():
         try:
             details = os.stat(path)
