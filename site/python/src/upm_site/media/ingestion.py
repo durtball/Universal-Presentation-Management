@@ -656,6 +656,7 @@ class MediaIngestionService:
             asset = PresentationAsset(
                 presentation_version_id=request.presentation_version_id,
                 media_object_id=media_id,
+                original_filename=filename,
                 kind=AssetKind.ORIGINAL,
             )
             session.add(asset)

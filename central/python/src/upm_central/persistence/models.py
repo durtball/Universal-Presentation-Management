@@ -1111,6 +1111,7 @@ class PresentationAsset(CentralRecordMixin, CentralBase):
     media_object_id: Mapped[UUID] = mapped_column(
         ForeignKey("media_object_replicas.media_object_id", ondelete="RESTRICT"), nullable=False
     )
+    original_filename: Mapped[str | None] = mapped_column(String(1024))
     kind: Mapped[AssetKind] = mapped_column(
         Enum(
             AssetKind,

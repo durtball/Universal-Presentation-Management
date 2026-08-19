@@ -135,6 +135,7 @@ def finalize_replication(
         PresentationAsset(
             presentation_version_id=receiver.presentation_version_id,
             media_object_id=media_id,
+            original_filename=receiver.original_filename,
             kind=AssetKind.ORIGINAL,
         )
     )
@@ -180,6 +181,7 @@ def finalize_replication_reference(
         PresentationAsset(
             presentation_version_id=receiver.presentation_version_id,
             media_object_id=receiver.source_media_object_id,
+            original_filename=receiver.original_filename,
             kind=AssetKind.ORIGINAL,
         )
     )

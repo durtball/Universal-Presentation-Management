@@ -121,6 +121,7 @@ def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
         if existing is None:
             session.add(PresentationAsset(presentation_version_id=version_id,
                                           media_object_id=media.media_object_id,
+                                          original_filename=media.original_filename,
                                           kind=AssetKind.ORIGINAL))
             presentation = session.get(Presentation, version.presentation_id)
             if presentation is not None:
@@ -452,7 +453,9 @@ def register_presentation_media_routes(
                         raise HTTPException(409, "media was confirmed to another presentation")
                     session.add(PresentationAsset(
                         presentation_version_id=version.presentation_version_id,
-                        media_object_id=media_id, kind=AssetKind.ORIGINAL))
+                        media_object_id=media_id,
+                        original_filename=media.original_filename,
+                        kind=AssetKind.ORIGINAL))
                     session.flush()
                     return {"media_object_id": media_id,
                             "presentation_id": version.presentation_id,
@@ -490,7 +493,9 @@ def register_presentation_media_routes(
             raise HTTPException(422, str(error)) from error
         media.category = MediaCategory.PRESENTATION_VERSION
         session.add(PresentationAsset(presentation_version_id=version.presentation_version_id,
-                                      media_object_id=media_id, kind=AssetKind.ORIGINAL))
+                                      media_object_id=media_id,
+                                      original_filename=media.original_filename,
+                                      kind=AssetKind.ORIGINAL))
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         presentation.sync_state = SyncState.PENDING
         SiteQueue(session).enqueue_outbox(

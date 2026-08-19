@@ -1,14 +1,14 @@
 """Durable reconciliation of Central canonical media into the read-only SMB view."""
 
-from pathlib import Path
-
 from sqlalchemy import select
 
 from upm_central.persistence.models import (
     Event,
     EventParticipation,
+    ExternalIdentifier,
     MediaObjectReplica,
     MediaReplicationReceiveSession,
+    Person,
     Presentation,
     PresentationAsset,
     PresentationPresenter,
@@ -16,10 +16,20 @@ from upm_central.persistence.models import (
     PresentationVersion,
     ProcessingJob,
     Session,
+    SessionParticipant,
 )
-from upm_shared.enums import AssetKind, PresentationWorkflowStatus
+from upm_shared.enums import (
+    AssetKind,
+    ExternalEntityType,
+    PresentationIdentifierSource,
+    PresentationWorkflowStatus,
+)
 from upm_shared.identifiers import new_uuid7
-from upm_shared.smb_materialization import MaterializationItem, paths_for
+from upm_shared.smb_materialization import (
+    MaterializationItem,
+    paths_for,
+    with_collision_suffixes,
+)
 
 JOB = "smb.presentations.reconcile"
 VISIBLE = {
@@ -59,6 +69,7 @@ def enqueue(session, *, delay_seconds: float = 30, current_job_id=None):
 
 def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
     entries = []
+    all_items = []
     presentations = session.scalars(
         select(Presentation).where(Presentation.workflow_status.in_(VISIBLE))
     ).all()
@@ -86,27 +97,9 @@ def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
         ).first()
         if row is None:
             continue
-        _asset, media = row
+        asset, media = row
         if not media.object_key or not media.content_hash or media.size_bytes is None:
             continue
-        presenter_link = session.scalar(
-            select(PresentationPresenter)
-            .where(PresentationPresenter.presentation_id == presentation.presentation_id)
-            .order_by(
-                PresentationPresenter.primary_presenter.desc(),
-                PresentationPresenter.presenter_order,
-            )
-        )
-        participation = (
-            session.get(EventParticipation, presenter_link.event_participation_id)
-            if presenter_link
-            else None
-        )
-        presenter = (
-            participation.display_name
-            if participation and participation.display_name
-            else "Unknown Presenter"
-        )
         session_ids = {
             link.session_id
             for link in session.scalars(
@@ -117,15 +110,61 @@ def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
         }
         if presentation.session_id:
             session_ids.add(presentation.session_id)
+        people = session.execute(
+            select(Person.family_name, Person.display_name, EventParticipation.display_name)
+            .join(EventParticipation, EventParticipation.person_id == Person.person_id)
+            .join(
+                PresentationPresenter,
+                PresentationPresenter.event_participation_id
+                == EventParticipation.event_participation_id,
+            )
+            .where(PresentationPresenter.presentation_id == presentation.presentation_id)
+            .order_by(
+                PresentationPresenter.presenter_order,
+                PresentationPresenter.presentation_presenter_id,
+            )
+        ).all()
+        if not people and session_ids:
+            people = session.execute(
+                select(Person.family_name, Person.display_name, EventParticipation.display_name)
+                .join(EventParticipation, EventParticipation.person_id == Person.person_id)
+                .join(
+                    SessionParticipant,
+                    SessionParticipant.event_participation_id
+                    == EventParticipation.event_participation_id,
+                )
+                .where(SessionParticipant.session_id.in_(session_ids))
+                .order_by(
+                    SessionParticipant.presenter_order, SessionParticipant.session_participant_id
+                )
+            ).all()
+        presenters = tuple(dict.fromkeys(a or b or c for a, b, c in people if a or b or c))
+        external_id = session.scalar(
+            select(ExternalIdentifier.external_id)
+            .where(
+                ExternalIdentifier.entity_type == ExternalEntityType.PRESENTATION,
+                ExternalIdentifier.entity_id == presentation.presentation_id,
+            )
+            .order_by(ExternalIdentifier.created_at, ExternalIdentifier.external_identifier_id)
+        )
         base = dict(
             presentation_id=presentation.presentation_id,
             version_id=version.presentation_version_id,
             event_id=event.event_id,
             event_name=event.name,
             event_timezone=event.timezone,
+            presentation_identifier=external_id
+            or presentation.external_presentation_id
+            or (
+                presentation.presentation_identifier
+                if presentation.presentation_identifier_source
+                != PresentationIdentifierSource.GENERATED
+                else None
+            )
+            or str(presentation.presentation_id)[:8],
             title=presentation.title,
-            presenter=presenter,
-            extension="",
+            presenters=presenters,
+            original_filename=asset.original_filename,
             storage_target_id=media.authoritative_site_id,
             storage_key=media.object_key,
             sha256=media.content_hash,
@@ -142,9 +181,7 @@ def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
         )
         if imported is not None and imported.committed_storage_root_id is not None:
             base["storage_target_id"] = imported.committed_storage_root_id
-            base["extension"] = Path(
-                imported.canonical_filename or imported.original_filename
-            ).suffix
+            base["original_filename"] = asset.original_filename or imported.original_filename
         else:
             replica = session.scalar(
                 select(MediaReplicationReceiveSession).where(
@@ -155,7 +192,7 @@ def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
             if replica is None or replica.storage_target_id is None:
                 continue
             base["storage_target_id"] = replica.storage_target_id
-            base["extension"] = Path(replica.canonical_filename or replica.original_filename).suffix
+            base["original_filename"] = asset.original_filename or replica.original_filename
         items = [MaterializationItem(**base)]
         for sid in session_ids:
             scheduled = session.get(Session, sid)
@@ -170,16 +207,17 @@ def reconcile(session, storage, *, current_job_id=None, interval_seconds=30):
                         room_name=scheduled.location_name,
                     )
                 )
-        for item in items:
-            entries.extend(
-                {
-                    "relative_path": path,
-                    "storage_target_id": str(item.storage_target_id),
-                    "storage_key": item.storage_key,
-                    "sha256": item.sha256,
-                }
-                for path in paths_for(item)
-            )
+        all_items.extend(items)
+    for item in with_collision_suffixes(all_items):
+        entries.extend(
+            {
+                "relative_path": path,
+                "storage_target_id": str(item.storage_target_id),
+                "storage_key": item.storage_key,
+                "sha256": item.sha256,
+            }
+            for path in paths_for(item)
+        )
     result = storage.reconcile_smb_presentations(entries)
     enqueue(session, delay_seconds=interval_seconds, current_job_id=current_job_id)
     return result

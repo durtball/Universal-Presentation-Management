@@ -144,6 +144,7 @@ def ensure_confirmed_original_asset(
     asset = PresentationAsset(
         presentation_version_id=record.presentation_version_id,
         media_object_id=media_id,
+        original_filename=record.original_filename,
         kind=AssetKind.ORIGINAL,
     )
     session.add(asset)
