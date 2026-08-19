@@ -29,7 +29,9 @@ services:
       retries: 5
 
   central-discovery:
-    image: ghcr.io/christgau/wsdd:0.8
+    build:
+      context: ./central/discovery/wsdd
+    image: ${UPM_CENTRAL_DISCOVERY_IMAGE:-upm-central-discovery:local}
     restart: unless-stopped
     network_mode: host
     command: ["--hostname", "${UPM_CENTRAL_SMB_HOSTNAME:-UPM-CENTRAL}"]
