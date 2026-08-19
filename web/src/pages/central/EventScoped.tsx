@@ -13,6 +13,10 @@ import { useSession } from "../../state/session";
 import { AdminBoundary, when } from "./Shared";
 
 const string = (row: Row, key: string) => row[key] as string | undefined;
+const presenterName = (row: Row) =>
+  row.display_name ||
+  row.person_display_name ||
+  [row.given_name, row.family_name].filter(Boolean).join(" ");
 const definitions: Record<
   string,
   {
@@ -60,7 +64,7 @@ const definitions: Record<
     load: "participants",
     filter: (row) => Boolean(row.is_presenter),
     columns: [
-      { key: "name", label: "Presenter", value: (row) => row.display_name },
+      { key: "name", label: "Presenter", value: presenterName },
       { key: "title", label: "Title", value: (row) => row.professional_title },
       {
         key: "organization",
