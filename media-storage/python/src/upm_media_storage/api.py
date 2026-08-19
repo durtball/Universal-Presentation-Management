@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import shutil
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -35,6 +36,19 @@ class IncomingCompleteRequest(BaseModel):
     size_bytes: int = Field(ge=0)
     modified_ns: int = Field(ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PresentationReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    relative_path: str = Field(min_length=1, max_length=1024)
+    storage_target_id: UUID
+    storage_key: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PresentationTreeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entries: list[PresentationReference] = Field(max_length=100_000)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -174,6 +188,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/storage/targets/{target_id}/test", dependencies=private)
     def test_target(target_id: UUID) -> dict:
         return storage.payload(storage.target(target_id), probe=True)
+
+    @app.put("/api/v1/storage/smb/presentations", dependencies=private)
+    def reconcile_presentations(payload: PresentationTreeRequest) -> dict:
+        root = configured.smb_presentations_path
+        if root is None:
+            raise HTTPException(404, "SMB Presentations is not configured")
+        root.mkdir(parents=True, exist_ok=True)
+        desired: dict[Path, PresentationReference] = {}
+        for entry in payload.entries:
+            relative = StorageService.safe_key(entry.relative_path)
+            if relative.parts[0] not in {
+                "By Schedule",
+                "By Room",
+                "By Presenter",
+                "All Presentations",
+            }:
+                raise HTTPException(422, "invalid Presentations view")
+            desired[root.joinpath(*relative.parts)] = entry
+        added = updated = 0
+        for destination, entry in sorted(desired.items(), key=lambda pair: str(pair[0])):
+            source = storage.path(storage.target(entry.storage_target_id), entry.storage_key)
+            if not source.is_file() or storage.sha256(source) != entry.sha256:
+                raise StorageError("Canonical presentation media is missing or invalid.")
+            if destination.is_file() and os.path.samefile(source, destination):
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.{uuid4()}.partial")
+            try:
+                try:
+                    os.link(source, temporary)
+                except OSError as error:
+                    if error.errno != errno.EXDEV:
+                        raise
+                    cache = root / ".objects" / entry.sha256[:2] / entry.sha256
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                    if not cache.is_file():
+                        cache_tmp = cache.with_name(f".{cache.name}.{uuid4()}.partial")
+                        shutil.copyfile(source, cache_tmp)
+                        if storage.sha256(cache_tmp) != entry.sha256:
+                            raise StorageError(
+                                "Controlled materialization copy failed verification."
+                            ) from error
+                        os.replace(cache_tmp, cache)
+                    os.link(cache, temporary)
+                existed = destination.exists()
+                os.replace(temporary, destination)
+                updated += int(existed)
+                added += int(not existed)
+            finally:
+                temporary.unlink(missing_ok=True)
+        removed = 0
+        for view in ("By Schedule", "By Room", "By Presenter", "All Presentations"):
+            view_root = root / view
+            view_root.mkdir(exist_ok=True)
+            for path in sorted(view_root.rglob("*"), reverse=True):
+                if path.is_file() and path not in desired:
+                    path.unlink()
+                    removed += 1
+                elif path.is_dir():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+        logger.info(
+            "smb_presentations_reconciliation_completed",
+            extra={"added": added, "updated": updated, "removed": removed, "desired": len(desired)},
+        )
+        return {"desired": len(desired), "added": added, "updated": updated, "removed": removed}
 
     @app.get("/api/v1/storage/assignments", dependencies=private)
     def assignments() -> dict:

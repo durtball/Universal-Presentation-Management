@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     targets_json: str | None = None
     state_path: Path = Path("/state/assignments.json")
     smb_incoming_path: Path | None = None
+    smb_presentations_path: Path | None = None
     warning_free_percent: float = 15
     critical_free_percent: float = 5
 

@@ -58,6 +58,9 @@ from upm_site.smb_intake import (
     reconcile as reconcile_smb,
 )
 from upm_site.smb_intake import retire as retire_smb
+from upm_site.smb_presentations import JOB as SMB_PRESENTATIONS_JOB
+from upm_site.smb_presentations import enqueue as enqueue_smb_presentations
+from upm_site.smb_presentations import reconcile as reconcile_smb_presentations
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
 
@@ -142,6 +145,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             retention_days=settings.operational_log_retention_days,
         )
         enqueue_smb_reconciliation(session, site.site_id)
+        enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -269,9 +273,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 site_id=work.site_id,
                                 event_id=UUID(work.payload["data"]["event_id"]),
                                 worker_id=worker_id,
-                                context={
-                                    "relative_path": work.payload["data"]["relative_path"]
-                                },
+                                context={"relative_path": work.payload["data"]["relative_path"]},
                             )
                         except Exception as error:
                             queue.fail(
@@ -283,6 +285,34 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 base_delay_seconds=settings.worker_retry_base_seconds,
                             )
                             log("smb_retirement_failed", work_id=work_id, detail=str(error)[:2048])
+                            continue
+                    elif kind == "processing" and work.job_type == SMB_PRESENTATIONS_JOB:
+                        try:
+                            result = reconcile_smb_presentations(
+                                session,
+                                storage_client,
+                                site_id=work.site_id,
+                                current_job_id=work.processing_job_id,
+                            )
+                            log(
+                                "smb_presentations_reconciliation_completed",
+                                work_id=work_id,
+                                **result,
+                            )
+                        except Exception as error:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="smb_presentations_materialization_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            log(
+                                "smb_presentations_materialization_failed",
+                                work_id=work_id,
+                                detail=str(error)[:2048],
+                            )
                             continue
                     elif kind == "processing" and work.job_type == "smb.user.revoke":
                         SmbControlClient(

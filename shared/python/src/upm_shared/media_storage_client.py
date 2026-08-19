@@ -103,6 +103,11 @@ class MediaStorageClient:
         except (httpx.HTTPError, ValueError) as error:
             raise MediaStorageUnavailable("Media Storage service is unavailable.") from error
 
+    def reconcile_smb_presentations(self, entries: list[dict]) -> dict:
+        return self.request_with_json(
+            "PUT", "/api/v1/storage/smb/presentations", {"entries": entries}
+        )
+
     def append_staging(self, target_id: UUID | str, key: str, offset: int, content: bytes) -> dict:
         try:
             response = httpx.patch(

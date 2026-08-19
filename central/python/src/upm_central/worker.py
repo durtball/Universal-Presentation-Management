@@ -49,6 +49,9 @@ from upm_central.smb_intake import (
     reconcile as reconcile_smb,
 )
 from upm_central.smb_intake import retire as retire_smb
+from upm_central.smb_presentations import JOB as SMB_PRESENTATIONS_JOB
+from upm_central.smb_presentations import enqueue as enqueue_smb_presentations
+from upm_central.smb_presentations import reconcile as reconcile_smb_presentations
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
@@ -190,6 +193,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                 required_capabilities=["cpu"],
             )
         enqueue_smb_reconciliation(session)
+        enqueue_smb_presentations(session, delay_seconds=0)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -222,7 +226,8 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     if kind == "processing" and (
                         work.job_type.startswith("presentation_media.")
-                        or work.job_type in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB}
+                        or work.job_type
+                        in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB, SMB_PRESENTATIONS_JOB}
                     ):
                         # Commit the durable claim and release this connection before matching or
                         # calling Media Storage. Completion/failure uses a fresh short transaction.
@@ -316,23 +321,31 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         ingested = ingest_smb(media_work, media_processor, storage_client)
                         smb_ingested = True
                         smb_ingested_sha256 = ingested.sha256
+                    elif media_work.job_type == SMB_PRESENTATIONS_JOB:
+                        with factory.begin() as smb_session:
+                            result = reconcile_smb_presentations(
+                                smb_session,
+                                storage_client,
+                                current_job_id=media_work.processing_job_id,
+                            )
+                        log(
+                            "smb_presentations_reconciliation_completed",
+                            work_id=media_work_id,
+                            **result,
+                        )
                     else:
                         retirement_result = retire_smb(media_work, storage_client)
                     with factory.begin() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
                         if smb_ingested:
-                            enqueue_smb_retirement(
-                                session, media_work, sha256=smb_ingested_sha256
-                            )
+                            enqueue_smb_retirement(session, media_work, sha256=smb_ingested_sha256)
                         if retirement_result is not None:
                             data = media_work.payload["data"]
                             record_log(
                                 session,
                                 service="central-worker",
                                 severity=(
-                                    "warning"
-                                    if retirement_result.get("source_changed")
-                                    else "info"
+                                    "warning" if retirement_result.get("source_changed") else "info"
                                 ),
                                 event_type=(
                                     "smb.intake.retirement_skipped"
@@ -365,7 +378,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             error_code=(
                                 "smb_retirement_failed"
                                 if retirement_failed
-                                else "presentation_media_processing_failed"
+                                else (
+                                    "smb_presentations_materialization_failed"
+                                    if media_work.job_type == SMB_PRESENTATIONS_JOB
+                                    else "presentation_media_processing_failed"
+                                )
                             ),
                             message=str(exc),
                             retryable=True,
