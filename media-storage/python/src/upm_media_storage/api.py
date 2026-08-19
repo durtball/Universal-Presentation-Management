@@ -31,6 +31,13 @@ class CommitRequest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class DispositionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_target_id: UUID
+    source_key: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class IncomingCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     size_bytes: int = Field(ge=0)
@@ -61,6 +68,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(401, "invalid media storage service credential")
 
     private = [Depends(authenticated)]
+
+    def disposition(payload: DispositionRequest, namespace: str) -> dict:
+        source = storage.path(storage.target(payload.source_target_id), payload.source_key)
+        target = storage.active("media")
+        key = f"{namespace}/sha256/{payload.sha256[:2]}/{payload.sha256}"
+        destination = storage.path(target, key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if storage.sha256(destination) != payload.sha256:
+                raise StorageError("Existing disposition failed SHA-256 verification.")
+        else:
+            if not source.is_file() or storage.sha256(source) != payload.sha256:
+                raise StorageError("Disposition source is missing or failed SHA-256 verification.")
+            try:
+                os.link(source, destination)
+            except OSError as error:
+                if error.errno != errno.EXDEV:
+                    raise
+                temporary = destination.with_name(f".{destination.name}.{uuid4()}.partial")
+                try:
+                    shutil.copyfile(source, temporary)
+                    if storage.sha256(temporary) != payload.sha256:
+                        raise StorageError("Disposition copy failed SHA-256 verification.")
+                    os.link(temporary, destination)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        if source != destination:
+            source.unlink(missing_ok=True)
+        return {
+            "storage_target_id": str(target.storage_target_id),
+            "storage_key": key,
+            "name": target.name,
+            "internal_path": str(target.internal_path),
+            "sha256": payload.sha256,
+            "size_bytes": destination.stat().st_size,
+        }
 
     @app.exception_handler(StorageError)
     async def storage_error(_request: Request, error: StorageError):
@@ -414,6 +457,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sha256": payload.sha256,
             "size_bytes": destination.stat().st_size,
         }
+
+    @app.post("/api/v1/storage/intake/publish", dependencies=private)
+    def publish_intake(payload: DispositionRequest) -> dict:
+        return disposition(payload, "intake")
+
+    @app.post("/api/v1/storage/intake/promote", dependencies=private)
+    def promote_intake(payload: DispositionRequest) -> dict:
+        return disposition(payload, "objects")
+
+    @app.post("/api/v1/storage/intake/reject", dependencies=private)
+    def reject_intake(payload: DispositionRequest) -> dict:
+        return disposition(payload, "rejected")
 
     @app.get("/api/v1/storage/objects/{target_id}/{key:path}", dependencies=private)
     def read_object(

@@ -102,4 +102,5 @@ def test_central_presentation_ingestion_has_no_legacy_data_path_dependency() -> 
     assert "central-media-data" not in compose
     assert "/data/staging" not in staging
     assert "write_staging" in staging
-    assert "storage.commit" in staging
+    assert "storage.publish_intake" in staging
+    assert "storage.promote_intake" in staging

@@ -22,4 +22,5 @@ New decisions must not silently weaken Central/Site separation, Site offline aut
 
 - [ADR-0014: Operator-authoritative presentation media matching](ADR-0014-operator-authoritative-media-matching.md) — automatic matching produces Event-scoped suggestions only; explicit individual or selected bulk operator confirmation creates assignments.
 - [ADR-0015: Staged-first presentation media intake](ADR-0015-staged-first-presentation-media-intake.md) — browser intake durably stages before asynchronous analysis, and only explicit confirmation queues canonical promotion.
+- [ADR-0016: Durable presentation media Intake disposition](ADR-0016-durable-presentation-media-intake.md) — Central and Site publish uploads into durable Intake before an operator durably promotes or quarantines the same logical media identity.
 - [ADR-0016: Deployment-local structured operational logs](ADR-0016-deployment-local-operational-logs.md) — Central and Site independently retain sanitized, correlated diagnostics separate from audit history and container stdout.

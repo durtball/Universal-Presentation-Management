@@ -30,6 +30,7 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import OutboxPayload
 from upm_shared.media_storage_client import AsyncMediaStorageClient
 from upm_shared.presentation_media import (
+    SUPPORTED_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
     MatchCandidate,
     allocate_presentation_identifier,
@@ -75,21 +76,47 @@ class SiteMediaConfirmationBatch(BaseModel):
     items: list[dict[str, UUID]] = Field(min_length=1, max_length=500)
 
 
+class SiteMediaRejection(BaseModel):
+    reason: str | None = Field(default=None, max_length=2048)
+
+
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
+INTAKE_PROMOTE_JOB = "presentation_media.intake.promote"
+INTAKE_REJECT_JOB = "presentation_media.intake.reject"
+
+
+def intake_asset_kind(filename: str) -> AssetKind:
+    extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if f".{extension}" in SUPPORTED_PRESENTATION_EXTENSIONS:
+        return AssetKind.ORIGINAL
+    if extension in {"jpg", "jpeg", "png"}:
+        return AssetKind.IMAGE
+    if extension in {"mp4", "mov", "mkv", "webm"}:
+        return AssetKind.VIDEO
+    if extension in {"doc", "docx", "txt"}:
+        return AssetKind.DOCUMENT
+    return AssetKind.OTHER
 
 
 def enqueue_asset_reconciliation(session: Session, site_id: UUID, *, current_job_id=None):
-    existing = session.scalar(select(ProcessingJob).where(
-        ProcessingJob.site_id == site_id, ProcessingJob.job_type == ASSET_RECONCILIATION_JOB,
-        ProcessingJob.status.in_(["pending", "running", "retry_wait"]),
-        ProcessingJob.processing_job_id != current_job_id))
+    existing = session.scalar(
+        select(ProcessingJob).where(
+            ProcessingJob.site_id == site_id,
+            ProcessingJob.job_type == ASSET_RECONCILIATION_JOB,
+            ProcessingJob.status.in_(["pending", "running", "retry_wait"]),
+            ProcessingJob.processing_job_id != current_job_id,
+        )
+    )
     if existing is not None:
         return existing
     job = ProcessingJob(
-        site_id=site_id, job_type=ASSET_RECONCILIATION_JOB,
+        site_id=site_id,
+        job_type=ASSET_RECONCILIATION_JOB,
         payload={"schema_version": 1, "data": {"site_id": str(site_id)}},
-        idempotency_key=f"presentation-assets:{new_uuid7()}", required_capabilities=["cpu"],
-        next_attempt_at=utc_now() + timedelta(seconds=30))
+        idempotency_key=f"presentation-assets:{new_uuid7()}",
+        required_capabilities=["cpu"],
+        next_attempt_at=utc_now() + timedelta(seconds=30),
+    )
     session.add(job)
     return job
 
@@ -97,10 +124,13 @@ def enqueue_asset_reconciliation(session: Session, site_id: UUID, *, current_job
 def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
     """Repair only audit-confirmed media/version pairs; never infer from labels."""
     repaired = 0
-    audits = session.scalars(select(AuditRecord).where(
-        AuditRecord.site_id == site_id,
-        AuditRecord.action == "site.presentation_media.confirmed",
-        AuditRecord.target_type == "media_object"))
+    audits = session.scalars(
+        select(AuditRecord).where(
+            AuditRecord.site_id == site_id,
+            AuditRecord.action == "site.presentation_media.confirmed",
+            AuditRecord.target_type == "media_object",
+        )
+    )
     for audit in audits:
         context = audit.after_context or {}
         if not context.get("presentation_version_id") or not context.get("presentation_id"):
@@ -109,20 +139,35 @@ def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
             version_id = UUID(str(context["presentation_version_id"]))
         except ValueError:
             continue
-        media, version = session.get(MediaObject, audit.target_id), session.get(PresentationVersion, version_id)
-        if (media is None or media.deleted_at is not None
-                or media.availability != MediaAvailability.AVAILABLE
-                or not media.content_hash or media.size_bytes is None or version is None
-                or str(version.presentation_id) != str(context["presentation_id"])):
+        media, version = (
+            session.get(MediaObject, audit.target_id),
+            session.get(PresentationVersion, version_id),
+        )
+        if (
+            media is None
+            or media.deleted_at is not None
+            or media.availability != MediaAvailability.AVAILABLE
+            or not media.content_hash
+            or media.size_bytes is None
+            or version is None
+            or str(version.presentation_id) != str(context["presentation_id"])
+        ):
             continue
-        existing = session.scalar(select(PresentationAsset).where(
-            PresentationAsset.presentation_version_id == version_id,
-            PresentationAsset.kind == AssetKind.ORIGINAL))
+        existing = session.scalar(
+            select(PresentationAsset).where(
+                PresentationAsset.presentation_version_id == version_id,
+                PresentationAsset.kind == AssetKind.ORIGINAL,
+            )
+        )
         if existing is None:
-            session.add(PresentationAsset(presentation_version_id=version_id,
-                                          media_object_id=media.media_object_id,
-                                          original_filename=media.original_filename,
-                                          kind=AssetKind.ORIGINAL))
+            session.add(
+                PresentationAsset(
+                    presentation_version_id=version_id,
+                    media_object_id=media.media_object_id,
+                    original_filename=media.original_filename,
+                    kind=AssetKind.ORIGINAL,
+                )
+            )
             presentation = session.get(Presentation, version.presentation_id)
             if presentation is not None:
                 presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
@@ -131,8 +176,9 @@ def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
     return repaired
 
 
-def _candidate_rows(session: Session, event_id: UUID, search: str, limit: int,
-                    terms: list[str] | None = None) -> list[dict[str, object]]:
+def _candidate_rows(
+    session: Session, event_id: UUID, search: str, limit: int, terms: list[str] | None = None
+) -> list[dict[str, object]]:
     query = (
         select(Presentation, ProgramSession)
         .outerjoin(ProgramSession, ProgramSession.session_id == Presentation.session_id)
@@ -140,74 +186,126 @@ def _candidate_rows(session: Session, event_id: UUID, search: str, limit: int,
     )
     needles = terms or ([search.strip()] if search.strip() else [])
     if needles:
-        query = query.where(or_(*[
-            condition for needle in needles[:100] for condition in (
-                Presentation.presentation_identifier.ilike(f"%{needle}%"),
-                Presentation.external_presentation_id.ilike(f"%{needle}%"),
-                Presentation.title.ilike(f"%{needle}%"),
-                ProgramSession.session_code.ilike(f"%{needle}%"),
-                ProgramSession.title.ilike(f"%{needle}%"),
-                ProgramSession.location_name.ilike(f"%{needle}%"),
-                ProgramSession.session_id.in_(
-                    select(RoomAssignment.session_id)
-                    .join(Room, Room.room_id == RoomAssignment.room_id)
-                    .where(
-                        RoomAssignment.active.is_(True),
-                        Room.label.ilike(f"%{needle}%"),
+        query = query.where(
+            or_(
+                *[
+                    condition
+                    for needle in needles[:100]
+                    for condition in (
+                        Presentation.presentation_identifier.ilike(f"%{needle}%"),
+                        Presentation.external_presentation_id.ilike(f"%{needle}%"),
+                        Presentation.title.ilike(f"%{needle}%"),
+                        ProgramSession.session_code.ilike(f"%{needle}%"),
+                        ProgramSession.title.ilike(f"%{needle}%"),
+                        ProgramSession.location_name.ilike(f"%{needle}%"),
+                        ProgramSession.session_id.in_(
+                            select(RoomAssignment.session_id)
+                            .join(Room, Room.room_id == RoomAssignment.room_id)
+                            .where(
+                                RoomAssignment.active.is_(True),
+                                Room.label.ilike(f"%{needle}%"),
+                            )
+                        ),
+                        Presentation.presentation_id.in_(
+                            select(PresentationPresenter.presentation_id)
+                            .join(
+                                EventParticipation,
+                                EventParticipation.event_participation_id
+                                == PresentationPresenter.event_participation_id,
+                            )
+                            .join(
+                                PersonProjection,
+                                PersonProjection.person_id == EventParticipation.person_id,
+                            )
+                            .where(
+                                or_(
+                                    EventParticipation.display_name.ilike(f"%{needle}%"),
+                                    PersonProjection.given_name.ilike(f"%{needle}%"),
+                                    PersonProjection.family_name.ilike(f"%{needle}%"),
+                                )
+                            )
+                        ),
                     )
-                ),
-                Presentation.presentation_id.in_(
-                    select(PresentationPresenter.presentation_id)
-                    .join(EventParticipation, EventParticipation.event_participation_id
-                          == PresentationPresenter.event_participation_id)
-                    .join(PersonProjection, PersonProjection.person_id
-                          == EventParticipation.person_id)
-                    .where(or_(EventParticipation.display_name.ilike(f"%{needle}%"),
-                               PersonProjection.given_name.ilike(f"%{needle}%"),
-                               PersonProjection.family_name.ilike(f"%{needle}%")))
-                ),
-            )]))
-    rows = session.execute(query.order_by(Presentation.scheduled_at.asc().nulls_last(),
-                                           Presentation.presentation_identifier).limit(limit)).all()
+                ]
+            )
+        )
+    rows = session.execute(
+        query.order_by(
+            Presentation.scheduled_at.asc().nulls_last(), Presentation.presentation_identifier
+        ).limit(limit)
+    ).all()
     ids = [item.presentation_id for item, _ in rows]
-    presenter_rows = session.execute(
-        select(PresentationPresenter.presentation_id, EventParticipation.display_name,
-               PersonProjection.given_name, PersonProjection.family_name)
-        .join(EventParticipation, EventParticipation.event_participation_id == PresentationPresenter.event_participation_id)
-        .join(PersonProjection, PersonProjection.person_id == EventParticipation.person_id)
-        .where(PresentationPresenter.presentation_id.in_(ids), PresentationPresenter.active.is_(True))
-        .order_by(PresentationPresenter.primary_presenter.desc(), PresentationPresenter.presenter_order)
-    ).all() if ids else []
+    presenter_rows = (
+        session.execute(
+            select(
+                PresentationPresenter.presentation_id,
+                EventParticipation.display_name,
+                PersonProjection.given_name,
+                PersonProjection.family_name,
+            )
+            .join(
+                EventParticipation,
+                EventParticipation.event_participation_id
+                == PresentationPresenter.event_participation_id,
+            )
+            .join(PersonProjection, PersonProjection.person_id == EventParticipation.person_id)
+            .where(
+                PresentationPresenter.presentation_id.in_(ids),
+                PresentationPresenter.active.is_(True),
+            )
+            .order_by(
+                PresentationPresenter.primary_presenter.desc(),
+                PresentationPresenter.presenter_order,
+            )
+        ).all()
+        if ids
+        else []
+    )
     names: dict[UUID, list[str]] = {}
     primary_names: dict[UUID, tuple[str | None, str | None]] = {}
     for presentation_id, display, given, family in presenter_rows:
-        names.setdefault(presentation_id, []).append(display or " ".join(filter(None, [given, family])))
+        names.setdefault(presentation_id, []).append(
+            display or " ".join(filter(None, [given, family]))
+        )
         primary_names.setdefault(presentation_id, (given, family))
     session_ids = [program_session.session_id for _, program_session in rows if program_session]
-    room_names = dict(session.execute(
-        select(RoomAssignment.session_id, Room.label)
-        .join(Room, Room.room_id == RoomAssignment.room_id)
-        .where(
-            RoomAssignment.session_id.in_(session_ids),
-            RoomAssignment.active.is_(True),
+    room_names = (
+        dict(
+            session.execute(
+                select(RoomAssignment.session_id, Room.label)
+                .join(Room, Room.room_id == RoomAssignment.room_id)
+                .where(
+                    RoomAssignment.session_id.in_(session_ids),
+                    RoomAssignment.active.is_(True),
+                )
+            ).all()
         )
-    ).all()) if session_ids else {}
-    return [{
-        "presentation_id": item.presentation_id,
-        "presentation_identifier": item.presentation_identifier,
-        "external_presentation_id": item.external_presentation_id,
-        "title": item.title,
-        "presenters": names.get(item.presentation_id, []),
-        "presenter_given_name": primary_names.get(item.presentation_id, (None, None))[0],
-        "presenter_family_name": primary_names.get(item.presentation_id, (None, None))[1],
-        "session_id": program_session.session_id if program_session else None,
-        "session_code": program_session.session_code if program_session else None,
-        "session_title": program_session.title if program_session else None,
-        "session": program_session.title if program_session else None,
-        "starts_at": item.scheduled_at or (program_session.starts_at if program_session else None),
-        "room": (room_names.get(program_session.session_id) or program_session.location_name
-                 if program_session else None),
-    } for item, program_session in rows]
+        if session_ids
+        else {}
+    )
+    return [
+        {
+            "presentation_id": item.presentation_id,
+            "presentation_identifier": item.presentation_identifier,
+            "external_presentation_id": item.external_presentation_id,
+            "title": item.title,
+            "presenters": names.get(item.presentation_id, []),
+            "presenter_given_name": primary_names.get(item.presentation_id, (None, None))[0],
+            "presenter_family_name": primary_names.get(item.presentation_id, (None, None))[1],
+            "session_id": program_session.session_id if program_session else None,
+            "session_code": program_session.session_code if program_session else None,
+            "session_title": program_session.title if program_session else None,
+            "session": program_session.title if program_session else None,
+            "starts_at": item.scheduled_at
+            or (program_session.starts_at if program_session else None),
+            "room": (
+                room_names.get(program_session.session_id) or program_session.location_name
+                if program_session
+                else None
+            ),
+        }
+        for item, program_session in rows
+    ]
 
 
 def register_presentation_media_routes(
@@ -225,7 +323,9 @@ def register_presentation_media_routes(
     ) -> StreamingResponse:
         media = session.scalar(
             select(MediaObject)
-            .join(PresentationAsset, PresentationAsset.media_object_id == MediaObject.media_object_id)
+            .join(
+                PresentationAsset, PresentationAsset.media_object_id == MediaObject.media_object_id
+            )
             .where(
                 PresentationAsset.presentation_version_id == presentation_version_id,
                 PresentationAsset.kind == AssetKind.ORIGINAL,
@@ -238,7 +338,9 @@ def register_presentation_media_routes(
         config = settings()
         storage = AsyncMediaStorageClient(config.media_storage_url, config.media_storage_token)
         return StreamingResponse(
-            storage.stream_object(media.storage_target_id, media.object_key, 0, media.size_bytes or 0),
+            storage.stream_object(
+                media.storage_target_id, media.object_key, 0, media.size_bytes or 0
+            ),
             media_type=media.mime_type or "application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(media.original_filename)}",
@@ -365,61 +467,120 @@ def register_presentation_media_routes(
 
     @app.get("/api/v1/events/{event_id}/media/intake", tags=["media"])
     def intake_queue(
-        event_id: UUID, session: ReadSession,
+        event_id: UUID,
+        session: ReadSession,
         search: Annotated[str | None, Query(max_length=255)] = None,
+        disposition: Annotated[str, Query(pattern="^(intake|rejected)$")] = "intake",
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> dict[str, object]:
-        unassigned = ~select(PresentationAsset.presentation_asset_id).where(
-            PresentationAsset.media_object_id == MediaObject.media_object_id
-        ).exists()
-        conditions = [MediaObject.event_id == event_id, MediaObject.deleted_at.is_(None), unassigned]
+        unassigned = (
+            ~select(PresentationAsset.presentation_asset_id)
+            .where(PresentationAsset.media_object_id == MediaObject.media_object_id)
+            .exists()
+        )
+        conditions = [
+            MediaObject.event_id == event_id,
+            MediaObject.deleted_at.is_(None),
+            MediaObject.disposition == disposition,
+        ]
+        if disposition == "intake":
+            conditions.append(unassigned)
         if search:
             term = f"%{search.strip()}%"
-            conditions.append(or_(MediaObject.original_filename.ilike(term),
-                                  MediaObject.source_relative_path.ilike(term)))
-        total = session.scalar(select(func.count()).select_from(MediaObject).where(*conditions)) or 0
-        media = session.scalars(select(MediaObject).where(*conditions).order_by(
-            MediaObject.created_at.desc(), MediaObject.media_object_id.desc()
-        ).offset(offset).limit(limit)).all()
+            conditions.append(
+                or_(
+                    MediaObject.original_filename.ilike(term),
+                    MediaObject.source_relative_path.ilike(term),
+                )
+            )
+        total = (
+            session.scalar(select(func.count()).select_from(MediaObject).where(*conditions)) or 0
+        )
+        media = session.scalars(
+            select(MediaObject)
+            .where(*conditions)
+            .order_by(MediaObject.created_at.desc(), MediaObject.media_object_id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
         # Candidate discovery is bounded to tokens present in this page; no Event-wide ORM graph is loaded.
-        tokens = sorted({token.rsplit(".", 1)[0] for item in media for token in
-            item.original_filename.replace("_", " ").replace("-", " ").split()
-            if len(token) >= 3}, key=len, reverse=True)
-        candidates = _candidate_rows(session, event_id, "", min(200, max(25, limit * 4)),
-                                     terms=tokens)
-        match_candidates = [MatchCandidate(
-            UUID(str(item["presentation_id"])), str(item["presentation_identifier"]),
-            str(item["external_presentation_id"]) if item["external_presentation_id"] else None,
-            title=str(item["title"]),
-            presenter_family_name=(str(item["presenter_family_name"])
-                                   if item["presenter_family_name"] else None),
-            presenter_given_name=(str(item["presenter_given_name"])
-                                  if item["presenter_given_name"] else None),
-            session_title=str(item["session_title"]) if item["session_title"] else None,
-            session_external_id=str(item["session_code"]) if item["session_code"] else None,
-            room=str(item["room"]) if item["room"] else None,
-            starts_at=item["starts_at"],
-        ) for item in candidates]
+        tokens = sorted(
+            {
+                token.rsplit(".", 1)[0]
+                for item in media
+                for token in (item.source_relative_path or item.original_filename)
+                .replace("/", " ")
+                .replace("\\", " ")
+                .replace("_", " ")
+                .replace("-", " ")
+                .split()
+                if len(token) >= 3
+            },
+            key=len,
+            reverse=True,
+        )
+        candidates = _candidate_rows(
+            session, event_id, "", min(200, max(25, limit * 4)), terms=tokens
+        )
+        match_candidates = [
+            MatchCandidate(
+                UUID(str(item["presentation_id"])),
+                str(item["presentation_identifier"]),
+                str(item["external_presentation_id"]) if item["external_presentation_id"] else None,
+                title=str(item["title"]),
+                presenter_family_name=(
+                    str(item["presenter_family_name"]) if item["presenter_family_name"] else None
+                ),
+                presenter_given_name=(
+                    str(item["presenter_given_name"]) if item["presenter_given_name"] else None
+                ),
+                session_title=str(item["session_title"]) if item["session_title"] else None,
+                session_external_id=str(item["session_code"]) if item["session_code"] else None,
+                room=str(item["room"]) if item["room"] else None,
+                starts_at=item["starts_at"],
+            )
+            for item in candidates
+        ]
         candidate_by_id = {str(item["presentation_id"]): item for item in candidates}
         items = []
         for item in media:
-            match = match_presentation(item.source_relative_path or item.original_filename,
-                                       match_candidates)
-            suggestion = candidate_by_id.get(str(match.presentation_id)) if match.presentation_id else None
-            items.append({
-                "media_object_id": item.media_object_id, "filename": item.original_filename,
-                "source_relative_path": item.source_relative_path, "size_bytes": item.size_bytes,
-                "source": item.intake_origin, "received_at": item.created_at,
-                "availability": item.availability, "suggestion": suggestion,
-                "confidence": match.confidence, "match_state": match.state,
-                "match_reason": match.reason,
-            })
+            event_timezone = (
+                session.scalar(select(Event.timezone).where(Event.event_id == event_id)) or "UTC"
+            )
+            match = match_presentation(
+                item.source_relative_path or item.original_filename,
+                match_candidates,
+                event_timezone=event_timezone,
+            )
+            suggestion = (
+                candidate_by_id.get(str(match.presentation_id)) if match.presentation_id else None
+            )
+            items.append(
+                {
+                    "media_object_id": item.media_object_id,
+                    "filename": item.original_filename,
+                    "source_relative_path": item.source_relative_path,
+                    "size_bytes": item.size_bytes,
+                    "source": item.intake_origin,
+                    "received_at": item.created_at,
+                    "availability": item.availability,
+                    "suggestion": suggestion,
+                    "confidence": match.confidence,
+                    "match_state": match.state,
+                    "match_reason": match.reason,
+                    "disposition": item.disposition,
+                    "rejected_by": item.rejected_by,
+                    "rejected_at": item.rejected_at,
+                    "rejection_reason": item.rejection_reason,
+                }
+            )
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/v1/events/{event_id}/presentation-lookup", tags=["media"])
     def presentation_lookup(
-        event_id: UUID, session: ReadSession,
+        event_id: UUID,
+        session: ReadSession,
         search: Annotated[str, Query(min_length=1, max_length=255)],
         limit: Annotated[int, Query(ge=1, le=50)] = 25,
     ) -> dict[str, object]:
@@ -432,18 +593,30 @@ def register_presentation_media_routes(
             raise HTTPException(404, "media intake item not found")
         if presentation is None or presentation.event_id != media.event_id:
             raise HTTPException(422, "presentation is not in the media Event")
-        existing = session.scalar(select(PresentationAsset).where(
-            PresentationAsset.media_object_id == media_id,
-            PresentationAsset.kind == AssetKind.ORIGINAL))
+        kind = intake_asset_kind(media.original_filename)
+        existing = session.scalar(
+            select(PresentationAsset).where(
+                PresentationAsset.media_object_id == media_id, PresentationAsset.kind == kind
+            )
+        )
         if existing:
             version = session.get(PresentationVersion, existing.presentation_version_id)
-            return {"media_object_id": media_id, "presentation_id": version.presentation_id,
-                    "presentation_version_id": version.presentation_version_id,
-                    "version_number": version.version_number, "duplicate": True}
-        confirmation = session.scalar(select(AuditRecord).where(
-            AuditRecord.action == "site.presentation_media.confirmed",
-            AuditRecord.target_type == "media_object", AuditRecord.target_id == media_id)
-            .order_by(AuditRecord.occurred_at.desc()))
+            return {
+                "media_object_id": media_id,
+                "presentation_id": version.presentation_id,
+                "presentation_version_id": version.presentation_version_id,
+                "version_number": version.version_number,
+                "duplicate": True,
+            }
+        confirmation = session.scalar(
+            select(AuditRecord)
+            .where(
+                AuditRecord.action == "site.presentation_media.confirmed",
+                AuditRecord.target_type == "media_object",
+                AuditRecord.target_id == media_id,
+            )
+            .order_by(AuditRecord.occurred_at.desc())
+        )
         if confirmation is not None:
             version_value = (confirmation.after_context or {}).get("presentation_version_id")
             if version_value:
@@ -451,113 +624,250 @@ def register_presentation_media_routes(
                 if version is not None:
                     if version.presentation_id != presentation_id:
                         raise HTTPException(409, "media was confirmed to another presentation")
-                    session.add(PresentationAsset(
-                        presentation_version_id=version.presentation_version_id,
-                        media_object_id=media_id,
-                        original_filename=media.original_filename,
-                        kind=AssetKind.ORIGINAL))
+                    session.add(
+                        PresentationAsset(
+                            presentation_version_id=version.presentation_version_id,
+                            media_object_id=media_id,
+                            original_filename=media.original_filename,
+                            kind=kind,
+                        )
+                    )
                     session.flush()
-                    return {"media_object_id": media_id,
-                            "presentation_id": version.presentation_id,
-                            "presentation_version_id": version.presentation_version_id,
-                            "version_number": version.version_number, "duplicate": True}
-        session.execute(select(Presentation.presentation_id).where(
-            Presentation.presentation_id == presentation_id).with_for_update())
-        number = (session.scalar(select(func.max(PresentationVersion.version_number)).where(
-            PresentationVersion.presentation_id == presentation_id)) or 0) + 1
-        version = PresentationVersion(presentation_version_id=new_uuid7(),
-                                      presentation_id=presentation_id,
-                                      version_number=number, sync_state=SyncState.PENDING)
-        session.add(version)
-        session.flush()
-        program_session = session.get(ProgramSession, presentation.session_id) if presentation.session_id else None
+                    return {
+                        "media_object_id": media_id,
+                        "presentation_id": version.presentation_id,
+                        "presentation_version_id": version.presentation_version_id,
+                        "version_number": version.version_number,
+                        "duplicate": True,
+                    }
+        session.execute(
+            select(Presentation.presentation_id)
+            .where(Presentation.presentation_id == presentation_id)
+            .with_for_update()
+        )
+        latest = session.scalar(
+            select(PresentationVersion)
+            .where(PresentationVersion.presentation_id == presentation_id)
+            .order_by(PresentationVersion.version_number.desc())
+            .limit(1)
+        )
+        if kind is not AssetKind.ORIGINAL and latest is not None:
+            version = latest
+            number = latest.version_number
+            version_created = False
+        else:
+            number = (latest.version_number if latest else 0) + 1
+            version = PresentationVersion(
+                presentation_version_id=new_uuid7(),
+                presentation_id=presentation_id,
+                version_number=number,
+                sync_state=SyncState.PENDING,
+            )
+            session.add(version)
+            session.flush()
+            version_created = True
+        program_session = (
+            session.get(ProgramSession, presentation.session_id)
+            if presentation.session_id
+            else None
+        )
         presenter = session.execute(
             select(PersonProjection.family_name, PersonProjection.given_name)
             .join(EventParticipation, EventParticipation.person_id == PersonProjection.person_id)
-            .join(PresentationPresenter, PresentationPresenter.event_participation_id == EventParticipation.event_participation_id)
-            .where(PresentationPresenter.presentation_id == presentation_id,
-                   PresentationPresenter.active.is_(True)).limit(1)
+            .join(
+                PresentationPresenter,
+                PresentationPresenter.event_participation_id
+                == EventParticipation.event_participation_id,
+            )
+            .where(
+                PresentationPresenter.presentation_id == presentation_id,
+                PresentationPresenter.active.is_(True),
+            )
+            .limit(1)
         ).one_or_none()
         try:
-            media.canonical_filename = canonical_presentation_filename(CanonicalPresentationMetadata(
-                presentation_identifier=presentation.presentation_identifier,
-                event_timezone=session.get(Event, presentation.event_id).timezone,
-                starts_at=presentation.scheduled_at or (program_session.starts_at if program_session else None),
-                room_label=program_session.location_name if program_session else None,
-                presenter_family_name=presenter[0] if presenter else None,
-                presenter_given_name=presenter[1] if presenter else None,
-                title=presentation.title, version_number=number,
-                original_filename=media.original_filename,
-            ))
-        except ValueError as error:
-            raise HTTPException(422, str(error)) from error
+            if kind is not AssetKind.ORIGINAL:
+                raise ValueError
+            media.canonical_filename = canonical_presentation_filename(
+                CanonicalPresentationMetadata(
+                    presentation_identifier=presentation.presentation_identifier,
+                    event_timezone=session.get(Event, presentation.event_id).timezone,
+                    starts_at=presentation.scheduled_at
+                    or (program_session.starts_at if program_session else None),
+                    room_label=program_session.location_name if program_session else None,
+                    presenter_family_name=presenter[0] if presenter else None,
+                    presenter_given_name=presenter[1] if presenter else None,
+                    title=presentation.title,
+                    version_number=number,
+                    original_filename=media.original_filename,
+                )
+            )
+        except ValueError:
+            media.canonical_filename = media.original_filename
         media.category = MediaCategory.PRESENTATION_VERSION
-        session.add(PresentationAsset(presentation_version_id=version.presentation_version_id,
-                                      media_object_id=media_id,
-                                      original_filename=media.original_filename,
-                                      kind=AssetKind.ORIGINAL))
+        session.add(
+            PresentationAsset(
+                presentation_version_id=version.presentation_version_id,
+                media_object_id=media_id,
+                original_filename=media.original_filename,
+                kind=kind,
+            )
+        )
+        media.disposition = "intake"
+        SiteQueue(session).enqueue_processing(
+            site_id=media.site_id,
+            media_object_id=media_id,
+            job_type=INTAKE_PROMOTE_JOB,
+            payload={"data": {"media_object_id": str(media_id)}},
+            idempotency_key=f"intake-promote:{media_id}",
+            required_capabilities=["cpu"],
+            max_attempts=5,
+        )
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         presentation.sync_state = SyncState.PENDING
-        SiteQueue(session).enqueue_outbox(
-            event_type="site.presentation_version.created",
-            aggregate_type="presentation_version", aggregate_id=version.presentation_version_id,
-            site_id=media.site_id, protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-            source_sequence=next_sequence(session),
-            idempotency_key=f"presentation-version:{version.presentation_version_id}",
-            payload=OutboxPayload(source_system=SourceSystem.SITE, data={
-                "presentation_version_id": str(version.presentation_version_id),
-                "presentation_id": str(presentation_id), "version_number": number,
-                "created_at": version.created_at.isoformat(),
-            }),
-        )
+        if version_created:
+            SiteQueue(session).enqueue_outbox(
+                event_type="site.presentation_version.created",
+                aggregate_type="presentation_version",
+                aggregate_id=version.presentation_version_id,
+                site_id=media.site_id,
+                protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+                source_sequence=next_sequence(session),
+                idempotency_key=f"presentation-version:{version.presentation_version_id}",
+                payload=OutboxPayload(
+                    source_system=SourceSystem.SITE,
+                    data={
+                        "presentation_version_id": str(version.presentation_version_id),
+                        "presentation_id": str(presentation_id),
+                        "version_number": number,
+                        "created_at": version.created_at.isoformat(),
+                    },
+                ),
+            )
         if media.content_hash and media.size_bytes is not None:
             replication_id = new_uuid7()
-            session.add(MediaReplicationSession(
-                replication_session_id=replication_id, site_id=media.site_id,
-                event_id=presentation.event_id, presentation_id=presentation_id,
-                presentation_version_id=version.presentation_version_id,
-                media_object_id=media_id, expected_size=media.size_bytes,
-                sha256=media.content_hash, original_filename=media.original_filename,
-                canonical_filename=media.canonical_filename, media_type=media.mime_type,
-                state=MediaReplicationState.QUEUED,
-            ))
+            session.add(
+                MediaReplicationSession(
+                    replication_session_id=replication_id,
+                    site_id=media.site_id,
+                    event_id=presentation.event_id,
+                    presentation_id=presentation_id,
+                    presentation_version_id=version.presentation_version_id,
+                    media_object_id=media_id,
+                    expected_size=media.size_bytes,
+                    sha256=media.content_hash,
+                    original_filename=media.original_filename,
+                    canonical_filename=media.canonical_filename,
+                    media_type=media.mime_type,
+                    state=MediaReplicationState.QUEUED,
+                )
+            )
             SiteQueue(session).enqueue_transfer(
-                transfer_job_id=replication_id, site_id=media.site_id, media_object_id=media_id,
+                transfer_job_id=replication_id,
+                site_id=media.site_id,
+                media_object_id=media_id,
                 transfer_type="presentation_media.central_push",
-                payload={"schema_version": 1, "data": {"replication_session_id": str(replication_id)}},
+                payload={
+                    "schema_version": 1,
+                    "data": {"replication_session_id": str(replication_id)},
+                },
                 idempotency_key=f"media.replicate:{media_id}:{version.presentation_version_id}",
                 required_capabilities=["transfer"],
             )
-        session.add(AuditRecord(
-            actor_id="site-operator", action="site.presentation_media.confirmed",
-            target_type="media_object", target_id=media_id, site_id=media.site_id,
-            event_id=media.event_id, after_context={
-                "presentation_id": str(presentation_id),
-                "presentation_version_id": str(version.presentation_version_id),
-                "version_number": number,
-            }))
-        return {"media_object_id": media_id, "presentation_id": presentation_id,
-                "presentation_version_id": version.presentation_version_id,
-                "version_number": number, "duplicate": False}
+        session.add(
+            AuditRecord(
+                actor_id="site-operator",
+                action="site.presentation_media.confirmed",
+                target_type="media_object",
+                target_id=media_id,
+                site_id=media.site_id,
+                event_id=media.event_id,
+                after_context={
+                    "presentation_id": str(presentation_id),
+                    "presentation_version_id": str(version.presentation_version_id),
+                    "version_number": number,
+                },
+            )
+        )
+        return {
+            "media_object_id": media_id,
+            "presentation_id": presentation_id,
+            "presentation_version_id": version.presentation_version_id,
+            "version_number": number,
+            "duplicate": False,
+        }
 
     @app.post("/api/v1/media/{media_id}/confirmation", tags=["media"])
-    def confirm_media(media_id: UUID, payload: SiteMediaConfirmation,
-                      session: WriteSession) -> dict[str, object]:
+    def confirm_media(
+        media_id: UUID, payload: SiteMediaConfirmation, session: WriteSession
+    ) -> dict[str, object]:
         return confirm_one(session, media_id, payload.presentation_id)
 
     @app.post("/api/v1/media/confirmations", tags=["media"])
-    def confirm_media_batch(payload: SiteMediaConfirmationBatch,
-                            session: WriteSession) -> dict[str, object]:
+    def confirm_media_batch(
+        payload: SiteMediaConfirmationBatch, session: WriteSession
+    ) -> dict[str, object]:
         results = []
         for requested in payload.items:
             try:
                 with session.begin_nested():
-                    results.append({"status": "confirmed", **confirm_one(
-                        session, requested["media_object_id"], requested["presentation_id"])})
+                    results.append(
+                        {
+                            "status": "confirmed",
+                            **confirm_one(
+                                session, requested["media_object_id"], requested["presentation_id"]
+                            ),
+                        }
+                    )
             except HTTPException as error:
-                results.append({"media_object_id": requested["media_object_id"],
-                                "status": "failed", "message": str(error.detail)})
+                results.append(
+                    {
+                        "media_object_id": requested["media_object_id"],
+                        "status": "failed",
+                        "message": str(error.detail),
+                    }
+                )
         return {"results": results}
+
+    @app.post("/api/v1/media/{media_id}/reject", tags=["media"])
+    def reject_media(
+        media_id: UUID, payload: SiteMediaRejection, session: WriteSession
+    ) -> dict[str, object]:
+        media = session.get(MediaObject, media_id, with_for_update=True)
+        if media is None or media.deleted_at is not None:
+            raise HTTPException(404, "media intake item not found")
+        assigned = session.scalar(
+            select(PresentationAsset.presentation_asset_id).where(
+                PresentationAsset.media_object_id == media_id
+            )
+        )
+        if assigned:
+            raise HTTPException(409, "confirmed media cannot be rejected")
+        if media.disposition != "rejected":
+            media.rejected_by = "site-operator"
+            media.rejected_at = utc_now()
+            media.rejection_reason = payload.reason
+            session.add(
+                AuditRecord(
+                    actor_id="site-operator",
+                    action="site.presentation_media.rejected",
+                    target_type="media_object",
+                    target_id=media_id,
+                    site_id=media.site_id,
+                    event_id=media.event_id,
+                    after_context={"reason": payload.reason},
+                )
+            )
+            SiteQueue(session).enqueue_processing(
+                site_id=media.site_id,
+                media_object_id=media_id,
+                job_type=INTAKE_REJECT_JOB,
+                payload={"data": {"media_object_id": str(media_id)}},
+                idempotency_key=f"intake-reject:{media_id}",
+                required_capabilities=["cpu"],
+                max_attempts=5,
+            )
+        return {"media_object_id": media_id, "status": "queued"}
 
     @app.get("/api/v1/events/{event_id}/media", tags=["media"])
     def event_media(
@@ -585,7 +895,9 @@ def register_presentation_media_routes(
                 Presentation.scheduled_at.asc().nulls_last(),
                 Presentation.title,
                 Presentation.presentation_id,
-            ).offset(offset).limit(limit)
+            )
+            .offset(offset)
+            .limit(limit)
         ).all()
         rows = []
         for item in presentations:
@@ -664,8 +976,12 @@ def register_presentation_media_routes(
             )
         return {
             "summary": {
-                "expected": session.scalar(select(func.count()).select_from(Presentation).where(
-                    Presentation.event_id == event_id, Presentation.active.is_(True))) or 0,
+                "expected": session.scalar(
+                    select(func.count())
+                    .select_from(Presentation)
+                    .where(Presentation.event_id == event_id, Presentation.active.is_(True))
+                )
+                or 0,
                 "missing": sum(row["media_state"] == "missing" for row in rows),
                 "ready": sum(row["media_state"] == "available" for row in rows),
                 "sync_pending": sum(row["sync_state"] == SyncState.PENDING for row in rows),
@@ -675,7 +991,8 @@ def register_presentation_media_routes(
 
     @app.get("/api/v1/events/{event_id}/presentations/operations", tags=["media"])
     def presentation_operations(
-        event_id: UUID, session: ReadSession,
+        event_id: UUID,
+        session: ReadSession,
         search: Annotated[str | None, Query(max_length=255)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
@@ -683,59 +1000,136 @@ def register_presentation_media_routes(
         conditions = [Presentation.event_id == event_id, Presentation.active.is_(True)]
         if search:
             term = f"%{search.strip()}%"
-            conditions.append(or_(Presentation.title.ilike(term),
-                                  Presentation.presentation_identifier.ilike(term),
-                                  Presentation.external_presentation_id.ilike(term)))
-        total = session.scalar(select(func.count()).select_from(Presentation).where(*conditions)) or 0
-        presentations = session.scalars(select(Presentation).where(*conditions).order_by(
-            Presentation.scheduled_at.asc().nulls_last(), Presentation.title,
-            Presentation.presentation_id).offset(offset).limit(limit)).all()
+            conditions.append(
+                or_(
+                    Presentation.title.ilike(term),
+                    Presentation.presentation_identifier.ilike(term),
+                    Presentation.external_presentation_id.ilike(term),
+                )
+            )
+        total = (
+            session.scalar(select(func.count()).select_from(Presentation).where(*conditions)) or 0
+        )
+        presentations = session.scalars(
+            select(Presentation)
+            .where(*conditions)
+            .order_by(
+                Presentation.scheduled_at.asc().nulls_last(),
+                Presentation.title,
+                Presentation.presentation_id,
+            )
+            .offset(offset)
+            .limit(limit)
+        ).all()
         ids = [item.presentation_id for item in presentations]
-        sessions = {item.session_id: item for item in session.scalars(
-            select(ProgramSession).where(ProgramSession.session_id.in_(
-                [item.session_id for item in presentations if item.session_id])))}
-        presenter_rows = session.execute(
-            select(PresentationPresenter.presentation_id, EventParticipation.display_name,
-                   PersonProjection.given_name, PersonProjection.family_name)
-            .join(EventParticipation, EventParticipation.event_participation_id
-                  == PresentationPresenter.event_participation_id)
-            .join(PersonProjection, PersonProjection.person_id == EventParticipation.person_id)
-            .where(PresentationPresenter.presentation_id.in_(ids),
-                   PresentationPresenter.active.is_(True))
-            .order_by(PresentationPresenter.primary_presenter.desc(),
-                      PresentationPresenter.presenter_order)).all() if ids else []
+        sessions = {
+            item.session_id: item
+            for item in session.scalars(
+                select(ProgramSession).where(
+                    ProgramSession.session_id.in_(
+                        [item.session_id for item in presentations if item.session_id]
+                    )
+                )
+            )
+        }
+        presenter_rows = (
+            session.execute(
+                select(
+                    PresentationPresenter.presentation_id,
+                    EventParticipation.display_name,
+                    PersonProjection.given_name,
+                    PersonProjection.family_name,
+                )
+                .join(
+                    EventParticipation,
+                    EventParticipation.event_participation_id
+                    == PresentationPresenter.event_participation_id,
+                )
+                .join(PersonProjection, PersonProjection.person_id == EventParticipation.person_id)
+                .where(
+                    PresentationPresenter.presentation_id.in_(ids),
+                    PresentationPresenter.active.is_(True),
+                )
+                .order_by(
+                    PresentationPresenter.primary_presenter.desc(),
+                    PresentationPresenter.presenter_order,
+                )
+            ).all()
+            if ids
+            else []
+        )
         presenters: dict[UUID, list[str]] = {}
         for presentation_id, display, given, family in presenter_rows:
             presenters.setdefault(presentation_id, []).append(
-                display or " ".join(filter(None, [given, family])))
-        versions = session.scalars(select(PresentationVersion).where(
-            PresentationVersion.presentation_id.in_(ids)).distinct(
-                PresentationVersion.presentation_id).order_by(
-                    PresentationVersion.presentation_id,
-                    PresentationVersion.version_number.desc())).all() if ids else []
+                display or " ".join(filter(None, [given, family]))
+            )
+        versions = (
+            session.scalars(
+                select(PresentationVersion)
+                .where(PresentationVersion.presentation_id.in_(ids))
+                .distinct(PresentationVersion.presentation_id)
+                .order_by(
+                    PresentationVersion.presentation_id, PresentationVersion.version_number.desc()
+                )
+            ).all()
+            if ids
+            else []
+        )
         version_by_presentation = {item.presentation_id: item for item in versions}
         version_ids = [item.presentation_version_id for item in versions]
-        assets = session.scalars(select(PresentationAsset).where(
-            PresentationAsset.presentation_version_id.in_(version_ids),
-            PresentationAsset.kind == AssetKind.ORIGINAL)).all() if version_ids else []
+        assets = (
+            session.scalars(
+                select(PresentationAsset).where(
+                    PresentationAsset.presentation_version_id.in_(version_ids),
+                    PresentationAsset.kind == AssetKind.ORIGINAL,
+                )
+            ).all()
+            if version_ids
+            else []
+        )
         asset_by_version = {item.presentation_version_id: item for item in assets}
         media_ids = [item.media_object_id for item in assets]
-        media = {item.media_object_id: item for item in session.scalars(select(MediaObject).where(
-            MediaObject.media_object_id.in_(media_ids)))} if media_ids else {}
-        transfers = session.scalars(select(TransferJob).where(
-            TransferJob.media_object_id.in_(media_ids)).distinct(TransferJob.media_object_id)
-            .order_by(TransferJob.media_object_id, TransferJob.created_at.desc())).all() if media_ids else []
+        media = (
+            {
+                item.media_object_id: item
+                for item in session.scalars(
+                    select(MediaObject).where(MediaObject.media_object_id.in_(media_ids))
+                )
+            }
+            if media_ids
+            else {}
+        )
+        transfers = (
+            session.scalars(
+                select(TransferJob)
+                .where(TransferJob.media_object_id.in_(media_ids))
+                .distinct(TransferJob.media_object_id)
+                .order_by(TransferJob.media_object_id, TransferJob.created_at.desc())
+            ).all()
+            if media_ids
+            else []
+        )
         transfer_by_media = {item.media_object_id: item for item in transfers}
-        room_rows = session.execute(select(RoomAssignment.session_id, Room.label).join(
-            Room, Room.room_id == RoomAssignment.room_id).where(
-                RoomAssignment.session_id.in_(list(sessions)), RoomAssignment.active.is_(True))).all() if sessions else []
+        room_rows = (
+            session.execute(
+                select(RoomAssignment.session_id, Room.label)
+                .join(Room, Room.room_id == RoomAssignment.room_id)
+                .where(
+                    RoomAssignment.session_id.in_(list(sessions)), RoomAssignment.active.is_(True)
+                )
+            ).all()
+            if sessions
+            else []
+        )
         rooms = dict(room_rows)
         items = []
         for item in presentations:
             program_session = sessions.get(item.session_id)
             associated_sessions = session.scalars(
                 select(ProgramSession)
-                .join(PresentationSession, PresentationSession.session_id == ProgramSession.session_id)
+                .join(
+                    PresentationSession, PresentationSession.session_id == ProgramSession.session_id
+                )
                 .where(
                     PresentationSession.presentation_id == item.presentation_id,
                     PresentationSession.active.is_(True),
@@ -749,15 +1143,20 @@ def register_presentation_media_routes(
             version = version_by_presentation.get(item.presentation_id)
             asset = asset_by_version.get(version.presentation_version_id) if version else None
             current_media = media.get(asset.media_object_id) if asset else None
-            confirmation = session.scalar(
-                select(AuditRecord)
-                .where(
-                    AuditRecord.action == "site.presentation_media.confirmed",
-                    AuditRecord.target_id == (current_media.media_object_id if current_media else None),
+            confirmation = (
+                session.scalar(
+                    select(AuditRecord)
+                    .where(
+                        AuditRecord.action == "site.presentation_media.confirmed",
+                        AuditRecord.target_id
+                        == (current_media.media_object_id if current_media else None),
+                    )
+                    .order_by(AuditRecord.occurred_at.desc())
+                    .limit(1)
                 )
-                .order_by(AuditRecord.occurred_at.desc())
-                .limit(1)
-            ) if current_media else None
+                if current_media
+                else None
+            )
             version_history = []
             for historical_version in session.scalars(
                 select(PresentationVersion)
@@ -766,65 +1165,92 @@ def register_presentation_media_routes(
             ):
                 historical_media = session.scalar(
                     select(MediaObject)
-                    .join(PresentationAsset, PresentationAsset.media_object_id == MediaObject.media_object_id)
+                    .join(
+                        PresentationAsset,
+                        PresentationAsset.media_object_id == MediaObject.media_object_id,
+                    )
                     .where(
-                        PresentationAsset.presentation_version_id == historical_version.presentation_version_id,
+                        PresentationAsset.presentation_version_id
+                        == historical_version.presentation_version_id,
                         PresentationAsset.kind == AssetKind.ORIGINAL,
                     )
                 )
-                version_history.append({
-                    "presentation_version_id": historical_version.presentation_version_id,
-                    "version_number": historical_version.version_number,
-                    "filename": historical_media.original_filename if historical_media else None,
-                    "size_bytes": historical_media.size_bytes if historical_media else None,
-                    "received_at": historical_media.created_at if historical_media else None,
-                    "availability": historical_media.availability if historical_media else "missing",
-                })
-            transfer = transfer_by_media.get(current_media.media_object_id) if current_media else None
+                version_history.append(
+                    {
+                        "presentation_version_id": historical_version.presentation_version_id,
+                        "version_number": historical_version.version_number,
+                        "filename": historical_media.original_filename
+                        if historical_media
+                        else None,
+                        "size_bytes": historical_media.size_bytes if historical_media else None,
+                        "received_at": historical_media.created_at if historical_media else None,
+                        "availability": historical_media.availability
+                        if historical_media
+                        else "missing",
+                    }
+                )
+            transfer = (
+                transfer_by_media.get(current_media.media_object_id) if current_media else None
+            )
             delivery = "not_delivered"
             if transfer and transfer.status is JobStatus.SUCCEEDED:
                 delivery = "current"
             elif version and version.version_number > 1:
                 delivery = "outdated"
-            readiness = "missing" if current_media is None else (
-                "ready" if current_media.availability is MediaAvailability.AVAILABLE else
-                str(current_media.availability))
-            items.append({
-                "presentation_id": item.presentation_id,
-                "presentation_identifier": item.presentation_identifier,
-                "title": item.title, "presenters": presenters.get(item.presentation_id, []),
-                "session": program_session.title if program_session else None,
-                "session_code": program_session.session_code if program_session else None,
-                "starts_at": item.scheduled_at or (program_session.starts_at if program_session else None),
-                "room": rooms.get(item.session_id) or (program_session.location_name if program_session else None),
-                "current_version": version.version_number if version else None,
-                "readiness": readiness, "delivery_state": delivery,
-                "source": current_media.category if current_media else None,
-                "received_at": current_media.created_at if current_media else None,
-                "confirmed_at": confirmation.occurred_at if confirmation else None,
-                "confirmed_by": confirmation.actor_id if confirmation else None,
-                "updated_at": max(item.updated_at, current_media.updated_at) if current_media else item.updated_at,
-                "filename": current_media.original_filename if current_media else None,
-                "size_bytes": current_media.size_bytes if current_media else None,
-                "mime_type": current_media.mime_type if current_media else None,
-                "sha256": current_media.content_hash if current_media else None,
-                "download_url": (
-                    f"/api/v1/presentation-versions/{version.presentation_version_id}/download"
-                    if current_media and current_media.availability is MediaAvailability.AVAILABLE
-                    else None
-                ),
-                "sessions": [
-                    {
-                        "session_id": value.session_id,
-                        "session_code": value.session_code,
-                        "title": value.title,
-                        "starts_at": value.starts_at,
-                        "room": rooms.get(value.session_id) or value.location_name,
-                    }
-                    for value in associated_sessions
-                ],
-                "version_history": version_history,
-            })
+            readiness = (
+                "missing"
+                if current_media is None
+                else (
+                    "ready"
+                    if current_media.availability is MediaAvailability.AVAILABLE
+                    else str(current_media.availability)
+                )
+            )
+            items.append(
+                {
+                    "presentation_id": item.presentation_id,
+                    "presentation_identifier": item.presentation_identifier,
+                    "title": item.title,
+                    "presenters": presenters.get(item.presentation_id, []),
+                    "session": program_session.title if program_session else None,
+                    "session_code": program_session.session_code if program_session else None,
+                    "starts_at": item.scheduled_at
+                    or (program_session.starts_at if program_session else None),
+                    "room": rooms.get(item.session_id)
+                    or (program_session.location_name if program_session else None),
+                    "current_version": version.version_number if version else None,
+                    "readiness": readiness,
+                    "delivery_state": delivery,
+                    "source": current_media.category if current_media else None,
+                    "received_at": current_media.created_at if current_media else None,
+                    "confirmed_at": confirmation.occurred_at if confirmation else None,
+                    "confirmed_by": confirmation.actor_id if confirmation else None,
+                    "updated_at": max(item.updated_at, current_media.updated_at)
+                    if current_media
+                    else item.updated_at,
+                    "filename": current_media.original_filename if current_media else None,
+                    "size_bytes": current_media.size_bytes if current_media else None,
+                    "mime_type": current_media.mime_type if current_media else None,
+                    "sha256": current_media.content_hash if current_media else None,
+                    "download_url": (
+                        f"/api/v1/presentation-versions/{version.presentation_version_id}/download"
+                        if current_media
+                        and current_media.availability is MediaAvailability.AVAILABLE
+                        else None
+                    ),
+                    "sessions": [
+                        {
+                            "session_id": value.session_id,
+                            "session_code": value.session_code,
+                            "title": value.title,
+                            "starts_at": value.starts_at,
+                            "room": rooms.get(value.session_id) or value.location_name,
+                        }
+                        for value in associated_sessions
+                    ],
+                    "version_history": version_history,
+                }
+            )
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/v1/events/{event_id}/media/match", tags=["media"])

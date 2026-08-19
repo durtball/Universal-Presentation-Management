@@ -30,6 +30,7 @@ from upm_site.media.transfer import (
 from upm_site.operational_logs import prune_logs, record_log
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.models import (
+    MediaObject,
     MediaReplicationSession,
     MediaTransferSession,
     ProcessingJob,
@@ -38,6 +39,8 @@ from upm_site.persistence.models import (
 from upm_site.persistence.queue import SiteQueue
 from upm_site.presentation_media_api import (
     ASSET_RECONCILIATION_JOB,
+    INTAKE_PROMOTE_JOB,
+    INTAKE_REJECT_JOB,
     backfill_confirmed_original_assets,
     enqueue_asset_reconciliation,
 )
@@ -193,6 +196,30 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             session, work.site_id, current_job_id=work.processing_job_id
                         )
                         log("presentation_assets_reconciled", repaired=repaired)
+                    elif kind == "processing" and work.job_type in {
+                        INTAKE_PROMOTE_JOB,
+                        INTAKE_REJECT_JOB,
+                    }:
+                        media = session.get(
+                            MediaObject,
+                            UUID(work.payload["data"]["media_object_id"]),
+                            with_for_update=True,
+                        )
+                        if media is None or not media.content_hash:
+                            raise RuntimeError("Intake media is missing")
+                        if work.job_type == INTAKE_PROMOTE_JOB:
+                            result = storage_client.promote_intake(
+                                media.storage_target_id, media.object_key, media.content_hash
+                            )
+                            media.disposition = "authoritative"
+                        else:
+                            result = storage_client.reject_intake(
+                                media.storage_target_id, media.object_key, media.content_hash
+                            )
+                            media.disposition = "rejected"
+                            media.availability = "quarantined"
+                        media.storage_target_id = UUID(result["storage_target_id"])
+                        media.object_key = result["storage_key"]
                     elif kind == "processing" and work.job_type == SMB_SCAN_JOB:
                         try:
                             reconcile_smb(

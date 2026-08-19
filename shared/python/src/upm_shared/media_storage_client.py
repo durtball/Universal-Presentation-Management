@@ -129,6 +129,22 @@ class MediaStorageClient:
             {"staging_target_id": str(target_id), "staging_key": key, "sha256": sha256},
         )
 
+    def disposition(self, action: str, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return self.request_with_json(
+            "POST",
+            f"/api/v1/storage/intake/{action}",
+            {"source_target_id": str(target_id), "source_key": key, "sha256": sha256},
+        )
+
+    def publish_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return self.disposition("publish", target_id, key, sha256)
+
+    def promote_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return self.disposition("promote", target_id, key, sha256)
+
+    def reject_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return self.disposition("reject", target_id, key, sha256)
+
     def release_staging(self, target_id: UUID | str, key: str) -> None:
         self.request("DELETE", f"/api/v1/storage/staging/{target_id}/{key}")
 
@@ -192,6 +208,22 @@ class AsyncMediaStorageClient:
             "/api/v1/storage/objects/commit",
             json={"staging_target_id": str(target_id), "staging_key": key, "sha256": sha256},
         )
+
+    async def disposition(self, action: str, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return await self.request(
+            "POST",
+            f"/api/v1/storage/intake/{action}",
+            json={"source_target_id": str(target_id), "source_key": key, "sha256": sha256},
+        )
+
+    async def publish_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return await self.disposition("publish", target_id, key, sha256)
+
+    async def promote_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return await self.disposition("promote", target_id, key, sha256)
+
+    async def reject_intake(self, target_id: UUID | str, key: str, sha256: str) -> dict:
+        return await self.disposition("reject", target_id, key, sha256)
 
     async def append_staging(
         self, target_id: UUID | str, key: str, offset: int, chunks: AsyncIterator[bytes]

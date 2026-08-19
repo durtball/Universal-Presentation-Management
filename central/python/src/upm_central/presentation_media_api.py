@@ -25,6 +25,7 @@ from upm_central.media_replication import (
     finalize_replication_reference,
 )
 from upm_central.persistence.models import (
+    AuditRecord,
     Event,
     EventDeployment,
     EventParticipation,
@@ -89,6 +90,10 @@ class MatchConfirmationBatch(BaseModel):
 class MediaBatchCreate(BaseModel):
     selected_count: int = Field(ge=1, le=100000)
     skipped_items: list[dict[str, object]] = Field(default_factory=list, max_length=100000)
+
+
+class MediaRejection(BaseModel):
+    reason: str | None = Field(default=None, max_length=2048)
 
 
 def _rescan_progress(
@@ -264,6 +269,11 @@ def _view(item: PresentationMediaImport, session: Session | None = None) -> dict
         "suggested_candidate": suggested_candidate,
         "confirmed_by": item.confirmed_by,
         "confirmed_at": item.confirmed_at,
+        "rejected_by": item.rejected_by,
+        "rejected_at": item.rejected_at,
+        "rejection_reason": item.rejection_reason,
+        "intake_storage_key": item.intake_storage_key,
+        "rejected_storage_key": item.rejected_storage_key,
         "import_state": item.import_state,
         "sync_state": item.sync_state,
         "transfer_job_id": item.transfer_job_id,
@@ -510,6 +520,7 @@ def register_presentation_media_routes(
             query = query.where(
                 or_(
                     PresentationMediaImport.original_filename.ilike(term),
+                    PresentationMediaImport.source_relative_path.ilike(term),
                     PresentationMediaImport.canonical_filename.ilike(term),
                     PresentationMediaImport.presentation_identifier.ilike(term),
                     PresentationMediaImport.external_presentation_id.ilike(term),
@@ -537,6 +548,7 @@ def register_presentation_media_routes(
                     for item in imports
                 ),
                 "failed": sum(item.import_state == MediaImportState.FAILED for item in imports),
+                "rejected": sum(item.import_state == MediaImportState.REJECTED for item in imports),
             },
             "imports": [_view(item, session) for item in imports],
         }
@@ -787,6 +799,43 @@ def register_presentation_media_routes(
         actor = getattr(request.state, "admin_actor", "central-admin")
         staging_service().queue_promotion(session, item, presentation_id, actor=actor)
         return {**_view(item, session), "confirmation_state": "queued"}
+
+    @app.post(
+        "/api/v1/admin/media-imports/{media_import_id}/reject",
+        dependencies=admin,
+        tags=["media"],
+    )
+    def reject(
+        media_import_id: UUID, body: MediaRejection, request: Request, session: DbSession
+    ) -> dict[str, object]:
+        item = session.get(PresentationMediaImport, media_import_id, with_for_update=True)
+        if item is None:
+            raise HTTPException(404, "media import not found")
+        if item.match_state is MediaMatchState.CONFIRMED or item.presentation_id:
+            raise HTTPException(409, "confirmed media cannot be rejected")
+        actor = getattr(request.state, "admin_actor", "central-admin")
+        if item.import_state is not MediaImportState.REJECTED:
+            item.rejected_by = actor
+            item.rejected_at = utc_now()
+            item.rejection_reason = body.reason
+            session.add(
+                AuditRecord(
+                    actor_id=actor,
+                    action="central.presentation_media.rejected",
+                    target_type="presentation_media_import",
+                    target_id=media_import_id,
+                    event_id=item.event_id,
+                    after_context={"reason": body.reason},
+                )
+            )
+            CentralQueue(session).enqueue_processing(
+                job_type="presentation_media.intake.reject",
+                payload={"data": {"media_import_id": str(media_import_id)}},
+                idempotency_key=f"reject:{media_import_id}",
+                required_capabilities=["cpu"],
+                max_attempts=5,
+            )
+        return _view(item, session)
 
     @app.post("/api/v1/admin/media-imports/confirmations", dependencies=admin, tags=["media"])
     def confirm_batch(

@@ -94,6 +94,8 @@ export const siteApi = {
     siteClient.request<Row>(`/api/v1/media/${mediaId}/confirmation`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ presentation_id: presentationId }) }),
   confirmMediaBatch: (items: {media_object_id: string; presentation_id: string}[]) =>
     siteClient.request<{results: Row[]}>("/api/v1/media/confirmations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) }),
+  rejectMedia: (mediaId: string, reason?: string) =>
+    siteClient.request<Row>(`/api/v1/media/${mediaId}/reject`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: reason || null }) }),
   presentationOperations: (eventId: string, query: Record<string, string | number | undefined>, signal?: AbortSignal) =>
     siteClient.request<{items: Row[]; total: number; limit: number; offset: number}>(`/api/v1/events/${eventId}/presentations/operations`, { query, signal, retry: true }),
   matchMedia: (eventId: string, filename: string, signal?: AbortSignal) =>

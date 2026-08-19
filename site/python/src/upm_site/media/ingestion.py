@@ -295,7 +295,7 @@ class MediaIngestionService:
             content_hash = staged_result["sha256"]
             detected_mime = request.client_mime_type or "application/octet-stream"
             self._record_finalizing(media_id, content_hash, bytes_written, detected_mime)
-            committed = await self.storage_client.commit(
+            committed = await self.storage_client.publish_intake(
                 allocation["storage_target_id"], allocation["storage_key"], content_hash
             )
             self._record_service_commit(request.site_id, media_id, committed)

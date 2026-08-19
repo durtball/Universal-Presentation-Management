@@ -803,6 +803,10 @@ class MediaObject(SiteRecordMixin, SiteBase):
     )
     ingestion_idempotency_key: Mapped[str | None] = mapped_column(String(255))
     failure_reason: Mapped[str | None] = mapped_column(String(1024))
+    disposition: Mapped[str] = mapped_column(String(16), default="intake", nullable=False)
+    rejected_by: Mapped[str | None] = mapped_column(String(255))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(String(2048))
     source_media_object_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
     )
@@ -821,8 +825,8 @@ class PresentationAsset(SiteRecordMixin, SiteBase):
             postgresql_where=text("kind = 'original'"),
         ),
         CheckConstraint(
-            "(kind = 'original' AND source_asset_id IS NULL) OR "
-            "(kind = 'derivative' AND source_asset_id IS NOT NULL)",
+            "(kind = 'derivative' AND source_asset_id IS NOT NULL) OR "
+            "(kind <> 'derivative' AND source_asset_id IS NULL)",
             name="derivative_source",
         ),
         Index("ix_site_presentation_assets_media", "media_object_id"),

@@ -28,6 +28,8 @@ from upm_central.persistence.models import (
 from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import (
     ASSET_RECONCILIATION_JOB,
+    INTAKE_PUBLISH_JOB,
+    INTAKE_REJECT_JOB,
     RESCAN_JOB,
     CentralMediaStagingService,
     backfill_confirmed_original_assets,
@@ -76,6 +78,16 @@ def execute_processing_job(
         if media_processor is None:
             raise RuntimeError("presentation media processor is unavailable")
         media_processor.rescan(work.processing_job_id, worker_id)
+        return True
+    if work.job_type == INTAKE_PUBLISH_JOB:
+        asyncio.run(
+            media_processor.publish_intake(UUID(str(work.payload["data"]["media_import_id"])))
+        )
+        return True
+    if work.job_type == INTAKE_REJECT_JOB:
+        asyncio.run(
+            media_processor.reject_intake(UUID(str(work.payload["data"]["media_import_id"])))
+        )
         return True
     if work.job_type == "presentation_media.process":
         if media_processor is None:

@@ -3,7 +3,7 @@ from uuid import UUID
 
 import pytest
 
-from upm_shared.enums import MediaMatchState, PresentationIdentifierSource
+from upm_shared.enums import AssetKind, MediaMatchState, PresentationIdentifierSource
 from upm_shared.presentation_media import (
     CanonicalPresentationMetadata,
     MatchCandidate,
@@ -15,6 +15,7 @@ from upm_shared.presentation_media import (
     operational_sort_key,
     safe_filename_component,
 )
+from upm_site.presentation_media_api import intake_asset_kind
 
 
 def test_source_relative_path_is_safe_provenance_only() -> None:
@@ -149,6 +150,12 @@ def test_unmatched_folder_structure_keeps_file_reviewable() -> None:
 
     assert result.state is MediaMatchState.UNMATCHED
     assert result.presentation_id is None
+
+
+def test_supplemental_image_and_video_use_explicit_asset_roles() -> None:
+    assert intake_asset_kind("speaker-headshot.jpg") is AssetKind.IMAGE
+    assert intake_asset_kind("session-recording.mp4") is AssetKind.VIDEO
+    assert intake_asset_kind("handout.docx") is AssetKind.DOCUMENT
 
 
 def test_imported_and_offline_generated_identifiers_are_stable_and_distinct() -> None:

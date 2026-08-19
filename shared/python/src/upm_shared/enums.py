@@ -45,6 +45,7 @@ class MediaImportState(StrEnum):
     RETRY_WAIT = "retry_wait"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
 
 class MediaTransferState(StrEnum):
@@ -300,3 +301,7 @@ class MediaAvailability(StrEnum):
 class AssetKind(StrEnum):
     ORIGINAL = "original"
     DERIVATIVE = "derivative"
+    IMAGE = "image"
+    VIDEO = "video"
+    DOCUMENT = "document"
+    OTHER = "other"
