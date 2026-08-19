@@ -2,6 +2,10 @@
 set -eu
 : "${UPM_SMB_HOSTNAME:=UPM-SITE}"
 : "${UPM_SMB_INTERFACES:=auto}"
+: "${UPM_SMB_OPERATOR_GID:=20001}"
+case "$UPM_SMB_OPERATOR_GID" in
+    ''|*[!0-9]*) echo "UPM_SMB_OPERATOR_GID must be a numeric GID" >&2; exit 1 ;;
+esac
 if [ "$UPM_SMB_INTERFACES" = "auto" ]; then
     UPM_SMB_INTERFACES="$(python -m upm_smb_edge.interfaces)"
 fi
@@ -9,7 +13,9 @@ if [ "$UPM_SMB_INTERFACES" = "lo" ]; then
     echo "No active non-loopback SMB interface was discovered" >&2
     exit 1
 fi
-for group in read_only technician operator manager administrator; do addgroup -S "upm_$group" 2>/dev/null || true; done
+for group in read_only technician manager administrator; do addgroup -S "upm_$group" 2>/dev/null || true; done
+addgroup -S -g "$UPM_SMB_OPERATOR_GID" upm_operator 2>/dev/null || \
+    [ "$(awk -F: '$1 == "upm_operator" { print $3 }' /etc/group)" = "$UPM_SMB_OPERATOR_GID" ]
 mkdir -p /shares/presentations /shares/incoming /shares/trash /var/lib/samba/private
 # Presentations is an intentionally read-only Media Storage-owned mount. Validate it through the
 # health endpoint, but never mutate it here. Repair only the writable share roots; setgid makes new

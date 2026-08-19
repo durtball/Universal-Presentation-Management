@@ -10,6 +10,7 @@ services:
     environment:
       UPM_SMB_HOSTNAME: ${UPM_SITE_SMB_HOSTNAME:-UPM-SITE}
       UPM_SMB_INTERFACES: ${UPM_SITE_SMB_INTERFACES:-auto}
+      UPM_SMB_OPERATOR_GID: ${UPM_SITE_SMB_OPERATOR_GID:-20001}
       UPM_SMB_CONTROL_TOKEN: ${UPM_SITE_SMB_CONTROL_TOKEN:?Set UPM_SITE_SMB_CONTROL_TOKEN}
     ports:
       - "${UPM_SITE_SMB_BIND_ADDRESS:-0.0.0.0}:445:445"
@@ -167,6 +168,8 @@ services:
       dockerfile: media-storage/Dockerfile
     image: ${UPM_MEDIA_STORAGE_IMAGE:-upm-media-storage:local}
     restart: unless-stopped
+    group_add:
+      - "${UPM_SITE_SMB_OPERATOR_GID:-20001}"
     environment:
       UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: site
       UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}

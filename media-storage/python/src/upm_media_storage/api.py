@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import shutil
 from uuid import UUID, uuid4
@@ -14,6 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from upm_media_storage.config import Settings
 from upm_media_storage.service import StorageError, StorageService
+
+logger = logging.getLogger(__name__)
+
+
+class SmbRetirementPermissionError(RuntimeError):
+    """Media Storage lacks directory permission to retire a verified SMB source."""
 
 
 class CommitRequest(BaseModel):
@@ -57,6 +64,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "code": "storage_write_error",
             },
             status_code=507,
+        )
+
+    @app.exception_handler(SmbRetirementPermissionError)
+    async def smb_retirement_permission_error(
+        _request: Request, _error: SmbRetirementPermissionError
+    ):
+        from fastapi.responses import JSONResponse
+
+        logger.error("smb_incoming_retirement_permission_denied")
+        return JSONResponse(
+            {
+                "detail": "Media Storage does not have permission to retire the SMB source.",
+                "code": "smb_retirement_permission_denied",
+            },
+            status_code=500,
         )
 
     @app.get("/health")
@@ -143,7 +165,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or final_stat.st_mtime_ns != stat.st_mtime_ns
         ):
             raise HTTPException(409, "Incoming file changed during intake")
-        path.unlink()
+        try:
+            path.unlink()
+        except PermissionError as error:
+            raise SmbRetirementPermissionError from error
         return {"removed": True, "already_missing": False}
 
     @app.post("/api/v1/storage/targets/{target_id}/test", dependencies=private)

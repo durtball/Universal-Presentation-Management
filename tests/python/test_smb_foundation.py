@@ -40,6 +40,23 @@ def test_central_and_site_have_independent_smb_state() -> None:
     assert "site-smb-presentations:/shares/presentations:ro" in site
 
 
+def test_media_storage_uses_the_same_fixed_operator_gid_without_running_as_root() -> None:
+    dockerfile = (ROOT / "media-storage/Dockerfile").read_text()
+    assert "USER 10001:10001" in dockerfile
+    assert "USER root" not in dockerfile
+    for deployment in ("central", "site"):
+        compose = (ROOT / f"docker-compose.{deployment}.yml").read_text()
+        variable = f"UPM_{deployment.upper()}_SMB_OPERATOR_GID"
+        smb = compose.split(f"  {deployment}-smb:", 1)[1].split(
+            f"\n  {deployment}-discovery:", 1
+        )[0]
+        storage = compose.split(f"  {deployment}-media-storage:", 1)[1].split(
+            f"\n  {deployment}-sync:", 1
+        )[0]
+        assert f"UPM_SMB_OPERATOR_GID: ${{{variable}:-20001}}" in smb
+        assert f'group_add:\n      - "${{{variable}:-20001}}"' in storage
+
+
 def test_smb_services_join_edge_and_internal_networks_without_exposing_postgres() -> None:
     for deployment in ("central", "site"):
         compose = (ROOT / f"docker-compose.{deployment}.yml").read_text()
@@ -82,6 +99,8 @@ def test_startup_repairs_share_roots_without_recursive_reownership() -> None:
     assert 'UPM_SMB_INTERFACES:=auto' in entrypoint
     assert "python -m upm_smb_edge.interfaces" in entrypoint
     assert "testparm -s /etc/samba/smb.conf" in entrypoint
+    assert 'UPM_SMB_OPERATOR_GID:=20001' in entrypoint
+    assert 'addgroup -S -g "$UPM_SMB_OPERATOR_GID" upm_operator' in entrypoint
     assert "chgrp upm_read_only /shares/presentations" not in entrypoint
     assert "chmod 2755 /shares/presentations" not in entrypoint
     assert "chgrp upm_operator /shares/incoming" in entrypoint

@@ -116,6 +116,31 @@ def test_same_size_and_timestamp_with_changed_checksum_is_retained(tmp_path: Pat
     assert source.exists()
 
 
+def test_retirement_permission_failure_has_specific_safe_error(tmp_path: Path, monkeypatch) -> None:
+    client, incoming, headers = storage_client(tmp_path)
+    source = incoming / "deck.pdf"
+    source.write_bytes(b"%PDF-permission-test")
+    evidence = {
+        "size_bytes": source.stat().st_size,
+        "modified_ns": source.stat().st_mtime_ns,
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+
+    def deny_unlink(_path):
+        raise PermissionError("host filesystem detail must not escape")
+
+    monkeypatch.setattr(Path, "unlink", deny_unlink)
+    response = client.post(
+        "/api/v1/storage/smb/incoming/deck.pdf/complete", headers=headers, json=evidence
+    )
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "Media Storage does not have permission to retire the SMB source.",
+        "code": "smb_retirement_permission_denied",
+    }
+    assert source.exists()
+
+
 class FakeStorage:
     def __init__(self, relative_path: str, content: bytes, modified_ns: int = 42):
         self.relative_path = relative_path
