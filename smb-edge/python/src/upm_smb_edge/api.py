@@ -1,16 +1,25 @@
 """Authenticated control plane for deployment-local Samba credentials."""
 
+import grp
 import hmac
 import os
 import re
+import stat
 import subprocess
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from upm_smb_edge.accounts import assign_role
+
 TOKEN = os.environ.get("UPM_SMB_CONTROL_TOKEN", "")
 USERNAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SHARE_REQUIREMENTS = {
+    "/shares/presentations": ("upm_read_only", 0o2755),
+    "/shares/incoming": ("upm_operator", 0o2775),
+    "/shares/trash": ("upm_administrator", 0o2770),
+}
 
 
 class Credential(BaseModel):
@@ -39,6 +48,23 @@ def safe(value: str) -> str:
     return value
 
 
+def share_permission_errors() -> list[str]:
+    errors = []
+    for path, (group_name, required_mode) in SHARE_REQUIREMENTS.items():
+        try:
+            details = os.stat(path)
+            expected_gid = grp.getgrnam(group_name).gr_gid
+        except (FileNotFoundError, KeyError):
+            errors.append(f"{path}: missing path or group")
+            continue
+        mode = stat.S_IMODE(details.st_mode)
+        if details.st_gid != expected_gid:
+            errors.append(f"{path}: incorrect group")
+        if mode != required_mode:
+            errors.append(f"{path}: mode {mode:04o}, expected {required_mode:04o}")
+    return errors
+
+
 @app.get("/health")
 def health():
     running = (
@@ -52,6 +78,12 @@ def health():
     )
     if not running:
         raise HTTPException(503, "Samba is not responding")
+    permission_errors = share_permission_errors()
+    if permission_errors:
+        raise HTTPException(
+            503,
+            detail={"message": "SMB share permissions are invalid", "errors": permission_errors},
+        )
     return {
         "service": "upm-smb-edge",
         "status": "healthy",
@@ -66,25 +98,7 @@ def credential(username: str, payload: Credential, authorization: str | None = H
     username = safe(username)
     if username != payload.username:
         raise HTTPException(409, "username mismatch")
-    subprocess.run(
-        ["adduser", "-D", "-H", "-s", "/sbin/nologin", username],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    for role in ("administrator", "manager", "operator", "technician", "read_only"):
-        subprocess.run(
-            ["delgroup", username, f"upm_{role}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    subprocess.run(
-        ["addgroup", username, f"upm_{payload.role}"],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    assign_role(username, payload.role)
     # smbpasswd consumes the password through stdin; argv, responses, and logs never contain it.
     subprocess.run(
         ["smbpasswd", "-s", "-a", username],

@@ -49,7 +49,99 @@ def test_smb_services_join_edge_and_internal_networks_without_exposing_postgres(
         postgres = compose.split(f"  {deployment}-postgres:", 1)[1].split("\nnetworks:", 1)[0]
         assert f"- {deployment}-edge" in service
         assert f"- {deployment}-internal" in service
-        assert f'UPM_{deployment.upper()}_SMB_BIND_ADDRESS' in service
+        assert f"UPM_{deployment.upper()}_SMB_BIND_ADDRESS" in service
         assert ':445:445"' in service
         assert "ports:" not in postgres
         assert f"  {deployment}-internal:\n    internal: true" in compose
+
+
+def test_startup_repairs_share_roots_without_recursive_reownership() -> None:
+    entrypoint = (ROOT / "smb-edge/entrypoint.sh").read_text()
+    assert "chgrp upm_read_only /shares/presentations" in entrypoint
+    assert "chmod 2755 /shares/presentations" in entrypoint
+    assert "chgrp upm_operator /shares/incoming" in entrypoint
+    assert "chmod 2775 /shares/incoming" in entrypoint
+    assert "chgrp upm_administrator /shares/trash" in entrypoint
+    assert "chmod 2770 /shares/trash" in entrypoint
+    assert "chgrp -R" not in entrypoint
+    assert "chown -R" not in entrypoint
+    assert "chmod -R" not in entrypoint
+
+
+def test_samba_and_filesystem_group_semantics_agree() -> None:
+    config = (ROOT / "smb-edge/smb.conf").read_text()
+    presentation = config.split("[Presentations]", 1)[1].split("[Incoming]", 1)[0]
+    incoming = config.split("[Incoming]", 1)[1].split("[Trash]", 1)[0]
+    trash = config.split("[Trash]", 1)[1]
+    assert "read only = yes" in presentation
+    assert "force group = upm_operator" in incoming
+    assert "directory mask = 2775" in incoming
+    assert "force directory mode = 2770" in incoming
+    assert "force group = upm_administrator" in trash
+    assert "directory mask = 2770" in trash
+    assert "@upm_operator" not in trash
+
+
+def test_health_rejects_incorrect_share_group_or_mode(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import upm_smb_edge.api as api
+
+    gids = {
+        name: index
+        for index, name in enumerate(
+            ("upm_read_only", "upm_operator", "upm_administrator"), start=100
+        )
+    }
+    monkeypatch.setattr(api.grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=gids[name]))
+    monkeypatch.setattr(
+        api.os,
+        "stat",
+        lambda path: SimpleNamespace(
+            st_gid=gids[api.SHARE_REQUIREMENTS[path][0]],
+            st_mode=api.SHARE_REQUIREMENTS[path][1],
+        ),
+    )
+    assert api.share_permission_errors() == []
+
+    monkeypatch.setattr(api.os, "stat", lambda _path: SimpleNamespace(st_gid=0, st_mode=0o755))
+    errors = api.share_permission_errors()
+    assert any("incorrect group" in error for error in errors)
+    assert any("expected 2775" in error for error in errors)
+
+
+def test_higher_roles_receive_incoming_filesystem_group(monkeypatch) -> None:
+    import upm_smb_edge.api as api
+    from upm_smb_edge.accounts import effective_groups
+
+    assignments = []
+    monkeypatch.setattr(api, "TOKEN", "control-token")
+    monkeypatch.setattr(
+        api, "assign_role", lambda username, role: assignments.append((username, role))
+    )
+    monkeypatch.setattr(api.subprocess, "run", lambda _command, **_kwargs: None)
+    api.credential(
+        "manager",
+        api.Credential(username="manager", password="a secure smb password", role="manager"),
+        "Bearer control-token",
+    )
+    assert assignments == [("manager", "manager")]
+    assert effective_groups("manager") == {"manager", "operator"}
+    assert effective_groups("administrator") == {"administrator", "operator"}
+    assert effective_groups("read_only") == {"read_only"}
+
+
+def test_role_map_restores_membership_after_container_recreation(tmp_path, monkeypatch) -> None:
+    import upm_smb_edge.accounts as accounts
+
+    role_map = tmp_path / "persistent-passdb" / "upm-role-map.json"
+    applied = []
+    monkeypatch.setattr(accounts, "ROLE_MAP_PATH", role_map)
+    monkeypatch.setattr(
+        accounts, "apply_role", lambda username, role: applied.append((username, role))
+    )
+    accounts.assign_role("operator", "operator")
+    assert role_map.stat().st_mode & 0o777 == 0o600
+    applied.clear()
+    accounts.restore()
+    assert applied == [("operator", "operator")]

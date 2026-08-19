@@ -4,6 +4,17 @@ set -eu
 : "${UPM_SMB_INTERFACES:=lo eth0}"
 for group in read_only technician operator manager administrator; do addgroup -S "upm_$group" 2>/dev/null || true; done
 mkdir -p /shares/presentations /shares/incoming /shares/trash /var/lib/samba/private
+# Repair only the share roots on every start. Do not recursively chown persistent content: existing
+# file ownership is audit/history evidence, while setgid makes new directories inherit correctly.
+chgrp upm_read_only /shares/presentations
+chmod 2755 /shares/presentations
+chgrp upm_operator /shares/incoming
+chmod 2775 /shares/incoming
+chgrp upm_administrator /shares/trash
+chmod 2770 /shares/trash
+# /etc/passwd and /etc/group belong to the replaceable container layer. Rebuild Unix identities
+# and supplementary memberships from the non-secret role map stored beside the persistent passdb.
+python -m upm_smb_edge.accounts
 sed -e "s/\${UPM_SMB_INTERFACES}/${UPM_SMB_INTERFACES}/g" \
     -e "s/\${UPM_SMB_HOSTNAME}/${UPM_SMB_HOSTNAME}/g" \
     /etc/samba/smb.conf.template >/etc/samba/smb.conf
