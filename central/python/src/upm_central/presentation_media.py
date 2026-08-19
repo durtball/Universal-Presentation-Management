@@ -17,6 +17,7 @@ from upm_central.operational_logs import record_log
 from upm_central.persistence.models import (
     AuditRecord,
     Event,
+    EventDeployment,
     EventParticipation,
     MediaObjectReplica,
     OutboxEvent,
@@ -39,6 +40,7 @@ from upm_shared.contracts.media_transfer import MediaTransferManifest
 from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
 from upm_shared.enums import (
     AssetKind,
+    EventDeploymentStatus,
     JobStatus,
     MediaCategory,
     MediaImportState,
@@ -66,6 +68,14 @@ from upm_shared.presentation_media import (
 
 logger = logging.getLogger(__name__)
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
+
+ACTIVE_DEPLOYMENT_STATUSES = {
+    EventDeploymentStatus.PENDING,
+    EventDeploymentStatus.DEPLOYING,
+    EventDeploymentStatus.DEPLOYED,
+    EventDeploymentStatus.UPDATE_PENDING,
+    EventDeploymentStatus.FAILED,
+}
 
 
 def enqueue_asset_reconciliation(session: Session, *, current_job_id=None):
@@ -183,6 +193,118 @@ def backfill_confirmed_original_assets(session: Session) -> int:
             repaired += 1
     session.flush()
     return repaired
+
+
+def queue_central_to_site_transfer(
+    session: Session, record: PresentationMediaImport
+) -> TransferJob:
+    """Idempotently publish the established Site-pull manifest for confirmed media."""
+    if (
+        not record.destination_site_id
+        or not record.presentation_id
+        or not record.presentation_version_id
+    ):
+        raise MediaStagingError("confirmed media has no Site destination", "missing_destination")
+    presentation = session.get(Presentation, record.presentation_id)
+    payload = {
+        "media_import_id": str(record.media_import_id),
+        "presentation_id": str(record.presentation_id),
+        "presentation_version_id": str(record.presentation_version_id),
+        "staging_key": record.staging_key,
+        "sha256": record.sha256,
+        "size_bytes": record.size_bytes,
+        "canonical_filename": record.canonical_filename,
+    }
+    transfer = session.get(TransferJob, record.transfer_job_id) if record.transfer_job_id else None
+    if transfer is None:
+        transfer = TransferJob(
+            owning_site_id=record.destination_site_id,
+            transfer_type="presentation_media.central_to_site",
+            payload=payload,
+            status=JobStatus.PENDING,
+            required_capabilities=["site-pull-manifest"],
+            idempotency_key=f"central-media:{record.media_import_id}",
+        )
+        session.add(transfer)
+    else:
+        if transfer.status is JobStatus.RUNNING:
+            raise MediaStagingError(
+                "a running transfer cannot be reassigned", "transfer_in_progress"
+            )
+        transfer.payload = payload
+        transfer.status = JobStatus.PENDING
+        transfer.claimed_by_worker_id = None
+        transfer.lease_expires_at = None
+    session.flush()
+    record.transfer_job_id = transfer.transfer_job_id
+    record.import_state = MediaImportState.TRANSFER_QUEUED
+    record.sync_state = SyncState.PENDING
+    manifest = MediaTransferManifest(
+        transfer_session_id=transfer.transfer_job_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=record.destination_site_id,
+        event_id=record.event_id,
+        presentation_id=record.presentation_id,
+        presentation_version_id=record.presentation_version_id,
+        presentation_identifier=presentation.presentation_identifier,
+        original_filename=record.original_filename,
+        canonical_filename=record.canonical_filename,
+        expected_size=record.size_bytes or 0,
+        sha256=record.sha256 or "",
+        media_type=record.mime_type,
+        created_at=record.created_at,
+        state=MediaTransferState.AVAILABLE,
+    )
+    outbox_key = f"media-transfer-available:{transfer.transfer_job_id}"
+    existing_event = session.scalar(
+        select(OutboxEvent).where(OutboxEvent.idempotency_key == outbox_key)
+    )
+    if existing_event is None:
+        CentralQueue(session).enqueue_outbox(
+            event_type="central.media_transfer.available",
+            aggregate_type="media_transfer",
+            aggregate_id=transfer.transfer_job_id,
+            owning_site_id=record.destination_site_id,
+            source_sequence=next_sequence(session, record.destination_site_id),
+            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+            idempotency_key=outbox_key,
+            payload=OutboxPayload(
+                source_system=SourceSystem.CENTRAL,
+                data=manifest.model_dump(mode="json"),
+            ),
+        )
+    elif existing_event.status is JobStatus.PENDING:
+        existing_event.payload = manifest.model_dump(mode="json")
+    else:
+        raise MediaStagingError(
+            "a published transfer cannot be reassigned", "manifest_already_published"
+        )
+    return transfer
+
+
+def target_confirmed_event_media(session: Session, event_id: UUID, site_id: UUID) -> int:
+    """Target confirmed canonical event media and create any missing transfer manifests."""
+    records = session.scalars(
+        select(PresentationMediaImport).where(
+            PresentationMediaImport.event_id == event_id,
+            PresentationMediaImport.match_state == MediaMatchState.CONFIRMED,
+            PresentationMediaImport.import_state.in_(
+                [MediaImportState.ASSIGNED, MediaImportState.TRANSFER_QUEUED]
+            ),
+            PresentationMediaImport.transfer_job_id.is_(None),
+            PresentationMediaImport.presentation_id.is_not(None),
+            PresentationMediaImport.presentation_version_id.is_not(None),
+            PresentationMediaImport.committed_storage_key.is_not(None),
+        )
+    ).all()
+    queued = 0
+    for record in records:
+        if record.destination_site_id not in (None, site_id):
+            continue
+        record.destination_site_id = site_id
+        queue_central_to_site_transfer(session, record)
+        queued += 1
+    return queued
 
 
 def _complete_batch_if_accounted(session: Session, batch_id: UUID | None) -> None:
@@ -894,81 +1016,15 @@ class CentralMediaStagingService:
         )
         record.import_state = MediaImportState.ASSIGNED
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
+        if record.destination_site_id is None:
+            record.destination_site_id = session.scalar(
+                select(EventDeployment.site_id)
+                .where(
+                    EventDeployment.event_id == record.event_id,
+                    EventDeployment.status.in_(ACTIVE_DEPLOYMENT_STATUSES),
+                )
+                .order_by(EventDeployment.created_at.desc())
+                .limit(1)
+            )
         if record.destination_site_id:
-            payload = {
-                "media_import_id": str(record.media_import_id),
-                "presentation_id": str(presentation_id),
-                "presentation_version_id": str(latest.presentation_version_id),
-                "staging_key": record.staging_key,
-                "sha256": record.sha256,
-                "size_bytes": record.size_bytes,
-                "canonical_filename": record.canonical_filename,
-            }
-            transfer = (
-                session.get(TransferJob, record.transfer_job_id) if record.transfer_job_id else None
-            )
-            if transfer is None:
-                transfer = TransferJob(
-                    owning_site_id=record.destination_site_id,
-                    transfer_type="presentation_media.central_to_site",
-                    payload=payload,
-                    status=JobStatus.PENDING,
-                    # Site-pull manifests are completed only from Site progress projection;
-                    # Central's general transfer worker must never fake delivery completion.
-                    required_capabilities=["site-pull-manifest"],
-                    idempotency_key=f"central-media:{record.media_import_id}",
-                )
-                session.add(transfer)
-            else:
-                if transfer.status is JobStatus.RUNNING:
-                    raise MediaStagingError(
-                        "a running transfer cannot be reassigned", "transfer_in_progress"
-                    )
-                transfer.payload = payload
-                transfer.status = JobStatus.PENDING
-                transfer.claimed_by_worker_id = None
-                transfer.lease_expires_at = None
-            session.flush()
-            record.transfer_job_id = transfer.transfer_job_id
-            record.import_state = MediaImportState.TRANSFER_QUEUED
-            record.sync_state = SyncState.PENDING
-            manifest = MediaTransferManifest(
-                transfer_session_id=transfer.transfer_job_id,
-                origin_system=SourceSystem.CENTRAL,
-                destination_site_id=record.destination_site_id,
-                event_id=record.event_id,
-                presentation_id=presentation_id,
-                presentation_version_id=latest.presentation_version_id,
-                presentation_identifier=presentation.presentation_identifier,
-                original_filename=record.original_filename,
-                canonical_filename=record.canonical_filename,
-                expected_size=record.size_bytes or 0,
-                sha256=record.sha256 or "",
-                media_type=record.mime_type,
-                created_at=record.created_at,
-                state=MediaTransferState.AVAILABLE,
-            )
-            outbox_key = f"media-transfer-available:{transfer.transfer_job_id}"
-            existing_event = session.scalar(
-                select(OutboxEvent).where(OutboxEvent.idempotency_key == outbox_key)
-            )
-            if existing_event is None:
-                CentralQueue(session).enqueue_outbox(
-                    event_type="central.media_transfer.available",
-                    aggregate_type="media_transfer",
-                    aggregate_id=transfer.transfer_job_id,
-                    owning_site_id=record.destination_site_id,
-                    source_sequence=next_sequence(session, record.destination_site_id),
-                    protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-                    idempotency_key=outbox_key,
-                    payload=OutboxPayload(
-                        source_system=SourceSystem.CENTRAL,
-                        data=manifest.model_dump(mode="json"),
-                    ),
-                )
-            elif existing_event.status is JobStatus.PENDING:
-                existing_event.payload = manifest.model_dump(mode="json")
-            else:
-                raise MediaStagingError(
-                    "a published transfer cannot be reassigned", "manifest_already_published"
-                )
+            queue_central_to_site_transfer(session, record)
