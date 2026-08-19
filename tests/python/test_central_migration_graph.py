@@ -9,8 +9,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MERGE_REVISION = "f18a6c42d9e7"
 MERGE_PARENTS = {"5d23c80ab411", "d7f4a2c91b63"}
 STORAGE_REVISION = "a84d91c6e2f0"
-PREVIOUS_HEAD_REVISION = "af18c2d90e11"
-HEAD_REVISION = "bf73a10c2e44"
+PREVIOUS_HEAD_REVISION = "bf73a10c2e44"
+HEAD_REVISION = "e4a7c921bd30"
 
 
 def central_script() -> ScriptDirectory:
@@ -69,5 +69,6 @@ def test_storage_root_revision_upgrade_is_reversible() -> None:
 
 def test_site_media_storage_reference_has_one_head() -> None:
     script = site_script()
-    assert script.get_heads() == ["fa12e37bd908"]
+    assert script.get_heads() == ["c52a819de740"]
+    assert script.get_revision("c52a819de740").down_revision == "fa12e37bd908"
     assert script.get_revision("d42f7a91c6e3").down_revision == "c18d3f7a92e1"

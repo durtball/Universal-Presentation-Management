@@ -12,12 +12,21 @@ from sqlalchemy.orm import sessionmaker
 from upm_central.persistence.models import (
     AuditRecord,
     Event,
+    MediaObjectReplica,
+    Presentation,
+    PresentationAsset,
     PresentationMediaImport,
+    PresentationVersion,
     ProcessingJob,
     StorageRoot,
 )
-from upm_central.presentation_media import CentralMediaStagingService
-from upm_shared.enums import MediaImportState
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    backfill_confirmed_original_assets,
+    ensure_confirmed_original_asset,
+)
+from upm_central.smb_presentations import reconcile as reconcile_smb_presentations
+from upm_shared.enums import AssetKind, MediaImportState, MediaMatchState
 from upm_shared.identifiers import new_uuid7
 
 CENTRAL_URL = os.getenv("UPM_CENTRAL_DATABASE_URL")
@@ -25,6 +34,108 @@ pytestmark = [
     pytest.mark.postgres,
     pytest.mark.skipif(not CENTRAL_URL, reason="a migrated Central PostgreSQL URL is required"),
 ]
+
+
+def test_confirmed_import_creates_idempotent_original_asset_and_backfills() -> None:
+    engine = create_engine(CENTRAL_URL)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id, presentation_id, version_id, import_id, root_id = [new_uuid7() for _ in range(5)]
+    try:
+        with factory.begin() as session:
+            session.add(Event(event_id=event_id, name="Asset confirmation", timezone="UTC"))
+            session.add(
+                StorageRoot(
+                    storage_root_id=root_id,
+                    role="media",
+                    display_name="Asset media",
+                    backend_type="filesystem",
+                    path="/generated/test",
+                    enabled=False,
+                )
+            )
+            session.add(
+                Presentation(
+                    presentation_id=presentation_id, event_id=event_id, title="Confirmed asset"
+                )
+            )
+            session.add(
+                PresentationVersion(
+                    presentation_version_id=version_id,
+                    presentation_id=presentation_id,
+                    version_number=1,
+                )
+            )
+            record = PresentationMediaImport(
+                media_import_id=import_id,
+                event_id=event_id,
+                presentation_id=presentation_id,
+                presentation_version_id=version_id,
+                original_filename="generated.pptx",
+                staging_key=f"staging/{import_id}",
+                committed_storage_root_id=root_id,
+                committed_storage_key=f"objects/sha256/aa/{'a' * 64}",
+                size_bytes=9,
+                sha256="a" * 64,
+                match_state=MediaMatchState.CONFIRMED,
+                import_state=MediaImportState.ASSIGNED,
+            )
+            session.add(record)
+            session.flush()
+            first = ensure_confirmed_original_asset(session, record)
+            second = ensure_confirmed_original_asset(session, record)
+            assert first.presentation_asset_id == second.presentation_asset_id
+
+            class Storage:
+                entries = None
+
+                def reconcile_smb_presentations(self, entries):
+                    self.entries = entries
+                    return {"desired": len(entries)}
+
+            storage = Storage()
+            result = reconcile_smb_presentations(session, storage, interval_seconds=300)
+            assert result["desired"] == 1
+            assert storage.entries[0]["storage_key"] == record.committed_storage_key
+        with factory.begin() as session:
+            session.query(PresentationAsset).filter(
+                PresentationAsset.presentation_version_id == version_id
+            ).delete(synchronize_session=False)
+            assert backfill_confirmed_original_assets(session) == 1
+            asset = session.scalar(
+                select(PresentationAsset).where(
+                    PresentationAsset.presentation_version_id == version_id
+                )
+            )
+            assert asset.kind is AssetKind.ORIGINAL
+            assert asset.media_object_id == import_id
+            assert session.get(MediaObjectReplica, import_id).object_key.startswith(
+                "objects/sha256/"
+            )
+            assert backfill_confirmed_original_assets(session) == 0
+    finally:
+        with factory.begin() as session:
+            session.query(PresentationAsset).filter(
+                PresentationAsset.presentation_version_id == version_id
+            ).delete(synchronize_session=False)
+            session.query(PresentationMediaImport).filter(
+                PresentationMediaImport.media_import_id == import_id
+            ).delete(synchronize_session=False)
+            session.query(MediaObjectReplica).filter(
+                MediaObjectReplica.media_object_id == import_id
+            ).delete(synchronize_session=False)
+            session.query(PresentationVersion).filter(
+                PresentationVersion.presentation_version_id == version_id
+            ).delete(synchronize_session=False)
+            session.query(Presentation).filter(
+                Presentation.presentation_id == presentation_id
+            ).delete(synchronize_session=False)
+            session.query(Event).filter(Event.event_id == event_id).delete(
+                synchronize_session=False
+            )
+            session.query(StorageRoot).filter(StorageRoot.storage_root_id == root_id).delete(
+                synchronize_session=False
+            )
+        engine.dispose()
 
 
 @pytest.mark.anyio

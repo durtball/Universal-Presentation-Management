@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -16,9 +18,11 @@ from upm_central.persistence.models import (
     AuditRecord,
     Event,
     EventParticipation,
+    MediaObjectReplica,
     OutboxEvent,
     Person,
     Presentation,
+    PresentationAsset,
     PresentationMediaImport,
     PresentationMediaImportBatch,
     PresentationPresenter,
@@ -34,10 +38,13 @@ from upm_central.sync import next_sequence
 from upm_shared.contracts.media_transfer import MediaTransferManifest
 from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
 from upm_shared.enums import (
+    AssetKind,
     JobStatus,
+    MediaCategory,
     MediaImportState,
     MediaMatchState,
     MediaTransferState,
+    PresentationWorkflowStatus,
     SourceSystem,
     SyncState,
 )
@@ -58,6 +65,123 @@ from upm_shared.presentation_media import (
 )
 
 logger = logging.getLogger(__name__)
+ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
+
+
+def enqueue_asset_reconciliation(session: Session, *, current_job_id=None):
+    existing = session.scalar(
+        select(ProcessingJob).where(
+            ProcessingJob.job_type == ASSET_RECONCILIATION_JOB,
+            ProcessingJob.status.in_(["pending", "running", "retry_wait"]),
+            ProcessingJob.processing_job_id != current_job_id,
+        )
+    )
+    if existing is not None:
+        return existing
+    job = ProcessingJob(
+        job_type=ASSET_RECONCILIATION_JOB,
+        payload={"schema_version": 1, "data": {}},
+        idempotency_key=f"presentation-assets:{new_uuid7()}",
+        required_capabilities=["cpu"],
+        next_attempt_at=utc_now() + timedelta(seconds=30),
+    )
+    session.add(job)
+    return job
+
+
+def ensure_confirmed_original_asset(
+    session: Session, record: PresentationMediaImport
+) -> PresentationAsset:
+    """Repair or create the canonical media linkage for one unambiguous confirmation."""
+    if (
+        record.match_state is not MediaMatchState.CONFIRMED
+        or record.import_state is not MediaImportState.ASSIGNED
+        or record.presentation_version_id is None
+        or record.presentation_id is None
+        or record.committed_storage_root_id is None
+        or not record.committed_storage_key
+        or not record.sha256
+        or record.size_bytes is None
+    ):
+        raise MediaStagingError("confirmed media linkage is incomplete", "incomplete_confirmation")
+    version = session.get(PresentationVersion, record.presentation_version_id)
+    if version is None or version.presentation_id != record.presentation_id:
+        raise MediaStagingError("confirmed presentation version is invalid", "invalid_confirmation")
+    presentation = session.get(Presentation, record.presentation_id)
+    if presentation is None:
+        raise MediaStagingError("confirmed presentation is missing", "invalid_confirmation")
+    presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
+    media_id = record.media_import_id
+    media = session.get(MediaObjectReplica, media_id)
+    if media is None:
+        media = MediaObjectReplica(
+            media_object_id=media_id,
+            authoritative_site_id=record.destination_site_id,
+            event_id=record.event_id,
+            category=MediaCategory.PRESENTATION_VERSION,
+            object_key=record.committed_storage_key,
+            content_hash=record.sha256,
+            size_bytes=record.size_bytes,
+            source_revision=1,
+        )
+        session.add(media)
+    elif (
+        media.object_key != record.committed_storage_key
+        or media.content_hash != record.sha256
+        or media.size_bytes != record.size_bytes
+    ):
+        raise MediaStagingError("confirmed media identity conflicts", "media_identity_conflict")
+    existing = session.scalar(
+        select(PresentationAsset).where(
+            PresentationAsset.presentation_version_id == record.presentation_version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
+    )
+    if existing is not None:
+        if existing.media_object_id != media_id:
+            raise MediaStagingError("presentation version has another original", "asset_conflict")
+        return existing
+    asset = PresentationAsset(
+        presentation_version_id=record.presentation_version_id,
+        media_object_id=media_id,
+        kind=AssetKind.ORIGINAL,
+    )
+    session.add(asset)
+    session.flush()
+    return asset
+
+
+def backfill_confirmed_original_assets(session: Session) -> int:
+    """Backfill only confirmed imports that uniquely name their version and committed bytes."""
+    repaired = 0
+    records = list(
+        session.scalars(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.match_state == MediaMatchState.CONFIRMED,
+                PresentationMediaImport.import_state == MediaImportState.ASSIGNED,
+                PresentationMediaImport.presentation_version_id.is_not(None),
+                PresentationMediaImport.committed_storage_root_id.is_not(None),
+                PresentationMediaImport.committed_storage_key.is_not(None),
+                PresentationMediaImport.sha256.is_not(None),
+                PresentationMediaImport.size_bytes.is_not(None),
+            )
+        )
+    )
+    version_counts = Counter(record.presentation_version_id for record in records)
+    for record in records:
+        if version_counts[record.presentation_version_id] != 1:
+            continue
+        before = session.scalar(
+            select(PresentationAsset.presentation_asset_id).where(
+                PresentationAsset.presentation_version_id == record.presentation_version_id,
+                PresentationAsset.kind == AssetKind.ORIGINAL,
+            )
+        )
+        if before is None:
+            ensure_confirmed_original_asset(session, record)
+            repaired += 1
+    session.flush()
+    return repaired
 
 
 def _complete_batch_if_accounted(session: Session, batch_id: UUID | None) -> None:
@@ -528,8 +652,15 @@ class CentralMediaStagingService:
                     raise MediaStagingError(
                         "media import is already confirmed", "already_confirmed"
                     )
-                session.expunge(record)
-                return record
+                with self.factory.begin() as repair_session:
+                    repair = repair_session.get(
+                        PresentationMediaImport, media_import_id, with_for_update=True
+                    )
+                    ensure_confirmed_original_asset(repair_session, repair)
+                    repair_session.flush()
+                    repair_session.refresh(repair)
+                    repair_session.expunge(repair)
+                    return repair
             target_id = record.staging_storage_root_id
             staging_key = record.staging_key
             sha256 = record.sha256
@@ -544,6 +675,7 @@ class CentralMediaStagingService:
                 record.committed_storage_root_id = media_root.storage_root_id
                 record.committed_storage_key = committed["storage_key"]
                 self.assign(session, record, presentation_id, manual=True, actor=actor)
+                ensure_confirmed_original_asset(session, record)
                 record_log(
                     session,
                     service="central-worker",
@@ -760,6 +892,7 @@ class CentralMediaStagingService:
             )
         )
         record.import_state = MediaImportState.ASSIGNED
+        presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         if record.destination_site_id:
             payload = {
                 "media_import_id": str(record.media_import_id),

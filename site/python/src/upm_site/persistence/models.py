@@ -814,6 +814,12 @@ class MediaObject(SiteRecordMixin, SiteBase):
 class PresentationAsset(SiteRecordMixin, SiteBase):
     __tablename__ = "presentation_assets"
     __table_args__ = (
+        Index(
+            "uq_site_presentation_assets_original_version",
+            "presentation_version_id",
+            unique=True,
+            postgresql_where=text("kind = 'original'"),
+        ),
         CheckConstraint(
             "(kind = 'original' AND source_asset_id IS NULL) OR "
             "(kind = 'derivative' AND source_asset_id IS NOT NULL)",

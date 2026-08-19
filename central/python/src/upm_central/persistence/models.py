@@ -911,8 +911,8 @@ class MediaObjectReplica(CentralRecordMixin, CentralBase):
     __tablename__ = "media_object_replicas"
 
     media_object_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    authoritative_site_id: Mapped[UUID] = mapped_column(
-        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    authoritative_site_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT")
     )
     event_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("events.event_id", ondelete="RESTRICT")
@@ -1088,6 +1088,12 @@ class MediaReplicationReceiveSession(CentralRecordMixin, CentralBase):
 class PresentationAsset(CentralRecordMixin, CentralBase):
     __tablename__ = "presentation_assets"
     __table_args__ = (
+        Index(
+            "uq_central_presentation_assets_original_version",
+            "presentation_version_id",
+            unique=True,
+            postgresql_where=text("kind = 'original'"),
+        ),
         CheckConstraint(
             "(kind = 'original' AND source_asset_id IS NULL) OR "
             "(kind = 'derivative' AND source_asset_id IS NOT NULL)",

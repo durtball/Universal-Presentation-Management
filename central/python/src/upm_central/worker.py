@@ -26,7 +26,12 @@ from upm_central.persistence.models import (
     utc_now,
 )
 from upm_central.persistence.queue import CentralQueue
-from upm_central.presentation_media import CentralMediaStagingService
+from upm_central.presentation_media import (
+    ASSET_RECONCILIATION_JOB,
+    CentralMediaStagingService,
+    backfill_confirmed_original_assets,
+    enqueue_asset_reconciliation,
+)
 from upm_central.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
 )
@@ -74,6 +79,11 @@ def execute_processing_job(
         return True
     if work.job_type == "operational_logs.prune":
         prune_logs(session, int(work.payload.get("data", {}).get("retention_days", 30)))
+        return True
+    if work.job_type == ASSET_RECONCILIATION_JOB:
+        repaired = backfill_confirmed_original_assets(session)
+        enqueue_asset_reconciliation(session, current_job_id=work.processing_job_id)
+        log("presentation_assets_reconciled", repaired=repaired)
         return True
     if work.job_type == "presentation_media.promote":
         if media_processor is None:
@@ -194,6 +204,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             )
         enqueue_smb_reconciliation(session)
         enqueue_smb_presentations(session, delay_seconds=0)
+        enqueue_asset_reconciliation(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -225,7 +236,10 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     if kind == "processing" and (
-                        work.job_type.startswith("presentation_media.")
+                        (
+                            work.job_type.startswith("presentation_media.")
+                            and work.job_type != ASSET_RECONCILIATION_JOB
+                        )
                         or work.job_type
                         in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB, SMB_PRESENTATIONS_JOB}
                     ):

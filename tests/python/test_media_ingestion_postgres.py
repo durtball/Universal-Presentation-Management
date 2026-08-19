@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from upm_shared.enums import MediaAvailability, MediaCategory, StorageHealth, StorageType
+from upm_shared.enums import AssetKind, MediaAvailability, MediaCategory, StorageHealth, StorageType
 from upm_shared.identifiers import new_uuid7
 from upm_site.api import create_app
 from upm_site.config import SiteSettings
@@ -22,6 +22,7 @@ from upm_site.media.cleanup import cleanup_stale_ingestions
 from upm_site.media.ingestion import IngestionError, IngestionRequest, MediaIngestionService
 from upm_site.media.storage import generate_object_key, staging_path
 from upm_site.persistence.models import (
+    AuditRecord,
     Event,
     MediaObject,
     MediaReplicationSession,
@@ -33,6 +34,7 @@ from upm_site.persistence.models import (
     StorageTarget,
     TransferJob,
 )
+from upm_site.presentation_media_api import backfill_confirmed_original_assets
 
 SITE_URL = os.getenv("UPM_SITE_DATABASE_URL")
 pytestmark = [
@@ -58,6 +60,49 @@ class FailingReader(BoundedReader):
         if self.read_calls == 1:
             raise OSError("simulated interrupted upload")
         return super().read(size)
+
+
+def test_site_confirmed_audit_backfills_original_asset(factory, media_context) -> None:
+    media_id = new_uuid7()
+    version_id = media_context["version_id"]
+    with factory.begin() as session:
+        session.add(
+            MediaObject(
+                media_object_id=media_id,
+                site_id=media_context["site_id"],
+                event_id=media_context["event_id"],
+                storage_target_id=media_context["target_id"],
+                object_key=f"objects/sha256/{media_id}",
+                category=MediaCategory.PRESENTATION_VERSION,
+                original_filename="generated.pptx",
+                availability=MediaAvailability.AVAILABLE,
+                size_bytes=9,
+                content_hash="b" * 64,
+                hash_algorithm="sha256",
+            )
+        )
+        session.add(
+            AuditRecord(
+                actor_id="test",
+                action="site.presentation_media.confirmed",
+                target_type="media_object",
+                target_id=media_id,
+                site_id=media_context["site_id"],
+                event_id=media_context["event_id"],
+                after_context={
+                    "presentation_version_id": str(version_id),
+                    "presentation_id": str(media_context["presentation_id"]),
+                },
+            )
+        )
+    with factory.begin() as session:
+        assert backfill_confirmed_original_assets(session, media_context["site_id"]) == 1
+        assert backfill_confirmed_original_assets(session, media_context["site_id"]) == 0
+        asset = session.scalar(
+            select(PresentationAsset).where(PresentationAsset.presentation_version_id == version_id)
+        )
+        assert asset.kind is AssetKind.ORIGINAL
+        assert asset.media_object_id == media_id
 
 
 @pytest.fixture
@@ -112,6 +157,7 @@ def media_context(factory: sessionmaker[Session], tmp_path: Path) -> dict[str, o
     return {
         "site_id": site_id,
         "event_id": event_id,
+        "presentation_id": presentation_id,
         "version_id": version_id,
         "target_id": target_id,
         "root": tmp_path,

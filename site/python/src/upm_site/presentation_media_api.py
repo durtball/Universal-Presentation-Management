@@ -3,6 +3,7 @@
 # ruff: noqa: E501
 
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
@@ -48,9 +49,11 @@ from upm_site.persistence.models import (
     PresentationPresenter,
     PresentationSession,
     PresentationVersion,
+    ProcessingJob,
     Room,
     RoomAssignment,
     TransferJob,
+    utc_now,
 )
 from upm_site.persistence.models import Session as ProgramSession
 from upm_site.persistence.queue import SiteQueue
@@ -70,6 +73,61 @@ class SiteMediaConfirmation(BaseModel):
 
 class SiteMediaConfirmationBatch(BaseModel):
     items: list[dict[str, UUID]] = Field(min_length=1, max_length=500)
+
+
+ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
+
+
+def enqueue_asset_reconciliation(session: Session, site_id: UUID, *, current_job_id=None):
+    existing = session.scalar(select(ProcessingJob).where(
+        ProcessingJob.site_id == site_id, ProcessingJob.job_type == ASSET_RECONCILIATION_JOB,
+        ProcessingJob.status.in_(["pending", "running", "retry_wait"]),
+        ProcessingJob.processing_job_id != current_job_id))
+    if existing is not None:
+        return existing
+    job = ProcessingJob(
+        site_id=site_id, job_type=ASSET_RECONCILIATION_JOB,
+        payload={"schema_version": 1, "data": {"site_id": str(site_id)}},
+        idempotency_key=f"presentation-assets:{new_uuid7()}", required_capabilities=["cpu"],
+        next_attempt_at=utc_now() + timedelta(seconds=30))
+    session.add(job)
+    return job
+
+
+def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
+    """Repair only audit-confirmed media/version pairs; never infer from labels."""
+    repaired = 0
+    audits = session.scalars(select(AuditRecord).where(
+        AuditRecord.site_id == site_id,
+        AuditRecord.action == "site.presentation_media.confirmed",
+        AuditRecord.target_type == "media_object"))
+    for audit in audits:
+        context = audit.after_context or {}
+        if not context.get("presentation_version_id") or not context.get("presentation_id"):
+            continue
+        try:
+            version_id = UUID(str(context["presentation_version_id"]))
+        except ValueError:
+            continue
+        media, version = session.get(MediaObject, audit.target_id), session.get(PresentationVersion, version_id)
+        if (media is None or media.deleted_at is not None
+                or media.availability != MediaAvailability.AVAILABLE
+                or not media.content_hash or media.size_bytes is None or version is None
+                or str(version.presentation_id) != str(context["presentation_id"])):
+            continue
+        existing = session.scalar(select(PresentationAsset).where(
+            PresentationAsset.presentation_version_id == version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL))
+        if existing is None:
+            session.add(PresentationAsset(presentation_version_id=version_id,
+                                          media_object_id=media.media_object_id,
+                                          kind=AssetKind.ORIGINAL))
+            presentation = session.get(Presentation, version.presentation_id)
+            if presentation is not None:
+                presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
+            repaired += 1
+    session.flush()
+    return repaired
 
 
 def _candidate_rows(session: Session, event_id: UUID, search: str, limit: int,
@@ -374,12 +432,32 @@ def register_presentation_media_routes(
         if presentation is None or presentation.event_id != media.event_id:
             raise HTTPException(422, "presentation is not in the media Event")
         existing = session.scalar(select(PresentationAsset).where(
-            PresentationAsset.media_object_id == media_id))
+            PresentationAsset.media_object_id == media_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL))
         if existing:
             version = session.get(PresentationVersion, existing.presentation_version_id)
             return {"media_object_id": media_id, "presentation_id": version.presentation_id,
                     "presentation_version_id": version.presentation_version_id,
                     "version_number": version.version_number, "duplicate": True}
+        confirmation = session.scalar(select(AuditRecord).where(
+            AuditRecord.action == "site.presentation_media.confirmed",
+            AuditRecord.target_type == "media_object", AuditRecord.target_id == media_id)
+            .order_by(AuditRecord.occurred_at.desc()))
+        if confirmation is not None:
+            version_value = (confirmation.after_context or {}).get("presentation_version_id")
+            if version_value:
+                version = session.get(PresentationVersion, UUID(str(version_value)))
+                if version is not None:
+                    if version.presentation_id != presentation_id:
+                        raise HTTPException(409, "media was confirmed to another presentation")
+                    session.add(PresentationAsset(
+                        presentation_version_id=version.presentation_version_id,
+                        media_object_id=media_id, kind=AssetKind.ORIGINAL))
+                    session.flush()
+                    return {"media_object_id": media_id,
+                            "presentation_id": version.presentation_id,
+                            "presentation_version_id": version.presentation_version_id,
+                            "version_number": version.version_number, "duplicate": True}
         session.execute(select(Presentation.presentation_id).where(
             Presentation.presentation_id == presentation_id).with_for_update())
         number = (session.scalar(select(func.max(PresentationVersion.version_number)).where(
