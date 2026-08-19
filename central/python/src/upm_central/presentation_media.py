@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
@@ -68,6 +69,8 @@ from upm_shared.presentation_media import (
 
 logger = logging.getLogger(__name__)
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
+RESCAN_JOB = "presentation_media.rescan"
+RESCAN_BATCH_SIZE = 75
 
 ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.PENDING,
@@ -664,7 +667,7 @@ class CentralMediaStagingService:
                     in SUPPORTED_PRESENTATION_EXTENSIONS
                 )
                 if recognized:
-                    self._automatic_match_and_assign(session, record)
+                    self.refresh_match_suggestion(session, record)
                 else:
                     record.match_state = MediaMatchState.UNMATCHED
                     record.match_reason = "Unclassified media type preserved for operator review"
@@ -710,6 +713,88 @@ class CentralMediaStagingService:
                     )
                     _complete_batch_if_accounted(session, record.batch_id)
             raise
+
+    def refresh_match_suggestion(self, session: Session, record: PresentationMediaImport) -> None:
+        """Refresh metadata-only suggestions without assigning or touching stored media."""
+        self._automatic_match_and_assign(session, record)
+
+    def rescan(
+        self,
+        processing_job_id: UUID,
+        worker_id: str,
+        *,
+        lease_seconds: int = 60,
+        batch_size: int = RESCAN_BATCH_SIZE,
+    ) -> dict[str, int]:
+        """Resume a durable metadata-only event rescan, committing after bounded batches."""
+        while True:
+            with self.factory.begin() as session:
+                job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
+                if job is None or job.job_type != RESCAN_JOB:
+                    raise MediaStagingError("media rescan job not found", "not_found")
+                if job.status is not JobStatus.RUNNING or job.claimed_by_worker_id != worker_id:
+                    raise MediaStagingError("media rescan lease is no longer owned", "lease_lost")
+                data = dict(job.payload.get("data", {}))
+                media_import_ids = list(data.get("media_import_ids", []))
+                processed = int(data.get("processed", 0))
+                if processed >= len(media_import_ids):
+                    return {
+                        key: int(data.get(key, 0))
+                        for key in ("total", "processed", "suggested", "unmatched", "failed")
+                    }
+                current_ids = media_import_ids[processed : processed + batch_size]
+                counts = {
+                    "suggested": int(data.get("suggested", 0)),
+                    "unmatched": int(data.get("unmatched", 0)),
+                    "failed": int(data.get("failed", 0)),
+                }
+                for value in current_ids:
+                    try:
+                        with session.begin_nested():
+                            record = session.get(
+                                PresentationMediaImport, UUID(str(value)), with_for_update=True
+                            )
+                            eligible = bool(
+                                record
+                                and record.event_id == UUID(str(data["event_id"]))
+                                and record.presentation_id is None
+                                and record.match_state is not MediaMatchState.CONFIRMED
+                                and record.import_state is MediaImportState.NEEDS_REVIEW
+                            )
+                            if not eligible:
+                                continue
+                            if (
+                                Path(record.original_filename).suffix.lower()
+                                in SUPPORTED_PRESENTATION_EXTENSIONS
+                            ):
+                                self.refresh_match_suggestion(session, record)
+                            else:
+                                record.match_state = MediaMatchState.UNMATCHED
+                                record.match_reason = (
+                                    "Unclassified media type preserved for operator review"
+                                )
+                                record.match_candidates = []
+                            if record.match_state is MediaMatchState.SUGGESTED:
+                                counts["suggested"] += 1
+                            else:
+                                counts["unmatched"] += 1
+                    except Exception:
+                        logger.exception(
+                            "presentation_media_rescan_item_failed",
+                            extra={"media_import_id": str(value)},
+                        )
+                        counts["failed"] += 1
+                processed += len(current_ids)
+                data.update(counts)
+                data["processed"] = processed
+                job.payload = {**job.payload, "data": data}
+                job.progress = Decimal(processed * 100 / max(len(media_import_ids), 1)).quantize(
+                    Decimal("0.01")
+                )
+                now = utc_now()
+                job.heartbeat_at = now
+                job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                session.flush()
 
     def queue_promotion(
         self,

@@ -28,6 +28,7 @@ from upm_central.persistence.models import (
 from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import (
     ASSET_RECONCILIATION_JOB,
+    RESCAN_JOB,
     CentralMediaStagingService,
     backfill_confirmed_original_assets,
     enqueue_asset_reconciliation,
@@ -71,6 +72,11 @@ def execute_processing_job(
     session, queue: CentralQueue, work, worker_id: str, media_processor=None
 ) -> bool:
     """Dispatch one claimed Central processing job; return false when it was failed."""
+    if work.job_type == RESCAN_JOB:
+        if media_processor is None:
+            raise RuntimeError("presentation media processor is unavailable")
+        media_processor.rescan(work.processing_job_id, worker_id)
+        return True
     if work.job_type == "presentation_media.process":
         if media_processor is None:
             raise RuntimeError("presentation media processor is unavailable")

@@ -1,4 +1,6 @@
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import Integer
@@ -6,6 +8,7 @@ from sqlalchemy import Integer
 from upm_central.api import create_app
 from upm_central.persistence.models import StorageRoot
 from upm_central.presentation_media import MediaStagingError, _safe_staging_path
+from upm_central.worker import execute_processing_job
 
 
 def test_staging_key_cannot_escape_configured_root(tmp_path: Path) -> None:
@@ -66,6 +69,26 @@ def test_storage_root_uses_standard_central_record_revision() -> None:
     assert revision.nullable is False
     assert revision.default is not None
     assert revision.default.arg == 1
+
+
+def test_worker_dispatches_dedicated_presentation_media_rescan_job() -> None:
+    job_id = uuid4()
+
+    class Processor:
+        called_with = None
+
+        def rescan(self, processing_job_id, worker_id):
+            self.called_with = (processing_job_id, worker_id)
+
+    processor = Processor()
+    work = SimpleNamespace(
+        job_type="presentation_media.rescan",
+        processing_job_id=job_id,
+        payload={"data": {"event_id": str(uuid4())}},
+    )
+
+    assert execute_processing_job(None, None, work, "worker-1", processor)
+    assert processor.called_with == (job_id, "worker-1")
 
 
 def test_central_presentation_ingestion_has_no_legacy_data_path_dependency() -> None:

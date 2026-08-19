@@ -94,31 +94,49 @@ class MediaBatchCreate(BaseModel):
 def _rescan_progress(
     session: Session, operation_id: UUID, delivered_count: int = 0
 ) -> dict[str, object]:
-    jobs = session.scalars(
+    job = session.scalar(
         select(ProcessingJob).where(
-            ProcessingJob.job_type == "presentation_media.process",
-            ProcessingJob.payload["data"]["rescan_operation_id"].astext == str(operation_id),
+            ProcessingJob.job_type == "presentation_media.rescan",
+            ProcessingJob.payload["data"]["operation_id"].astext == str(operation_id),
         )
-    ).all()
-    complete = sum(job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED} for job in jobs)
-    completed_jobs = sorted(
-        (job for job in jobs if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}),
-        key=lambda job: (job.completed_at or job.updated_at, job.processing_job_id),
     )
+    if job is None:
+        return {
+            "operation_id": operation_id,
+            "complete": 0,
+            "processed": 0,
+            "total": 0,
+            "suggested": 0,
+            "unmatched": 0,
+            "failed": 0,
+            "status": "not_found",
+            "finished": False,
+            "items": [],
+        }
+    data = job.payload.get("data", {})
+    processed = int(data.get("processed", 0))
     completed_ids = [
-        UUID(str(job.payload["data"]["media_import_id"]))
-        for job in completed_jobs[delivered_count:]
+        UUID(str(value)) for value in data.get("media_import_ids", [])[delivered_count:processed]
     ]
-    updated = session.scalars(
-        select(PresentationMediaImport).where(
-            PresentationMediaImport.media_import_id.in_(completed_ids)
-        )
-    ).all() if completed_ids else []
+    updated = (
+        session.scalars(
+            select(PresentationMediaImport).where(
+                PresentationMediaImport.media_import_id.in_(completed_ids)
+            )
+        ).all()
+        if completed_ids
+        else []
+    )
     return {
         "operation_id": operation_id,
-        "complete": complete,
-        "total": len(jobs),
-        "finished": complete == len(jobs),
+        "complete": processed,
+        "processed": processed,
+        "total": int(data.get("total", 0)),
+        "suggested": int(data.get("suggested", 0)),
+        "unmatched": int(data.get("unmatched", 0)),
+        "failed": int(data.get("failed", 0)),
+        "status": job.status.value,
+        "finished": job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.EXHAUSTED},
         "items": [_view(item, session) for item in updated],
     }
 
@@ -211,9 +229,7 @@ def _candidate_views(
     return result
 
 
-def _view(
-    item: PresentationMediaImport, session: Session | None = None
-) -> dict[str, object]:
+def _view(item: PresentationMediaImport, session: Session | None = None) -> dict[str, object]:
     suggested_candidate = None
     if (
         session is not None
@@ -225,9 +241,7 @@ def _view(
         except (KeyError, TypeError, ValueError):
             suggested_id = None
         if suggested_id is not None:
-            candidates = _candidate_views(
-                session, item.event_id, presentation_ids={suggested_id}
-            )
+            candidates = _candidate_views(session, item.event_id, presentation_ids={suggested_id})
             suggested_candidate = candidates[0] if candidates else None
     return {
         "media_import_id": item.media_import_id,
@@ -647,56 +661,63 @@ def register_presentation_media_routes(
         tags=["media"],
     )
     def rescan_unmatched(event_id: UUID, session: DbSession) -> dict[str, object]:
+        event = session.scalar(select(Event).where(Event.event_id == event_id).with_for_update())
+        if event is None:
+            raise HTTPException(404, "event not found")
         active = session.scalar(
-            select(ProcessingJob).where(
-                ProcessingJob.job_type == "presentation_media.process",
+            select(ProcessingJob)
+            .where(
+                ProcessingJob.job_type == "presentation_media.rescan",
                 ProcessingJob.payload["data"]["event_id"].astext == str(event_id),
-                ProcessingJob.payload["data"]["rescan_operation_id"].astext.is_not(None),
                 ProcessingJob.status.in_(
                     [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT]
                 ),
-            ).limit(1)
+            )
+            .limit(1)
         )
         if active is not None:
-            return _rescan_progress(
-                session, UUID(str(active.payload["data"]["rescan_operation_id"]))
-            )
+            return _rescan_progress(session, UUID(str(active.payload["data"]["operation_id"])))
         operation_id = new_uuid7()
-        unresolved = session.scalars(
-            select(PresentationMediaImport).where(
-                PresentationMediaImport.event_id == event_id,
-                PresentationMediaImport.presentation_id.is_(None),
-                PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
-                PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+        media_import_ids = list(
+            session.scalars(
+                select(PresentationMediaImport.media_import_id)
+                .where(
+                    PresentationMediaImport.event_id == event_id,
+                    PresentationMediaImport.presentation_id.is_(None),
+                    PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+                    PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+                )
+                .order_by(PresentationMediaImport.media_import_id)
             )
-        ).all()
-        queue = CentralQueue(session)
-        for item in unresolved:
-            queue.enqueue_processing(
-                job_type="presentation_media.process",
-                payload={
-                    "data": {
-                        "media_import_id": str(item.media_import_id),
-                        "event_id": str(event_id),
-                        "rescan_operation_id": str(operation_id),
-                    }
-                },
-                idempotency_key=f"rescan:{operation_id}:{item.media_import_id}",
-                required_capabilities=["cpu"],
-                max_attempts=5,
-            )
+        )
+        CentralQueue(session).enqueue_processing(
+            job_type="presentation_media.rescan",
+            payload={
+                "data": {
+                    "operation_id": str(operation_id),
+                    "event_id": str(event_id),
+                    "media_import_ids": [str(value) for value in media_import_ids],
+                    "total": len(media_import_ids),
+                    "processed": 0,
+                    "suggested": 0,
+                    "unmatched": 0,
+                    "failed": 0,
+                }
+            },
+            idempotency_key=f"rescan:{operation_id}",
+            required_capabilities=["cpu"],
+            max_attempts=5,
+        )
         return _rescan_progress(session, operation_id)
 
-    @app.get(
-        "/api/v1/admin/media-rescans/{operation_id}", dependencies=admin, tags=["media"]
-    )
+    @app.get("/api/v1/admin/media-rescans/{operation_id}", dependencies=admin, tags=["media"])
     def rescan_status(
         operation_id: UUID,
         session: DbSession,
         delivered_count: Annotated[int, Query(ge=0)] = 0,
     ) -> dict[str, object]:
         progress = _rescan_progress(session, operation_id, delivered_count)
-        if progress["total"] == 0:
+        if progress["status"] == "not_found":
             raise HTTPException(404, "media rescan not found")
         return progress
 
@@ -718,7 +739,7 @@ def register_presentation_media_routes(
                 actor="presentation-media-rematch",
             )
             touch_event_program(session, event)
-        staging_service()._automatic_match_and_assign(session, item)
+        staging_service().refresh_match_suggestion(session, item)
         return _view(item, session)
 
     @app.post(
