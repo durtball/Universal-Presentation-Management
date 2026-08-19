@@ -55,8 +55,33 @@ def test_smb_services_join_edge_and_internal_networks_without_exposing_postgres(
         assert f"  {deployment}-internal:\n    internal: true" in compose
 
 
+def test_central_and_site_default_to_dynamic_smb_interfaces() -> None:
+    for deployment in ("central", "site"):
+        compose = (ROOT / f"docker-compose.{deployment}.yml").read_text()
+        assert f"UPM_{deployment.upper()}_SMB_INTERFACES:-auto" in compose
+        assert "SMB_INTERFACES:-lo eth0" not in compose
+
+
+def test_interface_discovery_includes_all_active_networks(tmp_path, monkeypatch) -> None:
+    import upm_smb_edge.interfaces as interfaces
+
+    for name, state in (("lo", "unknown"), ("eth0", "up"), ("eth1", "up"), ("eth2", "down")):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "operstate").write_text(state)
+    monkeypatch.setattr(
+        interfaces.socket,
+        "if_nameindex",
+        lambda: [(1, "lo"), (2, "eth1"), (3, "eth0"), (4, "eth2")],
+    )
+    assert interfaces.active_interfaces(tmp_path) == ["lo", "eth0", "eth1"]
+
+
 def test_startup_repairs_share_roots_without_recursive_reownership() -> None:
     entrypoint = (ROOT / "smb-edge/entrypoint.sh").read_text()
+    assert 'UPM_SMB_INTERFACES:=auto' in entrypoint
+    assert "python -m upm_smb_edge.interfaces" in entrypoint
+    assert "testparm -s /etc/samba/smb.conf" in entrypoint
     assert "chgrp upm_read_only /shares/presentations" not in entrypoint
     assert "chmod 2755 /shares/presentations" not in entrypoint
     assert "chgrp upm_operator /shares/incoming" in entrypoint
@@ -144,6 +169,106 @@ def test_health_validates_read_only_presentations_without_requiring_ownership(mo
     assert api.share_permission_errors() == [
         "/shares/presentations: mode 0700, requires read/traverse access"
     ]
+
+
+def test_readiness_checks_configuration_and_tcp_445_on_every_interface(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import upm_smb_edge.api as api
+
+    checked = []
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        api,
+        "configured_interface_addresses",
+        lambda: [("lo", "127.0.0.1"), ("eth0", "172.19.0.4"), ("eth1", "172.20.0.5")],
+    )
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def connect(address, timeout):
+        checked.append((address, timeout))
+        return Connection()
+
+    monkeypatch.setattr(api.socket, "create_connection", connect)
+    assert api.smb_readiness_errors() == []
+    assert checked == [
+        (("127.0.0.1", 445), 1),
+        (("172.19.0.4", 445), 1),
+        (("172.20.0.5", 445), 1),
+    ]
+
+
+def test_readiness_rejects_invalid_config_or_unbound_published_interface(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import upm_smb_edge.api as api
+
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    monkeypatch.setattr(
+        api,
+        "configured_interface_addresses",
+        lambda: [("lo", "127.0.0.1"), ("eth1", "172.20.0.5")],
+    )
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def connect(address, timeout):
+        del timeout
+        if address[0] == "172.20.0.5":
+            raise ConnectionRefusedError
+        return Connection()
+
+    monkeypatch.setattr(api.socket, "create_connection", connect)
+    assert api.smb_readiness_errors() == [
+        "Samba configuration is invalid",
+        "TCP 445 is not listening on eth1",
+    ]
+
+
+def test_readiness_accepts_single_network_container(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import upm_smb_edge.api as api
+
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        api,
+        "configured_interface_addresses",
+        lambda: [("lo", "127.0.0.1"), ("eth0", "172.20.0.5")],
+    )
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(api.socket, "create_connection", lambda *_args, **_kwargs: Connection())
+    assert api.smb_readiness_errors() == []
 
 
 def test_higher_roles_receive_incoming_filesystem_group(monkeypatch) -> None:

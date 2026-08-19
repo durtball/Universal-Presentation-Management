@@ -1,7 +1,14 @@
 #!/bin/sh
 set -eu
 : "${UPM_SMB_HOSTNAME:=UPM-SITE}"
-: "${UPM_SMB_INTERFACES:=lo eth0}"
+: "${UPM_SMB_INTERFACES:=auto}"
+if [ "$UPM_SMB_INTERFACES" = "auto" ]; then
+    UPM_SMB_INTERFACES="$(python -m upm_smb_edge.interfaces)"
+fi
+if [ "$UPM_SMB_INTERFACES" = "lo" ]; then
+    echo "No active non-loopback SMB interface was discovered" >&2
+    exit 1
+fi
 for group in read_only technician operator manager administrator; do addgroup -S "upm_$group" 2>/dev/null || true; done
 mkdir -p /shares/presentations /shares/incoming /shares/trash /var/lib/samba/private
 # Presentations is an intentionally read-only Media Storage-owned mount. Validate it through the
@@ -17,5 +24,7 @@ python -m upm_smb_edge.accounts
 sed -e "s/\${UPM_SMB_INTERFACES}/${UPM_SMB_INTERFACES}/g" \
     -e "s/\${UPM_SMB_HOSTNAME}/${UPM_SMB_HOSTNAME}/g" \
     /etc/samba/smb.conf.template >/etc/samba/smb.conf
+printf '%s\n' "$UPM_SMB_INTERFACES" >/run/upm-smb-interfaces
+testparm -s /etc/samba/smb.conf >/dev/null
 smbd --foreground --no-process-group &
 exec uvicorn upm_smb_edge.api:app --host 0.0.0.0 --port 8080

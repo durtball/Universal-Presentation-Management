@@ -1,11 +1,15 @@
 """Authenticated control plane for deployment-local Samba credentials."""
 
+import fcntl
 import grp
 import hmac
 import os
 import re
+import socket
 import stat
+import struct
 import subprocess
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException
@@ -24,6 +28,7 @@ READ_ONLY_SHARE_REQUIREMENTS = {
     # must not require an ownership repair that cannot succeed from the edge container.
     "/shares/presentations": 0o555,
 }
+INTERFACES_PATH = "/run/upm-smb-interfaces"
 
 
 class Credential(BaseModel):
@@ -80,6 +85,49 @@ def share_permission_errors() -> list[str]:
     return errors
 
 
+def configured_interface_addresses() -> list[tuple[str, str]]:
+    names = Path(INTERFACES_PATH).read_text().split()
+    addresses = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as descriptor:
+        for name in names:
+            try:
+                packed = fcntl.ioctl(
+                    descriptor.fileno(),
+                    0x8915,  # Linux SIOCGIFADDR
+                    struct.pack("256s", name.encode()[:15]),
+                )
+            except OSError:
+                continue
+            addresses.append((name, socket.inet_ntoa(packed[20:24])))
+    return addresses
+
+
+def smb_readiness_errors() -> list[str]:
+    errors = []
+    configuration = subprocess.run(
+        ["testparm", "-s", "/etc/samba/smb.conf"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if configuration.returncode != 0:
+        errors.append("Samba configuration is invalid")
+    try:
+        addresses = configured_interface_addresses()
+    except OSError:
+        addresses = []
+    non_loopback = [(name, address) for name, address in addresses if name != "lo"]
+    if not non_loopback:
+        errors.append("no active non-loopback SMB interface is configured")
+    for name, address in addresses:
+        try:
+            with socket.create_connection((address, 445), timeout=1):
+                pass
+        except OSError:
+            errors.append(f"TCP 445 is not listening on {name}")
+    return errors
+
+
 @app.get("/health")
 def health():
     running = (
@@ -93,11 +141,11 @@ def health():
     )
     if not running:
         raise HTTPException(503, "Samba is not responding")
-    permission_errors = share_permission_errors()
-    if permission_errors:
+    readiness_errors = [*smb_readiness_errors(), *share_permission_errors()]
+    if readiness_errors:
         raise HTTPException(
             503,
-            detail={"message": "SMB share permissions are invalid", "errors": permission_errors},
+            detail={"message": "SMB service is not ready", "errors": readiness_errors},
         )
     return {
         "service": "upm-smb-edge",
