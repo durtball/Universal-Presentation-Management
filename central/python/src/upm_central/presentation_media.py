@@ -928,8 +928,13 @@ class CentralMediaStagingService:
         else:
             candidates = self._load_match_candidates(session, record.event_id)
             self._candidate_cache[record.event_id] = (event_revision, candidates)
+        event_timezone = (
+            session.scalar(select(Event.timezone).where(Event.event_id == record.event_id)) or "UTC"
+        )
         result = match_presentation(
-            record.source_relative_path or record.original_filename, candidates
+            record.source_relative_path or record.original_filename,
+            candidates,
+            event_timezone=event_timezone,
         )
         record.match_state = result.state
         record.match_reason = result.reason

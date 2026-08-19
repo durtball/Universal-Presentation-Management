@@ -34,6 +34,13 @@ def test_source_relative_path_is_safe_provenance_only() -> None:
             normalize_source_relative_path(unsafe, "deck.pptx")
 
 
+def test_source_relative_path_normalizes_windows_separators_without_losing_folders() -> None:
+    assert (
+        normalize_source_relative_path(r"Wednesday\0930\Ballroom A\final.pptx", "final.pptx")
+        == "Wednesday/0930/Ballroom A/final.pptx"
+    )
+
+
 def test_matcher_prefers_longest_known_identifier_prefix_and_boundaries() -> None:
     ids = ["3261639", "3273219", "3418952", "A4-827", "123", "1234"]
     candidates = [
@@ -59,6 +66,87 @@ def test_no_match_is_reviewable_not_an_exception() -> None:
         "random-speaker-deck.pptx",
         [MatchCandidate(UUID(int=1), "UPM-123", "123")],
     )
+    assert result.state is MediaMatchState.UNMATCHED
+    assert result.presentation_id is None
+
+
+def test_exact_presentation_identifier_in_ancestor_folder_is_strong_evidence() -> None:
+    candidate = MatchCandidate(UUID(int=1), "P-1042", title="AI Strategy")
+    result = match_presentation("Day 1/P-1042/Review/final.pptx", [candidate])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == candidate.presentation_id
+    assert result.confidence == "high"
+    assert "Presentation ID P-1042 matched ancestor folder" in result.reason
+
+
+def test_exact_session_identifier_in_folder_is_strong_evidence() -> None:
+    candidate = MatchCandidate(
+        UUID(int=1), "UPM-1", session_external_id="S-220", session_title="AI Strategy"
+    )
+    result = match_presentation("Wednesday/S-220/final.pptx", [candidate])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == candidate.presentation_id
+    assert "Session ID S-220 matched parent folder" in result.reason
+
+
+def test_presenter_room_time_and_title_folders_rank_a_weak_filename() -> None:
+    candidate = MatchCandidate(
+        UUID(int=1),
+        "UPM-1",
+        title="AI Strategy",
+        presenter_family_name="Smith",
+        presenter_given_name="John",
+        session_title="AI Strategy",
+        room="Ballroom A",
+        starts_at=datetime(2026, 8, 19, 13, 30, tzinfo=UTC),
+    )
+    result = match_presentation(
+        "Wednesday/0930/Ballroom A/John Smith - AI Strategy/final_v3.pptx",
+        [candidate],
+        event_timezone="America/New_York",
+    )
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == candidate.presentation_id
+    assert result.confidence == "high"
+    assert any("Presenter" in item for item in result.candidates[0]["evidence"])
+    assert any("Room" in item for item in result.candidates[0]["evidence"])
+    assert any("09:30" in item for item in result.candidates[0]["evidence"])
+    assert any("Title" in item for item in result.candidates[0]["evidence"])
+    # Matching remains suggestion-only even when several exact path signals agree.
+    assert result.state is not MediaMatchState.CONFIRMED
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["Ballroom A/Smith/final.pptx", r"Ballroom A\Smith\final.pptx"],
+)
+def test_posix_and_windows_folder_evidence_rank_the_same_candidate(path: str) -> None:
+    target = MatchCandidate(UUID(int=1), "UPM-1", presenter_family_name="Smith", room="Ballroom A")
+    other = MatchCandidate(UUID(int=2), "UPM-2", presenter_family_name="Jones", room="Ballroom B")
+    result = match_presentation(path, [other, target])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == target.presentation_id
+
+
+def test_ambiguous_folder_evidence_remains_operator_reviewable() -> None:
+    candidates = [
+        MatchCandidate(UUID(int=1), "UPM-1", presenter_family_name="Smith", room="Ballroom A"),
+        MatchCandidate(UUID(int=2), "UPM-2", presenter_family_name="Smith", room="Ballroom A"),
+    ]
+    result = match_presentation("Ballroom A/Smith/final.pptx", candidates)
+
+    assert result.state is MediaMatchState.AMBIGUOUS
+    assert result.presentation_id is None
+
+
+def test_unmatched_folder_structure_keeps_file_reviewable() -> None:
+    candidate = MatchCandidate(UUID(int=1), "P-1", presenter_family_name="Smith")
+    result = match_presentation("Unknown/Unscheduled/final.pptx", [candidate])
+
     assert result.state is MediaMatchState.UNMATCHED
     assert result.presentation_id is None
 

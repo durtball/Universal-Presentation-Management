@@ -354,6 +354,9 @@ async def test_generated_500_file_batch_remains_staged_before_confirmation() -> 
                 select(PresentationMediaImport).where(PresentationMediaImport.event_id == event_id)
             ).all()
             assert len(imports) == 500
+            assert {item.source_relative_path for item in imports} == {
+                f"batch/unknown-{index}.pptx" for index in range(500)
+            }
             assert all(item.import_state == MediaImportState.STAGED for item in imports)
             assert all(item.staging_key and item.staging_storage_root_id for item in imports)
             assert all(item.committed_storage_key is None for item in imports)
