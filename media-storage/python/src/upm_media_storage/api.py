@@ -22,6 +22,12 @@ class CommitRequest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class IncomingCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    size_bytes: int = Field(ge=0)
+    modified_ns: int = Field(ge=0)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     configured = settings or Settings()
     storage = StorageService(configured)
@@ -58,6 +64,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/storage/targets", dependencies=private)
     def targets() -> dict:
         return {"targets": [storage.payload(item) for item in storage.targets.values()]}
+
+    def incoming_path(relative_path: str):
+        root = configured.smb_incoming_path
+        if root is None:
+            raise HTTPException(404, "SMB Incoming is not configured")
+        candidate = (root / relative_path).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError as error:
+            raise HTTPException(422, "invalid Incoming path") from error
+        return candidate
+
+    @app.get("/api/v1/storage/smb/incoming", dependencies=private)
+    def incoming_files() -> dict:
+        root = configured.smb_incoming_path
+        if root is None or not root.exists():
+            return {"files": []}
+        files = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            files.append(
+                {
+                    "relative_path": path.relative_to(root).as_posix(),
+                    "size_bytes": stat.st_size,
+                    "modified_ns": stat.st_mtime_ns,
+                }
+            )
+        return {"files": files}
+
+    @app.get("/api/v1/storage/smb/incoming/{relative_path:path}", dependencies=private)
+    def read_incoming(
+        relative_path: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(4_194_304, ge=1, le=67_108_864),
+    ):
+        path = incoming_path(relative_path)
+        if not path.is_file():
+            raise HTTPException(404, "Incoming file not found")
+        size = path.stat().st_size
+        if offset > size:
+            raise HTTPException(416, "offset exceeds Incoming file size")
+        count = min(limit, size - offset)
+
+        def content():
+            with path.open("rb") as source:
+                source.seek(offset)
+                yield source.read(count)
+
+        return StreamingResponse(
+            content(), media_type="application/octet-stream", headers={"Content-Length": str(count)}
+        )
+
+    @app.post("/api/v1/storage/smb/incoming/{relative_path:path}/complete", dependencies=private)
+    def complete_incoming(relative_path: str, payload: IncomingCompleteRequest) -> dict:
+        path = incoming_path(relative_path)
+        if not path.is_file():
+            return {"removed": True, "already_missing": True}
+        stat = path.stat()
+        if stat.st_size != payload.size_bytes or stat.st_mtime_ns != payload.modified_ns:
+            raise HTTPException(409, "Incoming file changed during intake")
+        path.unlink()
+        return {"removed": True, "already_missing": False}
 
     @app.post("/api/v1/storage/targets/{target_id}/test", dependencies=private)
     def test_target(target_id: UUID) -> dict:

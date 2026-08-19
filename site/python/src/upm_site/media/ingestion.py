@@ -91,6 +91,9 @@ class IngestionRequest:
     client_mime_type: str | None = None
     source_relative_path: str | None = None
     replicate_to_central: bool = True
+    intake_origin: str = "browser"
+    source_actor: str | None = None
+    source_share: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -639,6 +642,9 @@ class MediaIngestionService:
                 source_relative_path=normalize_source_relative_path(
                     request.source_relative_path, filename
                 ),
+                intake_origin=request.intake_origin,
+                source_actor=request.source_actor,
+                source_share=request.source_share,
                 canonical_filename=canonical_filename,
                 mime_type=request.client_mime_type,
                 availability=MediaAvailability.STAGING,

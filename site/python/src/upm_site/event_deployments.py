@@ -34,6 +34,7 @@ from upm_site.persistence.models import (
     Room,
     RoomAssignment,
     SessionParticipant,
+    User,
     utc_now,
 )
 from upm_site.persistence.models import (
@@ -129,6 +130,59 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
         event.ends_at = snapshot.ends_at
         event.sync_state = SyncState.SYNCHRONIZED
         event.revision = max(event.revision, snapshot.deployment_revision)
+    projected_ids = {item.user_id for item in snapshot.users}
+    for existing in session.scalars(select(User).where(User.user_type == "central_managed")).all():
+        if existing.central_user_id not in projected_ids:
+            existing.active = False
+            existing.web_access = False
+            existing.smb_enabled = False
+            SiteQueue(session).enqueue_processing(
+                site_id=snapshot.site_id,
+                job_type="smb.user.revoke",
+                payload={"data": {"username": existing.username}},
+                idempotency_key=f"smb-user-revoke:{existing.user_id}:{snapshot.deployment_revision}",
+                required_capabilities=["cpu"],
+            )
+    for item in snapshot.users:
+        user = session.scalar(select(User).where(User.central_user_id == item.user_id))
+        collision = session.scalar(
+            select(User).where(
+                User.normalized_username == item.username.strip().casefold(),
+                User.user_type == "site_local",
+            )
+        )
+        if user is None:
+            user = User(
+                central_user_id=item.user_id,
+                user_type="central_managed",
+                username=item.username,
+                normalized_username=(
+                    f"central:{item.user_id}" if collision else item.username.strip().casefold()
+                ),
+                display_name=item.display_name,
+                roles=[item.role],
+                permissions=item.permissions,
+            )
+            session.add(user)
+        if item.central_revision >= user.revision:
+            user.username = item.username
+            user.display_name = item.display_name
+            user.email = item.email
+            user.roles = [item.role]
+            user.permissions = item.permissions
+            user.active = item.enabled and collision is None
+            user.web_access = item.web_access and collision is None
+            user.smb_enabled = item.smb_enabled and collision is None
+            user.web_password_hash = item.password_verifier
+            user.revision = item.central_revision
+            if not user.active or not user.smb_enabled:
+                SiteQueue(session).enqueue_processing(
+                    site_id=snapshot.site_id,
+                    job_type="smb.user.revoke",
+                    payload={"data": {"username": user.username}},
+                    idempotency_key=f"smb-user-revoke:{user.user_id}:{item.central_revision}",
+                    required_capabilities=["cpu"],
+                )
     for profile in snapshot.people:
         person = session.get(PersonProjection, profile.person_id)
         if person is None:

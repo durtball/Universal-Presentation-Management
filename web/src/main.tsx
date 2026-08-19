@@ -10,7 +10,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
       <PreferencesProvider>
-        <SessionProvider>
+        <SessionProvider deployment={__UPM_DEPLOYMENT__}>
           <App deployment={__UPM_DEPLOYMENT__} />
         </SessionProvider>
       </PreferencesProvider>

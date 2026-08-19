@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiError } from "../api/client";
 
 export function useApi<T>(
@@ -9,14 +9,21 @@ export function useApi<T>(
   const [error, setError] = useState<ApiError>();
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const quietRefresh = useRef(false);
   const refresh = useCallback(() => {
     setRefreshKey((value) => value + 1);
     setLoading(true);
     setError(undefined);
   }, []);
+  const poll = useCallback(() => {
+    quietRefresh.current = true;
+    setRefreshKey((value) => value + 1);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
-    queueMicrotask(() => {
+    const quiet = quietRefresh.current;
+    quietRefresh.current = false;
+    if (!quiet) queueMicrotask(() => {
       if (!controller.signal.aborted) setLoading(true);
     });
     load(controller.signal)
@@ -31,5 +38,5 @@ export function useApi<T>(
       });
     return () => controller.abort();
   }, [refreshKey, ...dependencies]); // eslint-disable-line react-hooks/exhaustive-deps
-  return { data, error, loading, refresh };
+  return { data, error, loading, refresh, poll };
 }

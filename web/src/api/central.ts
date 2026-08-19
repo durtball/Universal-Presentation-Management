@@ -17,6 +17,7 @@ import type {
   CentralMediaWorkspace,
   PresentationMatchCandidate,
   StorageOverview,
+  UserRecord,
 } from "./types";
 
 
@@ -35,6 +36,10 @@ export function centralApi(csrfToken: string | null = null) {
       get<AuthSession>("/api/v1/auth/session", signal),
     logout: () =>
       client.request<void>("/api/v1/auth/logout", { method: "POST" }),
+    users: (signal?: AbortSignal) => get<UserRecord[]>("/api/v1/admin/users", signal),
+    createUser: (values: Record<string, unknown>) => client.request<UserRecord>("/api/v1/admin/users", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(values)}),
+    setSmbPassword: (id:string,password:string) => client.request(`/api/v1/admin/users/${id}/smb-password`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})}),
+    revokeSmb: (id:string) => client.request<void>(`/api/v1/admin/users/${id}/smb-access`,{method:"DELETE"}),
     health: (signal?: AbortSignal) => get<Health>("/health", signal),
     storage: (signal?: AbortSignal) => get<StorageOverview>("/api/v1/admin/storage", signal),
     testStorage: (role: string) => client.request<Row>(`/api/v1/admin/storage/${role}/test`, { method: "POST" }),

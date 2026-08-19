@@ -17,14 +17,17 @@ from sqlalchemy.orm import Session
 
 from upm_shared.enums import JobStatus, MediaReplicationState
 from upm_shared.identifiers import new_uuid7
+from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
+from upm_shared.smb import SmbControlClient
 from upm_site.config import SiteSettings
+from upm_site.media.ingestion import MediaIngestionService
 from upm_site.media.replication import execute_central_push
 from upm_site.media.transfer import (
     cleanup_transfer_partials,
     enqueue_transfer_progress,
     execute_central_pull,
 )
-from upm_site.operational_logs import prune_logs
+from upm_site.operational_logs import prune_logs, record_log
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.models import (
     MediaReplicationSession,
@@ -33,6 +36,21 @@ from upm_site.persistence.models import (
     utc_now,
 )
 from upm_site.persistence.queue import SiteQueue
+from upm_site.smb_intake import (
+    INGEST_JOB as SMB_INGEST_JOB,
+)
+from upm_site.smb_intake import (
+    SCAN_JOB as SMB_SCAN_JOB,
+)
+from upm_site.smb_intake import (
+    enqueue_reconciliation as enqueue_smb_reconciliation,
+)
+from upm_site.smb_intake import (
+    ingest as ingest_smb,
+)
+from upm_site.smb_intake import (
+    reconcile as reconcile_smb,
+)
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
 
@@ -82,6 +100,14 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         item.strip() for item in settings.worker_capabilities.split(",") if item.strip()
     }
     stop = Event()
+    storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
+    ingestion_service = MediaIngestionService(
+        factory,
+        max_upload_bytes=settings.max_upload_bytes,
+        storage_client=AsyncMediaStorageClient(
+            settings.media_storage_url, settings.media_storage_token
+        ),
+    )
 
     def request_stop(_signum: int, _frame: object) -> None:
         stop.set()
@@ -108,6 +134,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             site_id=site.site_id,
             retention_days=settings.operational_log_retention_days,
         )
+        enqueue_smb_reconciliation(session, site.site_id)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -143,6 +170,79 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     completed = True
                     if kind == "processing" and work.job_type == "operational_logs.prune":
                         prune_logs(session, settings.operational_log_retention_days)
+                    elif kind == "processing" and work.job_type == SMB_SCAN_JOB:
+                        try:
+                            reconcile_smb(
+                                session,
+                                storage_client,
+                                site_id=UUID(work.payload["data"]["site_id"]),
+                                stability_seconds=settings.smb_intake_stability_seconds,
+                                scan_interval_seconds=settings.smb_intake_scan_interval_seconds,
+                                current_job_id=work.processing_job_id,
+                            )
+                        except Exception as error:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="smb_reconciliation_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            log(
+                                "smb_reconciliation_failed",
+                                work_id=work_id,
+                                detail=str(error)[:2048],
+                            )
+                            continue
+                    elif kind == "processing" and work.job_type == SMB_INGEST_JOB:
+                        try:
+                            result = ingest_smb(work, ingestion_service, storage_client)
+                            record_log(
+                                session,
+                                service="site-worker",
+                                event_type="smb.intake.completed",
+                                message="SMB Incoming file entered Presentation Media",
+                                site_id=work.site_id,
+                                event_id=UUID(work.payload["data"]["event_id"]),
+                                media_import_id=result.media_object_id,
+                                worker_id=worker_id,
+                                context={
+                                    "relative_path": work.payload["data"]["relative_path"],
+                                    "size_bytes": result.size_bytes,
+                                    "source_share": "Incoming",
+                                },
+                            )
+                        except Exception as error:
+                            queue.fail(
+                                work,
+                                worker_id,
+                                error_code="smb_intake_failed",
+                                message=str(error),
+                                retryable=True,
+                                base_delay_seconds=settings.worker_retry_base_seconds,
+                            )
+                            log("smb_intake_failed", work_id=work_id, detail=str(error)[:2048])
+                            record_log(
+                                session,
+                                service="site-worker",
+                                severity="error",
+                                event_type="smb.intake.failed",
+                                message="SMB Incoming intake failed and remains retryable",
+                                site_id=work.site_id,
+                                event_id=UUID(work.payload["data"]["event_id"]),
+                                worker_id=worker_id,
+                                context={
+                                    "relative_path": work.payload["data"]["relative_path"],
+                                    "attempt": work.attempt_count,
+                                    "error_type": type(error).__name__,
+                                },
+                            )
+                            continue
+                    elif kind == "processing" and work.job_type == "smb.user.revoke":
+                        SmbControlClient(
+                            settings.smb_control_url, settings.smb_control_token
+                        ).revoke(str(work.payload["data"]["username"]))
                     if (
                         kind == "transfer"
                         and work.transfer_type == "presentation_media.central_pull"

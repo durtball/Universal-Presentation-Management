@@ -260,6 +260,8 @@ def _view(
         "error_code": item.error_code,
         "error_detail": item.error_detail,
         "origin": item.origin,
+        "source_actor": item.source_actor,
+        "source_share": item.source_share,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
     }

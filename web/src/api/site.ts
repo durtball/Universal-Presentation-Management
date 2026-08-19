@@ -15,10 +15,18 @@ import type {
   StorageOverview,
   SiteMediaWorkspace,
   PresentationMediaVersion,
+  UserRecord,
 } from "./types";
 const get = <T>(path: string, signal?: AbortSignal) =>
   siteClient.request<T>(path, { signal, retry: true });
 export const siteApi = {
+  login: (username:string,password:string) => siteClient.request<import("./types").AuthSession>("/api/v1/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})}),
+  session: (signal?:AbortSignal) => get<import("./types").AuthSession>("/api/v1/auth/session",signal),
+  logout: () => siteClient.request<void>("/api/v1/auth/logout",{method:"POST"}),
+  users: (signal?: AbortSignal) => get<UserRecord[]>("/api/v1/users", signal),
+  createUser: (values: Record<string, unknown>) => siteClient.request<UserRecord>("/api/v1/users", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(values)}),
+  setSmbPassword: (id:string,password:string) => siteClient.request(`/api/v1/users/${id}/smb-password`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})}),
+  revokeSmb: (id:string) => siteClient.request<void>(`/api/v1/users/${id}/smb-access`,{method:"DELETE"}),
   health: (signal?: AbortSignal) => get<Health>("/health", signal),
   registration: (signal?: AbortSignal) =>
     get<SiteRegistration>("/api/v1/central-registration", signal),

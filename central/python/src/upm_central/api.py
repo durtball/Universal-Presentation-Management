@@ -30,6 +30,7 @@ from upm_central.auth import (
 )
 from upm_central.config import CentralDatabaseSettings
 from upm_central.event_deployments import (
+    DEPLOYABLE_STATUSES,
     create_deployment,
     deployment_preview,
     push_deployment,
@@ -74,6 +75,7 @@ from upm_central.sync import (
     secret_hash,
     secrets_match,
 )
+from upm_central.users_api import register_user_routes
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
     EnrollmentRequest,
@@ -319,6 +321,13 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
         item.user.password_hash = hash_password(payload.new_password)
         item.user.password_changed_at = utc_now()
         item.user.revision += 1
+        for deployment in session.scalars(
+            select(EventDeployment).where(
+                EventDeployment.site_id.in_([UUID(value) for value in item.user.site_scope]),
+                EventDeployment.status.in_(DEPLOYABLE_STATUSES),
+            )
+        ).all():
+            push_deployment(session, deployment)
         for other in item.user.sessions:
             if other.admin_session_id != item.admin_session_id and other.revoked_at is None:
                 other.revoked_at = utc_now()
@@ -1081,4 +1090,5 @@ body:JSON.stringify({name:document.querySelector('#event-name').value})});load()
     register_storage_routes(app, db, require_admin, get_settings)
     register_lifecycle_routes(app, db, require_admin)
     register_log_routes(app, db, require_admin)
+    register_user_routes(app, db, require_admin, get_settings)
     return app

@@ -351,7 +351,7 @@ def register_presentation_media_routes(
             items.append({
                 "media_object_id": item.media_object_id, "filename": item.original_filename,
                 "source_relative_path": item.source_relative_path, "size_bytes": item.size_bytes,
-                "source": item.category, "received_at": item.created_at,
+                "source": item.intake_origin, "received_at": item.created_at,
                 "availability": item.availability, "suggestion": suggestion,
                 "confidence": match.confidence, "match_state": match.state,
                 "match_reason": match.reason,

@@ -1,6 +1,37 @@
 name: ${UPM_SITE_PROJECT_NAME:-upm-site}
 
 services:
+  site-smb:
+    build:
+      context: .
+      dockerfile: smb-edge/Dockerfile
+    image: ${UPM_SMB_EDGE_IMAGE:-upm-smb-edge:local}
+    restart: unless-stopped
+    environment:
+      UPM_SMB_HOSTNAME: ${UPM_SITE_SMB_HOSTNAME:-UPM-SITE}
+      UPM_SMB_INTERFACES: ${UPM_SITE_SMB_INTERFACES:-lo eth0}
+      UPM_SMB_CONTROL_TOKEN: ${UPM_SITE_SMB_CONTROL_TOKEN:?Set UPM_SITE_SMB_CONTROL_TOKEN}
+    ports:
+      - "${UPM_SITE_SMB_BIND_ADDRESS:-0.0.0.0}:445:445"
+    volumes:
+      - site-smb-presentations:/shares/presentations:ro
+      - site-smb-incoming:/shares/incoming
+      - site-smb-trash:/shares/trash
+      - site-smb-state:/var/lib/samba/private
+    networks: [site-internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  site-discovery:
+    image: ghcr.io/christgau/wsdd:0.8
+    restart: unless-stopped
+    network_mode: host
+    command: ["--hostname", "${UPM_SITE_SMB_HOSTNAME:-UPM-SITE}"]
+    profiles: ["windows-discovery"]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -35,8 +66,16 @@ services:
       UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
       UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}
       UPM_SITE_DEFAULT_DISPLAY_NAME: ${UPM_SITE_DEFAULT_DISPLAY_NAME:-UPM Site}
+      UPM_SITE_AUTH_REQUIRED: "true"
+      UPM_SITE_BOOTSTRAP_ADMIN_USERNAME: ${UPM_SITE_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD: ${UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD:?Set UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD}
+      UPM_SITE_SESSION_COOKIE_SECURE: ${UPM_SITE_SESSION_COOKIE_SECURE:-false}
       UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
       UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
+      UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
+      UPM_SITE_SMB_INTAKE_STABILITY_SECONDS: ${UPM_SITE_SMB_INTAKE_STABILITY_SECONDS:-10}
+      UPM_SITE_SMB_CONTROL_URL: http://site-smb:8080
+      UPM_SITE_SMB_CONTROL_TOKEN: ${UPM_SITE_SMB_CONTROL_TOKEN:?Set UPM_SITE_SMB_CONTROL_TOKEN}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -103,6 +142,8 @@ services:
       UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
       UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
       UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
+      UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
+      UPM_SITE_SMB_INTAKE_STABILITY_SECONDS: ${UPM_SITE_SMB_INTAKE_STABILITY_SECONDS:-10}
     depends_on:
       site-postgres:
         condition: service_healthy
@@ -128,12 +169,16 @@ services:
       UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: site
       UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
       UPM_MEDIA_STORAGE_STATE_PATH: /state/assignments.json
+      UPM_MEDIA_STORAGE_SMB_INCOMING_PATH: /smb/incoming
       UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_SITE_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000014","name":"Site Staging Storage","internal_path":"/storage/staging","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Site Media Storage","internal_path":"/storage/media","roles":["media"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Site Temporary Storage","internal_path":"/storage/temp","roles":["staging"]}]}'
     volumes:
       - ${UPM_SITE_STAGING_HOST_PATH:-site-storage-staging}:/storage/staging
       - ${UPM_SITE_MEDIA_HOST_PATH:-site-storage-media}:/storage/media
       - ${UPM_SITE_TEMP_HOST_PATH:-site-storage-temp}:/storage/temp
       - site-storage-state:/state
+      - site-smb-presentations:/smb/presentations
+      - site-smb-incoming:/smb/incoming
+      - site-smb-trash:/smb/trash
     networks:
       - site-internal
     healthcheck:
@@ -203,3 +248,7 @@ volumes:
   site-storage-staging:
   site-storage-media:
   site-storage-state:
+  site-smb-presentations:
+  site-smb-incoming:
+  site-smb-trash:
+  site-smb-state:

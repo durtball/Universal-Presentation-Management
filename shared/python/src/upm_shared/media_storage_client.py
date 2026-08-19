@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -62,6 +63,33 @@ class MediaStorageClient:
 
     def allocate_staging(self) -> dict:
         return self.request("POST", "/api/v1/storage/staging/allocations")
+
+    def list_smb_incoming(self) -> list[dict]:
+        return self.request("GET", "/api/v1/storage/smb/incoming")["files"]
+
+    def read_smb_incoming(self, relative_path: str, offset: int, limit: int) -> bytes:
+        encoded = quote(relative_path, safe="/")
+        try:
+            response = httpx.get(
+                f"{self.base_url}/api/v1/storage/smb/incoming/{encoded}",
+                headers=self.headers,
+                params={"offset": offset, "limit": limit},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPError as error:
+            raise MediaStorageUnavailable("SMB Incoming file is unavailable.") from error
+
+    def complete_smb_incoming(
+        self, relative_path: str, *, size_bytes: int, modified_ns: int
+    ) -> dict:
+        encoded = quote(relative_path, safe="/")
+        return self.request_with_json(
+            "POST",
+            f"/api/v1/storage/smb/incoming/{encoded}/complete",
+            {"size_bytes": size_bytes, "modified_ns": modified_ns},
+        )
 
     def append_staging(self, target_id: UUID | str, key: str, offset: int, content: bytes) -> dict:
         try:

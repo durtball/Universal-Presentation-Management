@@ -32,6 +32,20 @@ class PersonProfile(DeploymentModel):
     central_revision: Annotated[int, Field(ge=1)]
 
 
+class SiteUserSnapshot(DeploymentModel):
+    user_id: UUID
+    username: Annotated[str, Field(min_length=1, max_length=255)]
+    display_name: Annotated[str, Field(min_length=1, max_length=255)]
+    email: Annotated[str | None, Field(max_length=320)] = None
+    enabled: bool
+    web_access: bool
+    role: str
+    permissions: list[str] = Field(default_factory=list)
+    smb_enabled: bool
+    password_verifier: str
+    central_revision: Annotated[int, Field(ge=1)]
+
+
 class ParticipationSnapshot(DeploymentModel):
     event_participation_id: UUID
     person_id: UUID
@@ -130,6 +144,7 @@ class EventDeploymentSnapshot(DeploymentModel):
     organization_reference: dict[str, object] | None = None
     event_configuration: dict[str, object] = Field(default_factory=dict)
     people: list[PersonProfile] = Field(default_factory=list)
+    users: list[SiteUserSnapshot] = Field(default_factory=list)
     participations: list[ParticipationSnapshot] = Field(default_factory=list)
     sessions: list[SessionSnapshot] = Field(default_factory=list)
     presentations: list[PresentationSnapshot] = Field(default_factory=list)

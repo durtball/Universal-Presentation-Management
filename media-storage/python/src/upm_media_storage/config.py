@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     service_token: str = "development-only-change-me"
     targets_json: str | None = None
     state_path: Path = Path("/state/assignments.json")
+    smb_incoming_path: Path | None = None
     warning_free_percent: float = 15
     critical_free_percent: float = 5
 

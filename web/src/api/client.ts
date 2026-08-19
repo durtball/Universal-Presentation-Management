@@ -123,4 +123,6 @@ export function createCentralClient(csrfToken: string | null = null) {
   );
 }
 
-export const siteClient = new ApiClient();
+let siteCsrfToken: string | null = null;
+export function setSiteCsrfToken(value:string|null){siteCsrfToken=value;}
+export const siteClient = new ApiClient("",():HeadersInit=>siteCsrfToken?{"X-CSRF-Token":siteCsrfToken}:{});

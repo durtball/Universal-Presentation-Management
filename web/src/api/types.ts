@@ -11,8 +11,10 @@ export interface AuthSession {
     username: string;
     display_name: string;
     roles: string[];
+    permissions?: string[];
+    user_type?: string;
   };
-  expires_at: string;
+  expires_at?: string;
   csrf_token?: string;
 }
 export interface EventRecord extends Row {
@@ -397,3 +399,4 @@ export interface CentralMediaWorkspace extends Row {
   summary: Record<string, number>;
   imports: CentralMediaImport[];
 }
+export interface UserRecord { user_id:string;central_user_id?:string|null;user_type:string;username:string;display_name:string;email?:string|null;enabled:boolean;web_access:boolean;role:string;permissions:string[];smb_enabled:boolean;smb_credential_configured:boolean;created_at:string;modified_at:string;last_web_login?:string|null;last_smb_activity?:string|null }

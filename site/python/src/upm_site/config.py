@@ -12,6 +12,15 @@ class SiteSettings(BaseSettings):
     database_url: str
     media_storage_url: str = "http://site-media-storage:8080"
     media_storage_token: str = ""
+    smb_control_url: str = "http://site-smb:8080"
+    smb_control_token: str = ""
+    smb_intake_scan_interval_seconds: Annotated[float, Field(ge=1, le=300)] = 5
+    smb_intake_stability_seconds: Annotated[float, Field(ge=1, le=3600)] = 10
+    auth_required: bool = False
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: str = "admin"
+    session_hours: Annotated[int, Field(ge=1, le=168)] = 12
+    session_cookie_secure: bool = False
     storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
     storage_critical_free_percent: Annotated[float, Field(ge=0, le=100)] = 5.0
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888

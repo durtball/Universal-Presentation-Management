@@ -20,6 +20,9 @@ import { SitePresentationMedia } from "./pages/SitePresentationMedia";
 import { SitePresentations } from "./pages/SitePresentations";
 import { StoragePage } from "./pages/Storage";
 import { LogsPage } from "./pages/Logs";
+import { UsersPage } from "./pages/Users";
+import { useSession } from "./state/session";
+import { Loading } from "./components/Feedback";
 import {
   SiteOverview,
   SiteProgram,
@@ -45,13 +48,14 @@ function CentralApp() {
   }, []);
   return (
     <Routes>
-      <Route path="/login" element={<Login />} />
+      <Route path="/login" element={<Login deployment="central" />} />
       <Route path="*" element={
         <Shell deployment="central" context={health.data}>
           <Routes>
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/admin" element={<Dashboard />} />
         <Route path="/admin/sites" element={<Sites />} />
+        <Route path="/admin/users" element={<UsersPage mode="central" />} />
         <Route path="/admin/events" element={<Events />} />
         <Route path="/admin/events/:eventId" element={<EventDetailRoute />} />
         <Route path="/admin/people" element={<People />} />
@@ -80,6 +84,7 @@ function CentralApp() {
   );
 }
 function SiteApp() {
+  const session=useSession();
   const status = useApi(async (signal) => {
     try {
       const registration = await siteApi.registration(signal);
@@ -98,13 +103,17 @@ function SiteApp() {
       return { health: "degraded" };
     }
   }, []);
+  if(session.status==="loading")return <Loading label="Checking Site session"/>;
+  if(session.status==="unauthenticated")return <Routes><Route path="/login" element={<Login deployment="site"/>}/><Route path="*" element={<Navigate to="/login" replace/>}/></Routes>;
   return (
     <Shell deployment="site" context={status.data}>
       <Routes>
+        <Route path="/login" element={<Navigate to="/admin" replace/>}/>
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/admin" element={<SiteOverview />} />
         <Route path="/admin/program" element={<SiteProgram />} />
         <Route path="/admin/rooms" element={<SiteRooms />} />
+        <Route path="/admin/users" element={<UsersPage mode="site" />} />
         <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
         <Route path="/admin/storage" element={<StoragePage mode="site" />} />
         <Route path="/admin/media" element={<SitePresentationMedia />} />

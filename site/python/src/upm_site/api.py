@@ -6,7 +6,17 @@ from typing import Annotated, Literal
 from urllib.parse import unquote
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -30,6 +40,15 @@ from upm_shared.media_storage_client import (
     AsyncMediaStorageClient,
     MediaStorageClient,
     MediaStorageUnavailable,
+)
+from upm_site.auth import (
+    authenticate,
+    bootstrap,
+    create_session,
+    csrf_matches,
+    has_permission,
+    resolve,
+    rotate_csrf,
 )
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import (
@@ -68,6 +87,7 @@ from upm_site.sync import (
     credential_matches,
     enqueue_heartbeat,
 )
+from upm_site.users_api import register_user_routes
 
 
 class HealthResponse(BaseModel):
@@ -75,6 +95,11 @@ class HealthResponse(BaseModel):
 
     service: Literal["upm-site"] = "upm-site"
     status: Literal["foundation-ready"] = "foundation-ready"
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class MediaResponse(BaseModel):
@@ -236,7 +261,45 @@ def create_app(
             cached = create_site_session_factory(engine)
             resources["engine"] = engine
             resources["factory"] = cached
+        if not resources.get("auth_bootstrapped"):
+            with cached.begin() as auth_session:
+                bootstrap(
+                    auth_session,
+                    get_settings().bootstrap_admin_username,
+                    get_settings().bootstrap_admin_password,
+                )
+            resources["auth_bootstrapped"] = True
         return cached  # type: ignore[return-value]
+
+    @app.middleware("http")
+    async def site_authentication(request: Request, call_next):
+        if (
+            request.url.path in {"/health", "/api/v1/auth/login"}
+            or not get_settings().auth_required
+        ):
+            return await call_next(request)
+        token = request.cookies.get("upm_site_session")
+        with get_factory()() as auth_session:
+            item, user = resolve(auth_session, token)
+            if not item or not user:
+                return JSONResponse(status_code=401, content={"detail": "authentication required"})
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and not csrf_matches(
+                item, request.headers.get("X-CSRF-Token")
+            ):
+                return JSONResponse(status_code=403, content={"detail": "invalid CSRF token"})
+            permission = (
+                "presentations.read"
+                if request.method in {"GET", "HEAD", "OPTIONS"}
+                else "presentations.write"
+            )
+            if "/users" in request.url.path:
+                permission = (
+                    "users.manage" if request.method not in {"GET", "HEAD"} else "users.read"
+                )
+            if not has_permission(user, permission):
+                return JSONResponse(status_code=403, content={"detail": "permission denied"})
+            request.state.site_user_id = str(user.user_id)
+        return await call_next(request)
 
     def get_session() -> Iterator[Session]:
         with get_factory()() as session:
@@ -249,6 +312,84 @@ def create_app(
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    def auth_view(user, csrf=None):
+        value = {
+            "authenticated": True,
+            "user": {
+                "user_id": user.user_id,
+                "username": user.username,
+                "display_name": user.display_name,
+                "roles": user.roles,
+                "permissions": user.permissions,
+                "user_type": user.user_type,
+            },
+        }
+        if csrf:
+            value["csrf_token"] = csrf
+        return value
+
+    @app.post("/api/v1/auth/login", tags=["authentication"])
+    def login(
+        payload: LoginRequest, response: Response, session: Annotated[Session, Depends(transaction)]
+    ):
+        user = authenticate(session, payload.username, payload.password)
+        if not user:
+            record_log(
+                session,
+                service="site-api",
+                severity="warning",
+                event_type="auth.login.failed",
+                message="Site login failed",
+                context={"username": payload.username[:255]},
+            )
+            raise HTTPException(401, "invalid username or password")
+        _item, token, csrf = create_session(session, user, get_settings().session_hours)
+        response.set_cookie(
+            "upm_site_session",
+            token,
+            httponly=True,
+            secure=get_settings().session_cookie_secure,
+            samesite="lax",
+            path="/",
+            max_age=get_settings().session_hours * 3600,
+        )
+        record_log(
+            session,
+            service="site-api",
+            event_type="auth.login.succeeded",
+            message="Site user logged in",
+            context={"user_id": str(user.user_id), "user_type": user.user_type},
+        )
+        return auth_view(user, csrf)
+
+    @app.get("/api/v1/auth/session", tags=["authentication"])
+    def current_session(
+        upm_site_session: Annotated[str | None, Cookie()] = None,
+        session: Annotated[Session, Depends(get_session)] = None,
+    ):
+        _item, user = resolve(session, upm_site_session)
+        if not user:
+            raise HTTPException(401, "not authenticated")
+        return auth_view(user, rotate_csrf(_item))
+
+    @app.post("/api/v1/auth/logout", status_code=204, tags=["authentication"])
+    def logout(
+        response: Response,
+        upm_site_session: Annotated[str | None, Cookie()] = None,
+        session: Annotated[Session, Depends(transaction)] = None,
+    ):
+        item, _user = resolve(session, upm_site_session)
+        if item:
+            item.revoked_at = utc_now()
+            record_log(
+                session,
+                service="site-api",
+                event_type="auth.logout",
+                message="Site user logged out",
+                context={"user_id": str(item.user_id)},
+            )
+        response.delete_cookie("upm_site_session", path="/")
 
     @app.post(
         "/api/v1/media/ingestions",
@@ -707,4 +848,5 @@ pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></bo
     register_operations_routes(app, get_session, transaction)
     register_presentation_media_routes(app, get_session, transaction, get_settings)
     register_log_routes(app, get_session)
+    register_user_routes(app, get_session, transaction, get_settings)
     return app

@@ -27,10 +27,25 @@ from upm_central.persistence.models import (
 )
 from upm_central.persistence.queue import CentralQueue
 from upm_central.presentation_media import CentralMediaStagingService
+from upm_central.smb_intake import (
+    INGEST_JOB as SMB_INGEST_JOB,
+)
+from upm_central.smb_intake import (
+    SCAN_JOB as SMB_SCAN_JOB,
+)
+from upm_central.smb_intake import (
+    enqueue_reconciliation as enqueue_smb_reconciliation,
+)
+from upm_central.smb_intake import (
+    ingest as ingest_smb,
+)
+from upm_central.smb_intake import (
+    reconcile as reconcile_smb,
+)
 from upm_shared.enums import JobStatus
 from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
-from upm_shared.media_storage_client import AsyncMediaStorageClient
+from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 
 
 def log(event: str, **context: object) -> None:
@@ -129,6 +144,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         AsyncMediaStorageClient(settings.media_storage_url, settings.media_storage_token),
         settings.max_upload_bytes,
     )
+    storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
     stop = Event()
 
     def request_stop(_signum: int, _frame: object) -> None:
@@ -166,6 +182,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                 idempotency_key=prune_key,
                 required_capabilities=["cpu"],
             )
+        enqueue_smb_reconciliation(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
@@ -196,7 +213,10 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if kind == "processing" and work.job_type.startswith("presentation_media."):
+                    if kind == "processing" and (
+                        work.job_type.startswith("presentation_media.")
+                        or work.job_type in {SMB_SCAN_JOB, SMB_INGEST_JOB}
+                    ):
                         # Commit the durable claim and release this connection before matching or
                         # calling Media Storage. Completion/failure uses a fresh short transaction.
                         media_work_id = work.processing_job_id
@@ -271,13 +291,19 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     with factory() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
                         session.expunge(media_work)
-                    execute_processing_job(
-                        None,
-                        None,
-                        media_work,
-                        worker_id,
-                        media_processor,
-                    )
+                    if media_work.job_type.startswith("presentation_media."):
+                        execute_processing_job(None, None, media_work, worker_id, media_processor)
+                    elif media_work.job_type == SMB_SCAN_JOB:
+                        with factory.begin() as smb_session:
+                            reconcile_smb(
+                                session=smb_session,
+                                storage=storage_client,
+                                stability_seconds=settings.smb_intake_stability_seconds,
+                                scan_interval_seconds=settings.smb_intake_scan_interval_seconds,
+                                current_job_id=media_work.processing_job_id,
+                            )
+                    else:
+                        ingest_smb(media_work, media_processor, storage_client)
                     with factory.begin() as session:
                         media_work = session.get(ProcessingJob, media_work_id)
                         CentralQueue(session).complete(media_work, worker_id)
@@ -299,10 +325,17 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             base_delay_seconds=settings.worker_retry_base_seconds,
                             metadata={"error_type": type(exc).__name__},
                         )
-                        media_import_id = UUID(
-                            str(media_work.payload.get("data", {}).get("media_import_id"))
+                        media_import_id_value = media_work.payload.get("data", {}).get(
+                            "media_import_id"
                         )
-                        media_import = session.get(PresentationMediaImport, media_import_id)
+                        media_import_id = (
+                            UUID(str(media_import_id_value)) if media_import_id_value else None
+                        )
+                        media_import = (
+                            session.get(PresentationMediaImport, media_import_id)
+                            if media_import_id
+                            else None
+                        )
                         record_log(
                             session,
                             service="central-worker",
@@ -323,7 +356,9 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             },
                         )
                     log(
-                        "presentation_media_processing_failed",
+                        "smb_intake_failed"
+                        if media_work.job_type.startswith("smb.")
+                        else "presentation_media_processing_failed",
                         worker_id=worker_id,
                         work_id=media_work_id,
                         error_type=type(exc).__name__,

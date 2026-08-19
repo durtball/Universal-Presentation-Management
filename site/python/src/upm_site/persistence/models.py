@@ -101,6 +101,51 @@ class SiteRecordMixin:
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
+class User(SiteRecordMixin, SiteBase):
+    """Offline-capable Site identity; local identities are outside Central projection deletion."""
+
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("normalized_username"),)
+    user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=new_uuid7)
+    central_user_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
+    user_type: Mapped[str] = mapped_column(String(32), default="site_local", nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320))
+    web_password_hash: Mapped[str | None] = mapped_column(Text)
+    roles: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    permissions: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    web_access: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    smb_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    smb_credential_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    smb_last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserSession(SiteBase):
+    __tablename__ = "user_sessions"
+    user_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Site(SiteRecordMixin, SiteBase):
     __tablename__ = "sites"
 
@@ -743,6 +788,9 @@ class MediaObject(SiteRecordMixin, SiteBase):
     )
     original_filename: Mapped[str] = mapped_column(String(1024), nullable=False)
     source_relative_path: Mapped[str | None] = mapped_column(String(2048))
+    intake_origin: Mapped[str] = mapped_column(String(32), default="browser", nullable=False)
+    source_actor: Mapped[str | None] = mapped_column(String(255))
+    source_share: Mapped[str | None] = mapped_column(String(255))
     canonical_filename: Mapped[str | None] = mapped_column(String(1024))
     content_hash: Mapped[str | None] = mapped_column(String(255))
     hash_algorithm: Mapped[str | None] = mapped_column(String(32))

@@ -2,8 +2,9 @@ import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ErrorSurface } from "../../components/Feedback";
 import { useSession } from "../../state/session";
+import type { Deployment } from "../../api/client";
 
-export function Login() {
+export function Login({deployment="central"}:{deployment?:Deployment}) {
   const session = useSession();
   const navigate = useNavigate();
   const location = useLocation();
@@ -31,7 +32,7 @@ export function Login() {
       <section className="login-card" aria-labelledby="login-title">
         <div className="brand brand--login">
           <span className="brand__mark" aria-hidden="true">U</span>
-          <span><strong>UPM Central</strong><small>Administration</small></span>
+          <span><strong>{deployment==="central"?"UPM Central":"UPM Site"}</strong><small>Administration</small></span>
         </div>
         <h1 id="login-title">Administrator login</h1>
         <p className="muted">Sign in to manage events, programs, Sites, and deployments.</p>

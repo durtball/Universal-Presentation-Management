@@ -3,10 +3,12 @@ import { NavLink, useLocation } from "react-router-dom";
 import type { Deployment } from "../api/client";
 import { SettingsPanel } from "./SettingsPanel";
 import { StatusBadge } from "./StatusBadge";
+import { useSession } from "../state/session";
 
 const centralNav = [
   ["/admin", "Dashboard"],
   ["/admin/sites", "Sites"],
+  ["/admin/users", "Users"],
   ["/admin/events", "Events"],
   ["/admin/people", "People"],
   ["/admin/sessions", "Sessions"],
@@ -22,6 +24,7 @@ const siteNav = [
   ["/admin", "Overview"],
   ["/admin/program", "Program"],
   ["/admin/rooms", "Rooms"],
+  ["/admin/users", "Users"],
   ["/admin/storage", "Storage"],
   ["/admin/media", "Presentation Media"],
   ["/admin/presentations", "Presentations"],
@@ -43,7 +46,9 @@ export function Shell({
   };
   children: ReactNode;
 }) {
-  const nav = deployment === "central" ? centralNav : siteNav;
+  const session=useSession();
+  const nav = (deployment === "central" ? centralNav : siteNav).filter(([path]) =>
+    deployment==="central" || path!=="/admin/users" || session.can("users.read"));
   const location = useLocation();
   const [menu, setMenu] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
@@ -137,7 +142,9 @@ export function Shell({
             <h1>{current}</h1>
           </div>
           <div className="topbar__actions">
+            {session.user?<span>{session.user.display_name}</span>:null}
             <StatusBadge value={online ? "online" : "offline"} />
+            <button className="button button--small" onClick={()=>void session.logout()}>Logout</button>
             <SettingsPanel central={deployment === "central"} />
           </div>
         </header>

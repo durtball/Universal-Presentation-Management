@@ -163,6 +163,8 @@ class CentralMediaStagingService:
         batch_id: UUID | None = None,
         chunks: AsyncIterator[bytes],
         actor: str,
+        origin: str = "browser",
+        source_share: str | None = None,
     ) -> PresentationMediaImport:
         raw_filename = original_filename.strip()
         filename = Path(raw_filename).name
@@ -242,6 +244,9 @@ class CentralMediaStagingService:
                     match_state=MediaMatchState.UNMATCHED,
                     import_state=MediaImportState.UPLOADING,
                     sync_state=SyncState.LOCAL,
+                    origin=origin,
+                    source_actor=actor,
+                    source_share=source_share,
                 )
                 session.add(record)
                 record_log(

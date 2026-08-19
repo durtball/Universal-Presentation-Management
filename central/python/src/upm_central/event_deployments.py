@@ -7,6 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from upm_central.persistence.models import (
+    AdminUser,
     AuditRecord,
     Event,
     EventDeployment,
@@ -35,6 +36,7 @@ from upm_shared.contracts.deployments import (
     PresentationSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
+    SiteUserSnapshot,
 )
 from upm_shared.contracts.sync import UPM_SYNC_PROTOCOL_VERSION
 from upm_shared.enums import EnrollmentState, EventDeploymentStatus, SourceSystem
@@ -150,6 +152,7 @@ def build_snapshot(
     room_mappings = session.scalars(
         select(SiteRoomMapping).where(SiteRoomMapping.site_id == deployment.site_id)
     ).all()
+    users = session.scalars(select(AdminUser).order_by(AdminUser.admin_user_id)).all()
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
@@ -173,6 +176,25 @@ def build_snapshot(
                 for item in room_mappings
             ]
         },
+        users=[
+            SiteUserSnapshot(
+                user_id=user.admin_user_id,
+                username=user.username,
+                display_name=user.display_name,
+                email=user.email,
+                enabled=user.active,
+                web_access=user.web_access,
+                role=user.roles[0] if user.roles else "read_only",
+                permissions=user.permissions,
+                smb_enabled=user.smb_enabled,
+                # Scrypt verifier material is deployable authentication state, not a plaintext
+                # password. Site never calls Central to authenticate and cannot recover plaintext.
+                password_verifier=user.password_hash,
+                central_revision=user.revision,
+            )
+            for user in users
+            if str(deployment.site_id) in user.site_scope
+        ],
         people=[
             PersonProfile(
                 person_id=item.person.person_id,

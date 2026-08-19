@@ -1,0 +1,1 @@
+"""UPM SMB edge service."""

@@ -34,6 +34,11 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     const [workspace, presentations] = await Promise.all([api.mediaWorkspace(activeEvent, signal), api.presentations(activeEvent, signal)]);
     return { ...centralRows(workspace.imports, presentations), summary: workspace.summary, imports: workspace.imports, candidates: [], siteId: "", unmatched: workspace.imports };
   }, [mode, activeEvent, session?.csrfToken]);
+  useEffect(() => {
+    if (!activeEvent) return;
+    const timer = window.setInterval(data.poll, 3000);
+    return () => window.clearInterval(timer);
+  }, [activeEvent, data.poll]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
   const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void, batchId?: string) => {

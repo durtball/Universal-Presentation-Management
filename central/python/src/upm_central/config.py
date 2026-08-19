@@ -26,6 +26,10 @@ class CentralDatabaseSettings(BaseSettings):
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
     media_storage_url: str = "http://central-media-storage:8080"
     media_storage_token: str = ""
+    smb_control_url: str = "http://central-smb:8080"
+    smb_control_token: str = ""
+    smb_intake_scan_interval_seconds: Annotated[float, Field(ge=1, le=300)] = 5
+    smb_intake_stability_seconds: Annotated[float, Field(ge=1, le=3600)] = 10
     storage_warning_free_percent: Annotated[float, Field(ge=0, le=100)] = 15.0
     storage_critical_free_percent: Annotated[float, Field(ge=0, le=100)] = 5.0
     max_upload_bytes: Annotated[int, Field(gt=0)] = 549_755_813_888

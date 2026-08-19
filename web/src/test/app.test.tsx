@@ -72,12 +72,10 @@ test("renders Site operational data and offline-local autonomy", async () => {
     screen.getByText(/Central connectivity is not required/i),
   ).toBeInTheDocument();
 });
-test("Site unavailable state is actionable", async () => {
+test("Site requires a local login when no session is available", async () => {
   vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
   renderApp("site");
-  await waitFor(() =>
-    expect(screen.getByRole("alert")).toHaveTextContent("Service unavailable"),
-  );
+  expect(await screen.findByRole("heading", {name:"Administrator login"})).toBeInTheDocument();
 });
 test("renders Site-local Settings Logs without Central", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

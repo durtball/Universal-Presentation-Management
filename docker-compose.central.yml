@@ -1,6 +1,37 @@
 name: ${UPM_CENTRAL_PROJECT_NAME:-upm-central}
 
 services:
+  central-smb:
+    build:
+      context: .
+      dockerfile: smb-edge/Dockerfile
+    image: ${UPM_SMB_EDGE_IMAGE:-upm-smb-edge:local}
+    restart: unless-stopped
+    environment:
+      UPM_SMB_HOSTNAME: ${UPM_CENTRAL_SMB_HOSTNAME:-UPM-CENTRAL}
+      UPM_SMB_INTERFACES: ${UPM_CENTRAL_SMB_INTERFACES:-lo eth0}
+      UPM_SMB_CONTROL_TOKEN: ${UPM_CENTRAL_SMB_CONTROL_TOKEN:?Set UPM_CENTRAL_SMB_CONTROL_TOKEN}
+    ports:
+      - "${UPM_CENTRAL_SMB_BIND_ADDRESS:-0.0.0.0}:445:445"
+    volumes:
+      - central-smb-presentations:/shares/presentations:ro
+      - central-smb-incoming:/shares/incoming
+      - central-smb-trash:/shares/trash
+      - central-smb-state:/var/lib/samba/private
+    networks: [central-internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  central-discovery:
+    image: ghcr.io/christgau/wsdd:0.8
+    restart: unless-stopped
+    network_mode: host
+    command: ["--hostname", "${UPM_CENTRAL_SMB_HOSTNAME:-UPM-CENTRAL}"]
+    profiles: ["windows-discovery"]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -41,6 +72,10 @@ services:
       UPM_CENTRAL_TRANSFER_BLOCK_BYTES: ${UPM_CENTRAL_TRANSFER_BLOCK_BYTES:-4194304}
       UPM_CENTRAL_MEDIA_STORAGE_URL: http://central-media-storage:8080
       UPM_CENTRAL_MEDIA_STORAGE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
+      UPM_CENTRAL_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_CENTRAL_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
+      UPM_CENTRAL_SMB_INTAKE_STABILITY_SECONDS: ${UPM_CENTRAL_SMB_INTAKE_STABILITY_SECONDS:-10}
+      UPM_CENTRAL_SMB_CONTROL_URL: http://central-smb:8080
+      UPM_CENTRAL_SMB_CONTROL_TOKEN: ${UPM_CENTRAL_SMB_CONTROL_TOKEN:?Set UPM_CENTRAL_SMB_CONTROL_TOKEN}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -104,6 +139,8 @@ services:
       UPM_CENTRAL_WORKER_LEASE_SECONDS: ${UPM_CENTRAL_WORKER_LEASE_SECONDS:-60}
       UPM_CENTRAL_MEDIA_STORAGE_URL: http://central-media-storage:8080
       UPM_CENTRAL_MEDIA_STORAGE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
+      UPM_CENTRAL_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_CENTRAL_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
+      UPM_CENTRAL_SMB_INTAKE_STABILITY_SECONDS: ${UPM_CENTRAL_SMB_INTAKE_STABILITY_SECONDS:-10}
     depends_on:
       central-postgres:
         condition: service_healthy
@@ -129,12 +166,16 @@ services:
       UPM_MEDIA_STORAGE_DEPLOYMENT_CONTEXT: central
       UPM_MEDIA_STORAGE_SERVICE_TOKEN: ${UPM_CENTRAL_MEDIA_STORAGE_TOKEN:?Set UPM_CENTRAL_MEDIA_STORAGE_TOKEN}
       UPM_MEDIA_STORAGE_STATE_PATH: /state/assignments.json
+      UPM_MEDIA_STORAGE_SMB_INCOMING_PATH: /smb/incoming
       UPM_MEDIA_STORAGE_TARGETS_JSON: '${UPM_CENTRAL_STORAGE_TARGETS_JSON:-[{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000004","name":"Central Staging Storage","internal_path":"/storage/staging","roles":["staging"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000002","name":"Central Media Storage","internal_path":"/storage/media","roles":["media"]},{"storage_target_id":"0198b8d0-63e0-7000-8000-000000000001","name":"Central Temporary Storage","internal_path":"/storage/temp","roles":["staging"]}]}'
     volumes:
       - ${UPM_CENTRAL_STAGING_HOST_PATH:-central-storage-staging}:/storage/staging
       - ${UPM_CENTRAL_MEDIA_HOST_PATH:-central-storage-media}:/storage/media
       - ${UPM_CENTRAL_TEMP_HOST_PATH:-central-storage-temp}:/storage/temp
       - central-storage-state:/state
+      - central-smb-presentations:/smb/presentations
+      - central-smb-incoming:/smb/incoming
+      - central-smb-trash:/smb/trash
     networks:
       - central-internal
     healthcheck:
@@ -203,3 +244,7 @@ volumes:
   central-storage-staging:
   central-storage-media:
   central-storage-state:
+  central-smb-presentations:
+  central-smb-incoming:
+  central-smb-trash:
+  central-smb-state:
