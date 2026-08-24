@@ -445,6 +445,32 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             presentation.sync_state = SyncState.SYNCHRONIZED
     session.flush()
     for item in snapshot.presentations:
+        explicit_version_numbers = {version.version_number for version in item.versions}
+        for version in item.versions:
+            local_version = session.get(PresentationVersion, version.presentation_version_id)
+            if local_version is None:
+                local_version = session.scalar(
+                    select(PresentationVersion).where(
+                        PresentationVersion.presentation_id == item.presentation_id,
+                        PresentationVersion.version_number == version.version_number,
+                    )
+                )
+                if local_version is None:
+                    session.add(
+                        PresentationVersion(
+                            presentation_version_id=version.presentation_version_id,
+                            presentation_id=item.presentation_id,
+                            version_number=version.version_number,
+                            sync_state=SyncState.SYNCHRONIZED,
+                        )
+                    )
+                elif local_version.presentation_version_id != version.presentation_version_id:
+                    raise ValueError("presentation version identity conflicts with Central")
+            elif (
+                local_version.presentation_id != item.presentation_id
+                or local_version.version_number != version.version_number
+            ):
+                raise ValueError("presentation version metadata conflicts with Central")
         existing_versions = set(
             session.scalars(
                 select(PresentationVersion.version_number).where(
@@ -453,7 +479,10 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             )
         )
         for version_number in item.version_numbers:
-            if version_number not in existing_versions:
+            if (
+                version_number not in explicit_version_numbers
+                and version_number not in existing_versions
+            ):
                 session.add(
                     PresentationVersion(
                         presentation_id=item.presentation_id,

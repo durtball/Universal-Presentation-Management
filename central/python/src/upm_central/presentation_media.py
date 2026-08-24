@@ -266,6 +266,9 @@ def queue_central_to_site_transfer(
         event_id=record.event_id,
         presentation_id=record.presentation_id,
         presentation_version_id=record.presentation_version_id,
+        presentation_version_number=session.get(
+            PresentationVersion, record.presentation_version_id
+        ).version_number,
         presentation_identifier=presentation.presentation_identifier,
         original_filename=record.original_filename,
         canonical_filename=record.canonical_filename,

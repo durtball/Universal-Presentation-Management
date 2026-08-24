@@ -27,9 +27,11 @@ from upm_shared.contracts.deployments import (
     PresentationPresenterSnapshot,
     PresentationSessionSnapshot,
     PresentationSnapshot,
+    PresentationVersionSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
 )
+from upm_shared.contracts.media_transfer import MediaTransferManifest
 from upm_shared.contracts.sync import SyncEventEnvelope
 from upm_shared.enums import (
     AuthorityScope,
@@ -40,6 +42,7 @@ from upm_shared.enums import (
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     SessionStatus,
+    SourceSystem,
 )
 from upm_shared.identifiers import new_uuid7
 from upm_site.config import SiteSettings
@@ -48,13 +51,16 @@ from upm_site.persistence.models import (
     CentralRegistration,
     EventDeploymentProjection,
     EventParticipation,
+    MediaTransferSession,
     Presentation,
     PresentationPresenter,
     PresentationSession,
+    PresentationVersion,
     ProgramRoomMapping,
     Room,
     RoomAssignment,
     SessionParticipant,
+    TransferJob,
 )
 from upm_site.persistence.models import Event as SiteEvent
 from upm_site.sync import apply_central_event, bootstrap_identity, decrypt_secret
@@ -408,6 +414,102 @@ def test_site_revision_order_schema_failure_and_identity_security(
     with site_factory() as session:
         assert session.get(EventDeploymentProjection, deployment_id).applied_revision == 2
         assert session.get(SiteEvent, event_id).name == "Revision 2"
+
+
+def test_media_transfer_waits_for_presentation_version_dependencies(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+
+    event_id = new_uuid7()
+    deployment_id = new_uuid7()
+    presentation_id = new_uuid7()
+    version_id = new_uuid7()
+    transfer_id = new_uuid7()
+    manifest = MediaTransferManifest(
+        transfer_session_id=transfer_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=site_id,
+        event_id=event_id,
+        presentation_id=presentation_id,
+        presentation_version_id=version_id,
+        presentation_version_number=1,
+        presentation_identifier="UPM-HOTFIX-1",
+        original_filename="deck.pptx",
+        canonical_filename="UPM-HOTFIX-1_v01.pptx",
+        expected_size=12,
+        sha256="a" * 64,
+        created_at=datetime.now(UTC),
+    )
+    transfer_event = SyncEventEnvelope(
+        event_id=new_uuid7(),
+        event_type="central.media_transfer.available",
+        protocol_version=1,
+        source="central",
+        source_sequence=1,
+        authority=AuthorityScope.CENTRAL,
+        entity_type="media_transfer",
+        entity_id=transfer_id,
+        occurred_at=datetime.now(UTC),
+        payload=manifest.model_dump(mode="json"),
+    )
+
+    with site_factory.begin() as session:
+        result = apply_central_event(session, transfer_event)
+        assert result.accepted
+    with site_factory() as session:
+        deferred = session.get(TransferJob, transfer_id)
+        assert deferred.required_capabilities == ["sync-dependencies"]
+        assert session.get(MediaTransferSession, transfer_id) is None
+
+    snapshot = EventDeploymentSnapshot(
+        deployment_id=deployment_id,
+        deployment_revision=1,
+        event_id=event_id,
+        site_id=site_id,
+        event_name="Transfer dependency event",
+        presentations=[
+            PresentationSnapshot(
+                presentation_id=presentation_id,
+                title="Transfer dependency presentation",
+                presentation_identifier="UPM-HOTFIX-1",
+                central_revision=1,
+                versions=[
+                    PresentationVersionSnapshot(
+                        presentation_version_id=version_id,
+                        version_number=1,
+                    )
+                ],
+                version_numbers=[1],
+            )
+        ],
+    )
+    deployment_event = SyncEventEnvelope(
+        event_id=new_uuid7(),
+        event_type="central.event_deployment.updated",
+        protocol_version=1,
+        source="central",
+        source_sequence=2,
+        authority=AuthorityScope.CENTRAL,
+        entity_type="event_deployment",
+        entity_id=deployment_id,
+        occurred_at=datetime.now(UTC),
+        payload=snapshot.model_dump(mode="json"),
+    )
+    with site_factory.begin() as session:
+        assert apply_central_event(session, deployment_event).accepted
+    with site_factory() as session:
+        assert session.get(PresentationVersion, version_id).presentation_id == presentation_id
+        transfer = session.get(MediaTransferSession, transfer_id)
+        assert transfer.presentation_version_id == version_id
+        assert session.get(TransferJob, transfer_id).required_capabilities == ["transfer"]
 
 
 def test_deployment_materializes_unmapped_rooms_and_preserves_site_overrides(

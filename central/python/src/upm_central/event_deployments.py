@@ -35,6 +35,7 @@ from upm_shared.contracts.deployments import (
     PresentationPresenterSnapshot,
     PresentationSessionSnapshot,
     PresentationSnapshot,
+    PresentationVersionSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
     SiteUserSnapshot,
@@ -266,6 +267,13 @@ def build_snapshot(
                 processing_status=item.processing_status,
                 scheduled_at=item.scheduled_at,
                 central_revision=item.revision,
+                versions=[
+                    PresentationVersionSnapshot(
+                        presentation_version_id=version.presentation_version_id,
+                        version_number=version.version_number,
+                    )
+                    for version in sorted(item.versions, key=lambda row: row.version_number)
+                ],
                 version_numbers=sorted(version.version_number for version in item.versions),
                 sessions=[
                     PresentationSessionSnapshot(

@@ -39,6 +39,8 @@ from upm_site.persistence.models import (
     ManagedSetting,
     MediaTransferSession,
     OutboxEvent,
+    Presentation,
+    PresentationVersion,
     Site,
     SyncCursor,
     SyncReceipt,
@@ -51,6 +53,85 @@ from upm_site.persistence.queue import SiteQueue
 # The lock spans identity and registration creation so every Site process observes one
 # permanent identity without relying on exception handling after a uniqueness violation.
 SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
+DEFERRED_TRANSFER_CAPABILITY = "sync-dependencies"
+
+
+def _materialize_media_transfer(
+    session: Session, transfer: TransferJob, manifest: MediaTransferManifest
+) -> bool:
+    """Create transfer state only after its canonical metadata dependencies exist."""
+    with session.no_autoflush:
+        event = session.get(Event, manifest.event_id)
+        presentation = session.get(Presentation, manifest.presentation_id)
+        version = session.get(PresentationVersion, manifest.presentation_version_id)
+        if event is None or presentation is None:
+            return False
+        if presentation.event_id != manifest.event_id:
+            raise ValueError("media transfer presentation belongs to another event")
+        if version is None:
+            if manifest.presentation_version_number is None:
+                return False
+            collision = session.scalar(
+                select(PresentationVersion).where(
+                    PresentationVersion.presentation_id == manifest.presentation_id,
+                    PresentationVersion.version_number == manifest.presentation_version_number,
+                )
+            )
+            if collision is not None:
+                raise ValueError("media transfer presentation version identity conflicts")
+            version = PresentationVersion(
+                presentation_version_id=manifest.presentation_version_id,
+                presentation_id=manifest.presentation_id,
+                version_number=manifest.presentation_version_number,
+            )
+            session.add(version)
+            session.flush([version])
+        elif version.presentation_id != manifest.presentation_id:
+            raise ValueError("media transfer version belongs to another presentation")
+
+        local_session = session.get(MediaTransferSession, manifest.transfer_session_id)
+        if local_session is None:
+            session.add(
+                MediaTransferSession(
+                    transfer_session_id=manifest.transfer_session_id,
+                    site_id=transfer.site_id,
+                    event_id=manifest.event_id,
+                    presentation_id=manifest.presentation_id,
+                    presentation_version_id=manifest.presentation_version_id,
+                    original_filename=manifest.original_filename,
+                    canonical_filename=manifest.canonical_filename,
+                    expected_size=manifest.expected_size,
+                    sha256=manifest.sha256,
+                    media_type=manifest.media_type,
+                    partial_key=f"transfers/{manifest.transfer_session_id}.partial",
+                    state=MediaTransferState.AVAILABLE,
+                )
+            )
+        elif (
+            local_session.expected_size != manifest.expected_size
+            or local_session.sha256 != manifest.sha256
+            or local_session.presentation_version_id != manifest.presentation_version_id
+        ):
+            raise ValueError("transfer manifest conflicts with existing transfer state")
+        transfer.required_capabilities = ["transfer"]
+        return True
+
+
+def _reconcile_deferred_media_transfers(session: Session) -> None:
+    transfers = session.scalars(
+        select(TransferJob).where(
+            TransferJob.transfer_type == "presentation_media.central_pull",
+            TransferJob.required_capabilities == [DEFERRED_TRANSFER_CAPABILITY],
+        )
+    ).all()
+    for transfer in transfers:
+        try:
+            manifest = MediaTransferManifest.model_validate(transfer.payload)
+            _materialize_media_transfer(session, transfer, manifest)
+        except (TypeError, ValueError):
+            # A malformed/conflicting deferred manifest remains unclaimable without preventing
+            # later ordered sync events from applying.
+            continue
 
 
 def cipher(settings: SiteSettings) -> Fernet:
@@ -238,50 +319,24 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
                     error_code="invalid_transfer_destination",
                 )
             transfer = session.get(TransferJob, manifest.transfer_session_id)
+            manifest_payload = manifest.model_dump(mode="json")
             if transfer is None:
                 transfer = TransferJob(
                     transfer_job_id=manifest.transfer_session_id,
                     site_id=site_id,
                     transfer_type="presentation_media.central_pull",
-                    payload=manifest.model_dump(mode="json"),
-                    required_capabilities=["transfer"],
+                    payload=manifest_payload,
+                    required_capabilities=[DEFERRED_TRANSFER_CAPABILITY],
                     idempotency_key=f"central-pull:{manifest.transfer_session_id}",
                 )
                 session.add(transfer)
-            elif transfer.payload != manifest.model_dump(mode="json"):
+            elif transfer.payload != manifest_payload:
                 return EventAcknowledgement(
                     event_id=event.event_id,
                     accepted=False,
                     error_code="transfer_manifest_conflict",
                 )
-            local_session = session.get(MediaTransferSession, manifest.transfer_session_id)
-            if local_session is None:
-                session.add(
-                    MediaTransferSession(
-                        transfer_session_id=manifest.transfer_session_id,
-                        site_id=site_id,
-                        event_id=manifest.event_id,
-                        presentation_id=manifest.presentation_id,
-                        presentation_version_id=manifest.presentation_version_id,
-                        original_filename=manifest.original_filename,
-                        canonical_filename=manifest.canonical_filename,
-                        expected_size=manifest.expected_size,
-                        sha256=manifest.sha256,
-                        media_type=manifest.media_type,
-                        partial_key=f"transfers/{manifest.transfer_session_id}.partial",
-                        state=MediaTransferState.AVAILABLE,
-                    )
-                )
-            elif (
-                local_session.expected_size != manifest.expected_size
-                or local_session.sha256 != manifest.sha256
-                or local_session.presentation_version_id != manifest.presentation_version_id
-            ):
-                return EventAcknowledgement(
-                    event_id=event.event_id,
-                    accepted=False,
-                    error_code="transfer_manifest_conflict",
-                )
+            _materialize_media_transfer(session, transfer, manifest)
         except (TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:
@@ -300,6 +355,7 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         session.add(cursor)
     cursor.last_sequence = event.source_sequence
     cursor.last_event_id = event.event_id
+    _reconcile_deferred_media_transfers(session)
     return EventAcknowledgement(
         event_id=event.event_id,
         accepted=True,

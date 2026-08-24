@@ -47,6 +47,7 @@ from upm_central.persistence.models import (
     EventDeployment,
     EventDeploymentRevision,
     OutboxEvent,
+    PresentationVersion,
     Site,
     SiteCredential,
     SiteEnrollmentClaim,
@@ -989,6 +990,28 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
             .order_by(OutboxEvent.source_sequence)
             .limit(get_settings().sync_batch_count)
         ).all()
+        # Enrich already-durable manifests created before version metadata was added to the
+        # transfer contract. This lets existing Sites recover without requeueing the transfer.
+        for event in events:
+            if (
+                event.event_type == "central.media_transfer.available"
+                and "presentation_version_number" not in event.payload
+            ):
+                version_id = event.payload.get("presentation_version_id")
+                try:
+                    parsed_version_id = UUID(str(version_id))
+                except (TypeError, ValueError):
+                    parsed_version_id = None
+                version = (
+                    session.get(PresentationVersion, parsed_version_id)
+                    if parsed_version_id
+                    else None
+                )
+                if version is not None:
+                    event.payload = {
+                        **event.payload,
+                        "presentation_version_number": version.version_number,
+                    }
         return OutboundSyncResponse(events=[envelope(event) for event in events])
 
     @app.post("/api/v1/sync/central-events/ack")
