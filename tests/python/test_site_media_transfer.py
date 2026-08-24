@@ -6,7 +6,11 @@ import httpx
 
 from upm_shared.enums import JobStatus, MediaTransferState, SourceSystem
 from upm_site.config import SiteSettings
-from upm_site.media.transfer import enqueue_transfer_progress, execute_central_pull
+from upm_site.media.transfer import (
+    enqueue_transfer_progress,
+    execute_central_pull,
+    recover_exhausted_finalizations,
+)
 from upm_site.persistence.models import MediaTransferSession, OutboxEvent
 from upm_site.worker import fail_central_pull
 
@@ -188,3 +192,25 @@ def test_site_worker_has_same_central_endpoint_and_egress_networks_as_sync() -> 
     assert "UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}" in worker
     assert "- site-sync-egress" in worker
     assert "- upm-integration" in worker
+
+
+def test_exhausted_full_download_is_requeued_for_idempotent_finalization() -> None:
+    job = SimpleNamespace(
+        status=JobStatus.EXHAUSTED,
+        attempt_count=3,
+        claimed_by_worker_id="old-worker",
+        lease_expires_at=object(),
+        error_code="media_pull_failed",
+        last_error="duplicate object key",
+    )
+
+    class Session:
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [job])
+
+    assert recover_exhausted_finalizations(Session()) == 1
+    assert job.status is JobStatus.PENDING
+    assert job.attempt_count == 0
+    assert job.claimed_by_worker_id is None
+    assert job.lease_expires_at is None
+    assert job.error_code is None

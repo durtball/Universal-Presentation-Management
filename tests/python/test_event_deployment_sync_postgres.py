@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 import upm_site.event_deployments as site_deployment_module
+import upm_site.sync as site_sync_module
 from upm_central.api import create_app as create_central_app
 from upm_central.config import CentralDatabaseSettings
 from upm_central.persistence.base import CentralBase
@@ -74,6 +75,7 @@ from upm_site.sync import (
     bootstrap_identity,
     decrypt_secret,
     reconcile_deferred_media_transfers,
+    recover_media_transfer_manifests,
 )
 from upm_site.sync_transport import synchronize_once
 
@@ -649,6 +651,96 @@ def test_deferred_transfer_converges_legacy_version_uuid_and_preserves_assets(
         assert (
             session.get(PresentationAsset, asset_id).presentation_version_id == canonical_version_id
         )
+
+
+def test_acknowledged_manifest_retains_intent_and_inventory_repairs_missing_job(
+    deployment_databases: tuple[str, sessionmaker[Session]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    event_id, presentation_id, version_id, transfer_id = [new_uuid7() for _ in range(4)]
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+        session.add(SiteEvent(event_id=event_id, site_id=site_id, name="Recovery event"))
+        session.flush()
+        session.add(
+            Presentation(
+                presentation_id=presentation_id,
+                event_id=event_id,
+                title="Recovery presentation",
+            )
+        )
+        session.flush()
+        session.add(
+            PresentationVersion(
+                presentation_version_id=version_id,
+                presentation_id=presentation_id,
+                version_number=1,
+            )
+        )
+    manifest = MediaTransferManifest(
+        transfer_session_id=transfer_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=site_id,
+        event_id=event_id,
+        presentation_id=presentation_id,
+        presentation_version_id=version_id,
+        presentation_version_number=1,
+        presentation_identifier="UPM-RECOVERY-1",
+        original_filename="recovery.pptx",
+        canonical_filename="UPM-RECOVERY-1_v01.pptx",
+        expected_size=12,
+        sha256="d" * 64,
+        created_at=datetime.now(UTC),
+    )
+    transfer_event = SyncEventEnvelope(
+        event_id=new_uuid7(),
+        event_type="central.media_transfer.available",
+        protocol_version=1,
+        source="central",
+        source_sequence=1,
+        authority=AuthorityScope.CENTRAL,
+        entity_type="media_transfer",
+        entity_id=transfer_id,
+        occurred_at=datetime.now(UTC),
+        payload=manifest.model_dump(mode="json"),
+    )
+    original_materialize = site_sync_module._materialize_media_transfer
+    monkeypatch.setattr(
+        site_sync_module,
+        "_materialize_media_transfer",
+        lambda *_args: (_ for _ in ()).throw(ValueError("simulated dependency failure")),
+    )
+    with site_factory.begin() as session:
+        assert apply_central_event(session, transfer_event).accepted
+    with site_factory() as session:
+        intent = session.get(TransferJob, transfer_id)
+        assert intent.required_capabilities == ["sync-dependencies"]
+        assert intent.error_code == "sync_dependency_materialization_failed"
+        assert session.get(MediaTransferSession, transfer_id) is None
+
+    monkeypatch.setattr(site_sync_module, "_materialize_media_transfer", original_materialize)
+    with site_factory.begin() as session:
+        session.delete(session.get(TransferJob, transfer_id))
+    with site_factory.begin() as session:
+        assert recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")]) == 1
+    with site_factory() as session:
+        assert session.get(TransferJob, transfer_id).required_capabilities == ["transfer"]
+        assert session.get(MediaTransferSession, transfer_id) is not None
+    with site_factory.begin() as session:
+        completed = session.get(TransferJob, transfer_id)
+        completed.status = JobStatus.SUCCEEDED
+        completed.required_capabilities = ["transfer"]
+    with site_factory.begin() as session:
+        assert recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")]) == 0
+    with site_factory() as session:
+        completed = session.get(TransferJob, transfer_id)
+        assert completed.status is JobStatus.SUCCEEDED
+        assert completed.required_capabilities == ["transfer"]
 
 
 def test_deployment_materializes_unmapped_rooms_and_preserves_site_overrides(

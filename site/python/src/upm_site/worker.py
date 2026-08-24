@@ -26,6 +26,7 @@ from upm_site.media.transfer import (
     cleanup_transfer_partials,
     enqueue_transfer_progress,
     execute_central_pull,
+    recover_exhausted_finalizations,
 )
 from upm_site.operational_logs import prune_logs, record_log
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
@@ -188,6 +189,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         enqueue_smb_reconciliation(session, site.site_id)
         enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
         enqueue_asset_reconciliation(session, site.site_id)
+        recover_exhausted_finalizations(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():

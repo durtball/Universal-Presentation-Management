@@ -416,16 +416,25 @@ class MediaIngestionService:
         existing = self._find_retry(request)
         if existing is not None:
             return existing
-        media_id = new_uuid7()
         target, event_id = self._load_service_target_and_event(request, committed)
-        asset_id = self._create_staging_record(
-            request,
-            media_id,
-            committed["storage_key"],
-            validate_original_filename(request.original_filename),
-            target.storage_target_id,
-            event_id,
-        )
+        reused = self._reuse_committed_object(request, committed, size_bytes, sha256)
+        if reused is not None:
+            return reused
+        media_id = new_uuid7()
+        try:
+            asset_id = self._create_staging_record(
+                request,
+                media_id,
+                committed["storage_key"],
+                validate_original_filename(request.original_filename),
+                target.storage_target_id,
+                event_id,
+            )
+        except IntegrityError:
+            reused = self._reuse_committed_object(request, committed, size_bytes, sha256)
+            if reused is not None:
+                return reused
+            raise
         self._record_finalizing(
             media_id, sha256, size_bytes, request.client_mime_type or "application/octet-stream"
         )
@@ -436,6 +445,67 @@ class MediaIngestionService:
         return IngestionResult(
             media_id, asset_id, job_id, MediaAvailability.AVAILABLE, size_bytes, sha256
         )
+
+    def _reuse_committed_object(
+        self, request: IngestionRequest, committed: dict, size_bytes: int, sha256: str
+    ) -> IngestionResult | None:
+        target_id = UUID(str(committed["storage_target_id"]))
+        with self.session_factory.begin() as session:
+            media = session.scalar(
+                select(MediaObject)
+                .where(
+                    MediaObject.storage_target_id == target_id,
+                    MediaObject.object_key == committed["storage_key"],
+                )
+                .with_for_update()
+            )
+            if media is None:
+                return None
+            if (
+                media.content_hash != sha256
+                or media.size_bytes != size_bytes
+                or media.hash_algorithm != "sha256"
+                or media.availability is not MediaAvailability.AVAILABLE
+            ):
+                raise IngestionConflictError(
+                    "content-addressed object metadata conflicts with committed bytes"
+                )
+            asset = None
+            if request.presentation_version_id is not None:
+                asset = session.scalar(
+                    select(PresentationAsset).where(
+                        PresentationAsset.presentation_version_id
+                        == request.presentation_version_id,
+                        PresentationAsset.kind == AssetKind.ORIGINAL,
+                    )
+                )
+                if asset is not None and asset.media_object_id != media.media_object_id:
+                    raise IngestionConflictError(
+                        "presentation version already has a different original asset"
+                    )
+                if asset is None:
+                    asset = PresentationAsset(
+                        presentation_version_id=request.presentation_version_id,
+                        media_object_id=media.media_object_id,
+                        original_filename=validate_original_filename(request.original_filename),
+                        kind=AssetKind.ORIGINAL,
+                    )
+                    session.add(asset)
+                    session.flush([asset])
+            job_id = session.scalar(
+                select(ProcessingJob.processing_job_id).where(
+                    ProcessingJob.media_object_id == media.media_object_id
+                )
+            )
+            return IngestionResult(
+                media.media_object_id,
+                asset.presentation_asset_id if asset else None,
+                job_id,
+                media.availability,
+                media.size_bytes,
+                media.content_hash,
+                True,
+            )
 
     def _validate_request(self, request: IngestionRequest) -> None:
         if request.expected_size is not None and request.expected_size < 0:

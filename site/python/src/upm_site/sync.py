@@ -21,6 +21,7 @@ from upm_shared.enums import (
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
+    JobStatus,
     MediaTransferState,
     SourceSystem,
 )
@@ -124,6 +125,68 @@ def reconcile_deferred_media_transfers(session: Session) -> None:
             # A malformed/conflicting deferred manifest remains unclaimable without preventing
             # later ordered sync events from applying.
             continue
+
+
+def persist_media_transfer_manifest(
+    session: Session, manifest: MediaTransferManifest, site_id: UUID
+) -> TransferJob:
+    """Durably retain a valid manifest before attempting dependency materialization."""
+    payload = manifest.model_dump(mode="json")
+    transfer = session.get(TransferJob, manifest.transfer_session_id)
+    if transfer is not None:
+        if transfer.payload != payload:
+            existing_manifest = MediaTransferManifest.model_validate(transfer.payload)
+            existing_payload = existing_manifest.model_dump(mode="json")
+            existing_version_number = existing_payload.pop("presentation_version_number")
+            requested_version_number = payload["presentation_version_number"]
+            requested_without_version = {
+                key: value for key, value in payload.items() if key != "presentation_version_number"
+            }
+            if existing_payload != requested_without_version or existing_version_number not in {
+                None,
+                requested_version_number,
+            }:
+                raise ValueError("transfer manifest conflicts with durable transfer intent")
+            transfer.payload = payload
+        if transfer.status is JobStatus.SUCCEEDED:
+            return transfer
+    else:
+        transfer = TransferJob(
+            transfer_job_id=manifest.transfer_session_id,
+            site_id=site_id,
+            transfer_type="presentation_media.central_pull",
+            payload=payload,
+            required_capabilities=[DEFERRED_TRANSFER_CAPABILITY],
+            idempotency_key=f"central-pull:{manifest.transfer_session_id}",
+        )
+        session.add(transfer)
+        session.flush([transfer])
+    try:
+        with session.begin_nested():
+            _materialize_media_transfer(session, transfer, manifest)
+    except Exception as error:
+        transfer.required_capabilities = [DEFERRED_TRANSFER_CAPABILITY]
+        transfer.error_code = "sync_dependency_materialization_failed"
+        transfer.last_error = str(error)[:2048]
+    return transfer
+
+
+def recover_media_transfer_manifests(session: Session, manifests: list[dict]) -> int:
+    """Restore missing Site transfer intent from Central's authoritative manifest inventory."""
+    site_id = _local_site_id(session)
+    recovered = 0
+    for payload in manifests:
+        try:
+            manifest = MediaTransferManifest.model_validate(payload)
+            if manifest.destination_site_id != site_id:
+                continue
+            existed = session.get(TransferJob, manifest.transfer_session_id) is not None
+            persist_media_transfer_manifest(session, manifest, site_id)
+        except (TypeError, ValueError):
+            continue
+        else:
+            recovered += int(not existed)
+    return recovered
 
 
 def cipher(settings: SiteSettings) -> Fernet:
@@ -310,25 +373,7 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
                     accepted=False,
                     error_code="invalid_transfer_destination",
                 )
-            transfer = session.get(TransferJob, manifest.transfer_session_id)
-            manifest_payload = manifest.model_dump(mode="json")
-            if transfer is None:
-                transfer = TransferJob(
-                    transfer_job_id=manifest.transfer_session_id,
-                    site_id=site_id,
-                    transfer_type="presentation_media.central_pull",
-                    payload=manifest_payload,
-                    required_capabilities=[DEFERRED_TRANSFER_CAPABILITY],
-                    idempotency_key=f"central-pull:{manifest.transfer_session_id}",
-                )
-                session.add(transfer)
-            elif transfer.payload != manifest_payload:
-                return EventAcknowledgement(
-                    event_id=event.event_id,
-                    accepted=False,
-                    error_code="transfer_manifest_conflict",
-                )
-            _materialize_media_transfer(session, transfer, manifest)
+            persist_media_transfer_manifest(session, manifest, site_id)
         except (TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:

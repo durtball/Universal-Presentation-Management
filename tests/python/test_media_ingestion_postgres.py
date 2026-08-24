@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -103,6 +104,104 @@ def test_site_confirmed_audit_backfills_original_asset(factory, media_context) -
         )
         assert asset.kind is AssetKind.ORIGINAL
         assert asset.media_object_id == media_id
+
+
+def test_adopt_committed_reuses_content_for_distinct_presentation_versions(
+    factory: sessionmaker[Session], media_context: dict[str, object]
+) -> None:
+    version_two_id = new_uuid7()
+    presentation_two_id = new_uuid7()
+    media_id = new_uuid7()
+    sha256 = "c" * 64
+    key = f"objects/sha256/{sha256}"
+    with factory.begin() as session:
+        session.add(
+            Presentation(
+                presentation_id=presentation_two_id,
+                event_id=media_context["event_id"],
+                title="Second presentation",
+            )
+        )
+        session.flush()
+        session.add(
+            PresentationVersion(
+                presentation_version_id=version_two_id,
+                presentation_id=presentation_two_id,
+                version_number=1,
+            )
+        )
+        session.add(
+            MediaObject(
+                media_object_id=media_id,
+                site_id=media_context["site_id"],
+                event_id=media_context["event_id"],
+                storage_target_id=media_context["target_id"],
+                object_key=key,
+                category=MediaCategory.PRESENTATION_VERSION,
+                original_filename="first-name.pptx",
+                availability=MediaAvailability.AVAILABLE,
+                size_bytes=12,
+                content_hash=sha256,
+                hash_algorithm="sha256",
+            )
+        )
+    committed = {
+        "storage_target_id": str(media_context["target_id"]),
+        "storage_key": key,
+        "internal_path": str(media_context["root"]),
+    }
+    ingestion = service(factory)
+    requests = [
+        request(
+            media_context,
+            category=MediaCategory.PRESENTATION_VERSION,
+            presentation_version_id=media_context["version_id"],
+            event_id=media_context["event_id"],
+            original_filename="3365765-Slovak.pptx",
+            idempotency_key="transfer:first",
+        ),
+        request(
+            media_context,
+            category=MediaCategory.PRESENTATION_VERSION,
+            presentation_version_id=version_two_id,
+            event_id=media_context["event_id"],
+            original_filename="3420875-Brite.pptx",
+            idempotency_key="transfer:second",
+        ),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = executor.map(
+            lambda item: ingestion.adopt_committed(item, committed, 12, sha256), requests
+        )
+    replay = ingestion.adopt_committed(
+        request(
+            media_context,
+            category=MediaCategory.PRESENTATION_VERSION,
+            presentation_version_id=version_two_id,
+            event_id=media_context["event_id"],
+            original_filename="3420875-Brite.pptx",
+            idempotency_key="transfer:second",
+        ),
+        committed,
+        12,
+        sha256,
+    )
+
+    assert first.media_object_id == second.media_object_id == replay.media_object_id == media_id
+    with factory() as session:
+        assets = session.scalars(
+            select(PresentationAsset)
+            .where(PresentationAsset.media_object_id == media_id)
+            .order_by(PresentationAsset.original_filename)
+        ).all()
+        assert {asset.presentation_version_id for asset in assets} == {
+            media_context["version_id"],
+            version_two_id,
+        }
+        assert {asset.original_filename for asset in assets} == {
+            "3365765-Slovak.pptx",
+            "3420875-Brite.pptx",
+        }
 
 
 @pytest.fixture

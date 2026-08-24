@@ -179,3 +179,30 @@ def cleanup_transfer_partials(session: Session, settings: SiteSettings, cutoff: 
             extra={"transfer_session_id": str(transfer.transfer_session_id)},
         )
     return len(transfers)
+
+
+def recover_exhausted_finalizations(session: Session) -> int:
+    """Retry fully downloaded pulls exhausted by an idempotent finalization conflict."""
+    jobs = session.scalars(
+        select(TransferJob)
+        .join(
+            MediaTransferSession,
+            MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id,
+        )
+        .where(
+            TransferJob.transfer_type == "presentation_media.central_pull",
+            TransferJob.status == JobStatus.EXHAUSTED,
+            TransferJob.error_code == "media_pull_failed",
+            MediaTransferSession.media_object_id.is_(None),
+            MediaTransferSession.confirmed_offset == MediaTransferSession.expected_size,
+        )
+        .with_for_update()
+    ).all()
+    for job in jobs:
+        job.status = JobStatus.PENDING
+        job.attempt_count = 0
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.error_code = None
+        job.last_error = None
+    return len(jobs)

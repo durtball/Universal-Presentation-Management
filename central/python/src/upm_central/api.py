@@ -1014,6 +1014,37 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
                     }
         return OutboundSyncResponse(events=[envelope(event) for event in events])
 
+    @app.get("/api/v1/sync/media-transfer-manifests")
+    def media_transfer_manifests(
+        session: DbSession,
+        authorization: Annotated[str | None, Header()] = None,
+        x_upm_site_id: Annotated[UUID | None, Header()] = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        if x_upm_site_id is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="missing site identity")
+        authenticate_site(session, x_upm_site_id, bearer_token(authorization))
+        events = session.scalars(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.owning_site_id == x_upm_site_id,
+                OutboxEvent.event_type == "central.media_transfer.available",
+            )
+            .order_by(OutboxEvent.source_sequence)
+        ).all()
+        manifests = []
+        for event in events:
+            payload = dict(event.payload)
+            if "presentation_version_number" not in payload:
+                try:
+                    version_id = UUID(str(payload.get("presentation_version_id")))
+                except (TypeError, ValueError):
+                    version_id = None
+                version = session.get(PresentationVersion, version_id) if version_id else None
+                if version is not None:
+                    payload["presentation_version_number"] = version.version_number
+            manifests.append(payload)
+        return {"manifests": manifests}
+
     @app.post("/api/v1/sync/central-events/ack")
     def acknowledge_central_events(
         payload: EventAckRequest,
