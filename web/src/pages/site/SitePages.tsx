@@ -192,6 +192,70 @@ export function SiteOverview() {
   );
 }
 
+export function SiteCentralConnection() {
+  const registration = useApi((signal) => siteApi.registration(signal), []);
+  const [centralUrl, setCentralUrl] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState<Error>();
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (registration.data?.central_url) setCentralUrl(registration.data.central_url);
+  }, [registration.data?.central_url]);
+
+  async function testConnection() {
+    setBusy(true); setError(undefined); setMessage("");
+    try {
+      const result = await siteApi.testCentral(centralUrl);
+      setMessage(`Connected to ${result.central_identity} · ${result.status || "ready"}`);
+    } catch (value) { setError(value instanceof Error ? value : new Error("Connection failed")); }
+    finally { setBusy(false); }
+  }
+
+  async function save(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError(undefined); setMessage("");
+    try {
+      await siteApi.configureCentral(centralUrl);
+      setMessage("Central URL saved. Existing enrollment credentials were retained.");
+      registration.refresh();
+    } catch (value) { setError(value instanceof Error ? value : new Error("Save failed")); }
+    finally { setBusy(false); }
+  }
+
+  async function reenroll() {
+    if (!window.confirm("Clear the current machine credential and request enrollment from this Central?")) return;
+    setBusy(true); setError(undefined); setMessage("");
+    try {
+      await siteApi.reenrollCentral();
+      setMessage("Re-enrollment requested. Approve this Site in Central.");
+      registration.refresh();
+    } catch (value) { setError(value instanceof Error ? value : new Error("Re-enrollment failed")); }
+    finally { setBusy(false); }
+  }
+
+  return <Page eyebrow="Site Admin" title="Central Connection" description="This Site initiates authenticated outbound synchronization and media transfers to Central.">
+    <PageState {...registration} onRetry={registration.refresh}>{(data) => <>
+      <div className="metrics">
+        <Metric label="Enrollment" value={<StatusBadge value={data.registration_state} />} detail={data.credential_present ? "Machine credential present" : "No machine credential"} />
+        <Metric label="Connection" value={<StatusBadge value={data.connection_status} />} detail={`Last sync ${when(data.last_successful_sync)}`} />
+        <Metric label="Central identity" value={message.includes("Connected to") ? message.split(" · ")[0].replace("Connected to ", "") : "UPM Central"} detail={data.protocol_compatible ? "Protocol compatible" : "Identity verified when testing"} />
+      </div>
+      <Panel title="Central endpoint" description="Use a LAN URL such as http://192.168.100.127:8080 or an Internet HTTPS URL. No inbound Site port is required.">
+        <form onSubmit={save} className="form-grid">
+          <label>Central Server URL<input type="url" required value={centralUrl} onChange={(event) => setCentralUrl(event.target.value)} placeholder="https://central.example.com" /></label>
+          <div className="button-row"><button className="button" type="button" disabled={busy || !centralUrl} onClick={testConnection}>Test Connection</button><button className="button button--primary" type="submit" disabled={busy || !centralUrl}>Save Central URL</button></div>
+        </form>
+        {message && <p role="status">{message}</p>}{error && <ErrorSurface error={error} />}
+      </Panel>
+      <Panel title="Connection history">
+        <dl><dt>Configured endpoint</dt><dd>{data.central_url || "Not configured"}</dd><dt>Last connection</dt><dd>{when(data.last_connection_at || undefined)}</dd><dt>Last successful sync</dt><dd>{when(data.last_successful_sync)}</dd><dt>Last error</dt><dd>{data.last_error || "None"}</dd></dl>
+      </Panel>
+      <Panel title="Enrollment safety" description="Changing the URL retains the current machine credential. Re-enroll only when connecting to a different Central or when Central rejects the existing identity.">
+        <button className="button button--danger" type="button" disabled={busy} onClick={reenroll}>Reconnect / Re-enroll</button>
+      </Panel>
+    </>}</PageState>
+  </Page>;
+}
+
 export function SiteProgram() {
   const deployments = useApi((signal) => siteApi.deployments(signal), []);
   const [eventId, setEventId] = useState("");

@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from urllib.parse import unquote
 from uuid import UUID
 
+import httpx
 from fastapi import (
     Cookie,
     Depends,
@@ -669,6 +670,7 @@ def create_app(
             "connection_status": "connected"
             if registration.last_connection_at
             else "never_connected",
+            "last_connection_at": registration.last_connection_at,
             "last_successful_heartbeat": registration.last_heartbeat_at,
             "last_successful_sync": registration.last_successful_sync_at,
             "pending_outbound": counts.get(JobStatus.PENDING, 0)
@@ -689,6 +691,24 @@ def create_app(
         registration.central_url = str(update.central_url).rstrip("/")
         registration.last_error = None
         return {"site_id": site.site_id, "central_url": registration.central_url}
+
+    @app.post("/api/v1/central-registration/test", tags=["synchronization"])
+    def test_central_endpoint(update: CentralEndpointUpdate) -> dict[str, object]:
+        central_url = str(update.central_url).rstrip("/")
+        try:
+            response = httpx.get(f"{central_url}/health", timeout=5.0)
+            response.raise_for_status()
+            health = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            raise HTTPException(502, f"Central connection failed: {error}") from error
+        if health.get("service") != "upm-central":
+            raise HTTPException(409, "The endpoint did not identify itself as UPM Central.")
+        return {
+            "reachable": True,
+            "central_url": central_url,
+            "central_identity": health["service"],
+            "status": health.get("status"),
+        }
 
     @app.post("/api/v1/central-registration/request", tags=["synchronization"])
     def restart_enrollment(

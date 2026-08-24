@@ -177,7 +177,7 @@ def bootstrap_identity(
         )
         session.add(registration)
         session.flush()
-    elif settings.central_url and registration.central_url != settings.central_url:
+    elif settings.central_url and not registration.central_url:
         registration.central_url = settings.central_url
     return site, registration
 

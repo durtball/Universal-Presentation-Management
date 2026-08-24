@@ -128,7 +128,10 @@ export interface SiteRegistration extends Row {
   site_id: string;
   display_name: string;
   registration_state: string;
+  central_url?: string | null;
+  credential_present?: boolean;
   connection_status: string;
+  last_connection_at?: string | null;
   last_successful_heartbeat?: string;
   last_successful_sync?: string;
   pending_outbound: number;

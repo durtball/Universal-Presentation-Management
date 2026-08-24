@@ -22,6 +22,7 @@ const centralNav = [
 ];
 const siteNav = [
   ["/admin", "Overview"],
+  ["/admin/central", "Central Connection"],
   ["/admin/program", "Program"],
   ["/admin/rooms", "Rooms"],
   ["/admin/users", "Users"],
