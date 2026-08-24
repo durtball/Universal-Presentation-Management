@@ -47,9 +47,20 @@ class SiteQueue:
         return self._claim(ProcessingJob, worker_id, capabilities, lease)
 
     def claim_transfer(
-        self, worker_id: str, capabilities: set[str], lease: timedelta
+        self,
+        worker_id: str,
+        capabilities: set[str],
+        lease: timedelta,
+        *,
+        transfer_type: str | None = None,
     ) -> TransferJob | None:
-        return self._claim(TransferJob, worker_id, capabilities, lease)
+        return self._claim(
+            TransferJob,
+            worker_id,
+            capabilities,
+            lease,
+            transfer_type=transfer_type,
+        )
 
     def _claim(
         self,
@@ -57,6 +68,7 @@ class SiteQueue:
         worker_id: str,
         capabilities: set[str],
         lease: timedelta,
+        transfer_type: str | None = None,
     ) -> JobModel | None:
         now = utc_now()
         statement = (
@@ -75,6 +87,8 @@ class SiteQueue:
             .with_for_update(skip_locked=True)
             .limit(1)
         )
+        if transfer_type is not None:
+            statement = statement.where(TransferJob.transfer_type == transfer_type)
         job = self.session.scalars(statement).first()
         if job is None:
             return None

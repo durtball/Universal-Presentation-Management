@@ -30,6 +30,9 @@ export const siteApi = {
   health: (signal?: AbortSignal) => get<Health>("/health", signal),
   registration: (signal?: AbortSignal) =>
     get<SiteRegistration>("/api/v1/central-registration", signal),
+  testCentral: (centralUrl: string) => siteClient.request<{reachable:boolean;central_url:string;central_identity:string;status?:string}>("/api/v1/central-registration/test", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({central_url:centralUrl})}),
+  configureCentral: (centralUrl: string) => siteClient.request<{site_id:string;central_url:string}>("/api/v1/central-registration/endpoint", {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({central_url:centralUrl})}),
+  reenrollCentral: () => siteClient.request<{site_id:string;registration_state:string}>("/api/v1/central-registration/request", {method:"POST"}),
   deployments: (signal?: AbortSignal) =>
     get<SiteDeployment[]>("/api/v1/event-deployments", signal),
   storage: (signal?: AbortSignal) => get<StorageOverview>("/api/v1/media-storage", signal),
@@ -94,6 +97,8 @@ export const siteApi = {
     siteClient.request<Row>(`/api/v1/media/${mediaId}/confirmation`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ presentation_id: presentationId }) }),
   confirmMediaBatch: (items: {media_object_id: string; presentation_id: string}[]) =>
     siteClient.request<{results: Row[]}>("/api/v1/media/confirmations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) }),
+  rejectMedia: (mediaId: string, reason?: string) =>
+    siteClient.request<Row>(`/api/v1/media/${mediaId}/reject`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: reason || null }) }),
   presentationOperations: (eventId: string, query: Record<string, string | number | undefined>, signal?: AbortSignal) =>
     siteClient.request<{items: Row[]; total: number; limit: number; offset: number}>(`/api/v1/events/${eventId}/presentations/operations`, { query, signal, retry: true }),
   matchMedia: (eventId: string, filename: string, signal?: AbortSignal) =>

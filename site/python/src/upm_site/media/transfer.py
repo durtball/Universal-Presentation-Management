@@ -15,7 +15,7 @@ from upm_shared.jobs import OutboxPayload
 from upm_shared.media_storage_client import MediaStorageClient
 from upm_site.config import SiteSettings
 from upm_site.media.ingestion import IngestionRequest, MediaIngestionService
-from upm_site.persistence.models import MediaTransferSession, TransferJob, utc_now
+from upm_site.persistence.models import MediaTransferSession, OutboxEvent, TransferJob, utc_now
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync_transport import auth_context, checked
 
@@ -96,7 +96,7 @@ def enqueue_transfer_progress(
     transfer: MediaTransferSession,
     *,
     local_media_ready: bool = False,
-) -> None:
+) -> OutboxEvent:
     """Publish one durable event per acknowledged block or state transition."""
     from upm_site.sync import next_sequence
 
@@ -116,21 +116,40 @@ def enqueue_transfer_progress(
         local_media_ready=local_media_ready,
         error_detail=transfer.error_detail,
     )
-    SiteQueue(session).enqueue_outbox(
+    idempotency_key = (
+        f"media-progress:{transfer.transfer_session_id}:"
+        f"{transfer.confirmed_offset}:{transfer.state}"
+    )
+    existing = session.scalar(
+        select(OutboxEvent)
+        .where(
+            OutboxEvent.source_system == SourceSystem.SITE,
+            OutboxEvent.idempotency_key == idempotency_key,
+        )
+        .with_for_update()
+    )
+    payload = OutboxPayload(
+        source_system=SourceSystem.SITE,
+        data=progress.model_dump(mode="json"),
+    )
+    if existing is not None:
+        if (
+            existing.event_type != "site.media_transfer.progress"
+            or existing.aggregate_id != transfer.transfer_session_id
+        ):
+            raise ValueError("media transfer progress idempotency conflict")
+        if existing.status in {JobStatus.PENDING, JobStatus.RETRY_WAIT}:
+            existing.payload = payload.data
+        return existing
+    return SiteQueue(session).enqueue_outbox(
         event_type="site.media_transfer.progress",
         aggregate_type="media_transfer",
         aggregate_id=transfer.transfer_session_id,
         site_id=transfer.site_id,
         protocol_version=UPM_SYNC_PROTOCOL_VERSION,
         source_sequence=next_sequence(session),
-        idempotency_key=(
-            f"media-progress:{transfer.transfer_session_id}:"
-            f"{transfer.confirmed_offset}:{transfer.state}"
-        ),
-        payload=OutboxPayload(
-            source_system=SourceSystem.SITE,
-            data=progress.model_dump(mode="json"),
-        ),
+        idempotency_key=idempotency_key,
+        payload=payload,
     )
 
 
@@ -160,3 +179,30 @@ def cleanup_transfer_partials(session: Session, settings: SiteSettings, cutoff: 
             extra={"transfer_session_id": str(transfer.transfer_session_id)},
         )
     return len(transfers)
+
+
+def recover_exhausted_finalizations(session: Session) -> int:
+    """Retry fully downloaded pulls exhausted by an idempotent finalization conflict."""
+    jobs = session.scalars(
+        select(TransferJob)
+        .join(
+            MediaTransferSession,
+            MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id,
+        )
+        .where(
+            TransferJob.transfer_type == "presentation_media.central_pull",
+            TransferJob.status == JobStatus.EXHAUSTED,
+            TransferJob.error_code == "media_pull_failed",
+            MediaTransferSession.media_object_id.is_(None),
+            MediaTransferSession.confirmed_offset == MediaTransferSession.expected_size,
+        )
+        .with_for_update()
+    ).all()
+    for job in jobs:
+        job.status = JobStatus.PENDING
+        job.attempt_count = 0
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.error_code = None
+        job.last_error = None
+    return len(jobs)

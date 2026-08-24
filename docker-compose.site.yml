@@ -143,6 +143,7 @@ services:
       UPM_SITE_TRANSFER_PUSH_CONCURRENCY: ${UPM_SITE_TRANSFER_PUSH_CONCURRENCY:-1}
       UPM_SITE_TRANSFER_PARTIAL_RETENTION_SECONDS: ${UPM_SITE_TRANSFER_PARTIAL_RETENTION_SECONDS:-604800}
       UPM_SITE_CREDENTIAL_ENCRYPTION_KEY: ${UPM_SITE_CREDENTIAL_ENCRYPTION_KEY:?Set UPM_SITE_CREDENTIAL_ENCRYPTION_KEY}
+      UPM_SITE_CENTRAL_URL: ${UPM_SITE_CENTRAL_URL:-http://upm-central}
       UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
       UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
       UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
@@ -156,6 +157,8 @@ services:
         condition: service_healthy
     networks:
       - site-internal
+      - site-sync-egress
+      - upm-integration
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/upm-site-worker-ready"]
       interval: 10s

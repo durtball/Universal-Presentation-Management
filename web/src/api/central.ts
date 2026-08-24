@@ -137,6 +137,7 @@ export function centralApi(csrfToken: string | null = null) {
     confirmMedia: (items: Array<{ media_import_id: string; presentation_id: string }>) =>
       client.request<{ results: Array<{ media_import_id: string; status: string; message?: string }> }>("/api/v1/admin/media-imports/confirmations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) }),
     refreshMediaMatch: (importId: string) => client.request<CentralMediaImport>(`/api/v1/admin/media-imports/${importId}/match`, { method: "POST" }),
+    rejectMedia: (importId: string, reason?: string) => client.request<CentralMediaImport>(`/api/v1/admin/media-imports/${importId}/reject`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: reason || null }) }),
     rescanUnmatchedMedia: (eventId: string) => client.request<import("./types").MediaRescanProgress>(`/api/v1/admin/events/${eventId}/media-imports/rescan`, { method: "POST" }),
     mediaRescanStatus: (operationId: string, deliveredCount = 0) => client.request<import("./types").MediaRescanProgress>(`/api/v1/admin/media-rescans/${operationId}`, { query: { delivered_count: deliveredCount }, retry: true }),
     retryMedia: (importId: string) => client.request<CentralMediaImport>(

@@ -31,6 +31,7 @@ class MediaTransferManifest(ContractModel):
     event_id: EventId
     presentation_id: PresentationId
     presentation_version_id: PresentationVersionId
+    presentation_version_number: int | None = Field(default=None, ge=1)
     presentation_identifier: str = Field(min_length=1, max_length=128)
     original_filename: str = Field(min_length=1, max_length=1024)
     canonical_filename: str = Field(min_length=1, max_length=1024)

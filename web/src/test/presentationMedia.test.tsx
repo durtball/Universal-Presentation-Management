@@ -146,6 +146,27 @@ describe("fluid Central media queue", () => {
     expect(document.querySelectorAll("tbody > tr")).toHaveLength(50);
   });
 
+  it("shows concise folder and path match evidence to the operator", () => {
+    const pathMatch = {
+      ...row(1),
+      match_candidates: [{
+        ...row(1).match_candidates[0],
+        evidence: [
+          "Presenter parent folder match",
+          "Room ancestor folder match: Ballroom A",
+          "09:30 session time folder match",
+          "Title parent folder match",
+        ],
+      }],
+    };
+    render(<CentralReviewQueue initialItems={[pathMatch]} eventId="event" csrf="csrf" />);
+
+    expect(screen.getByText(
+      "Presenter parent folder match · Room ancestor folder match: Ballroom A · 09:30 session time folder match · Title parent folder match",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+  });
+
   it("shows durable rescan progress and merges newly discovered suggestions", async () => {
     const unmatched = { ...row(3), match_state: "unmatched", suggested_candidate: null, match_candidates: [] };
     const fetchMock = vi.spyOn(globalThis, "fetch")

@@ -24,6 +24,7 @@ import { UsersPage } from "./pages/Users";
 import { useSession } from "./state/session";
 import { Loading } from "./components/Feedback";
 import {
+  SiteCentralConnection,
   SiteOverview,
   SiteProgram,
   SiteRoomDetail,
@@ -111,6 +112,7 @@ function SiteApp() {
         <Route path="/login" element={<Navigate to="/admin" replace/>}/>
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/admin" element={<SiteOverview />} />
+        <Route path="/admin/central" element={<SiteCentralConnection />} />
         <Route path="/admin/program" element={<SiteProgram />} />
         <Route path="/admin/rooms" element={<SiteRooms />} />
         <Route path="/admin/users" element={<UsersPage mode="site" />} />

@@ -140,6 +140,56 @@ def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
     assert client.get(f"/api/v1/storage/staging/{STAGING_ID}/../escape").status_code in {404, 422}
 
 
+def test_intake_publication_promotion_and_rejection_are_replay_safe(tmp_path):
+    client = configured_client(tmp_path)
+
+    def staged_payload(value: bytes):
+        allocation = client.post("/api/v1/storage/staging/allocations").json()
+        client.put(
+            f"/api/v1/storage/staging/{allocation['storage_target_id']}/{allocation['storage_key']}",
+            content=value,
+        )
+        return allocation, hashlib.sha256(value).hexdigest()
+
+    allocation, digest = staged_payload(b"durable intake presentation")
+    request = {
+        "source_target_id": allocation["storage_target_id"],
+        "source_key": allocation["storage_key"],
+        "sha256": digest,
+    }
+    intake = client.post("/api/v1/storage/intake/publish", json=request).json()
+    assert intake["storage_key"] == f"intake/sha256/{digest[:2]}/{digest}"
+    assert client.post("/api/v1/storage/intake/publish", json=request).json() == intake
+
+    promotion = client.post(
+        "/api/v1/storage/intake/promote",
+        json={
+            "source_target_id": intake["storage_target_id"],
+            "source_key": intake["storage_key"],
+            "sha256": digest,
+        },
+    ).json()
+    assert promotion["storage_key"] == f"objects/sha256/{digest[:2]}/{digest}"
+
+    rejected_allocation, rejected_digest = staged_payload(b"retained rejected media")
+    rejected_intake = client.post(
+        "/api/v1/storage/intake/publish",
+        json={
+            "source_target_id": rejected_allocation["storage_target_id"],
+            "source_key": rejected_allocation["storage_key"],
+            "sha256": rejected_digest,
+        },
+    ).json()
+    rejected_request = {
+        "source_target_id": rejected_intake["storage_target_id"],
+        "source_key": rejected_intake["storage_key"],
+        "sha256": rejected_digest,
+    }
+    rejected = client.post("/api/v1/storage/intake/reject", json=rejected_request).json()
+    assert rejected["storage_key"] == (f"rejected/sha256/{rejected_digest[:2]}/{rejected_digest}")
+    assert client.post("/api/v1/storage/intake/reject", json=rejected_request).json() == rejected
+
+
 def test_resumable_append_and_bounded_object_reads(tmp_path):
     client = configured_client(tmp_path)
     allocation = client.post("/api/v1/storage/staging/allocations").json()

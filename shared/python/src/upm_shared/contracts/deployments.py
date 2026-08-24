@@ -110,6 +110,11 @@ class ExternalIdentifierSnapshot(DeploymentModel):
     central_revision: Annotated[int, Field(ge=1)]
 
 
+class PresentationVersionSnapshot(DeploymentModel):
+    presentation_version_id: UUID
+    version_number: Annotated[int, Field(ge=1)]
+
+
 class PresentationSnapshot(DeploymentModel):
     presentation_id: UUID
     session_id: UUID | None = None
@@ -123,6 +128,7 @@ class PresentationSnapshot(DeploymentModel):
     processing_status: PresentationProcessingStatus = PresentationProcessingStatus.NOT_STARTED
     scheduled_at: datetime | None = None
     central_revision: Annotated[int, Field(ge=1)]
+    versions: list[PresentationVersionSnapshot] = Field(default_factory=list)
     version_numbers: list[Annotated[int, Field(ge=1)]] = Field(default_factory=list)
     sessions: list[PresentationSessionSnapshot] = Field(default_factory=list)
     presenters: list[PresentationPresenterSnapshot] = Field(default_factory=list)

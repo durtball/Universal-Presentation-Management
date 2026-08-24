@@ -29,6 +29,8 @@ from upm_site.sync import (
     encrypt_secret,
     enqueue_heartbeat,
     envelope,
+    reconcile_deferred_media_transfers,
+    recover_media_transfer_manifests,
 )
 
 TRANSIENT_STATUS_CODES = {408, 425, 429, 502, 503, 504}
@@ -294,6 +296,20 @@ def pull_central_events(
         registration.last_error = None
 
 
+def recover_central_media_manifests(
+    factory: sessionmaker[Session], settings: SiteSettings, client: httpx.Client
+) -> None:
+    with factory.begin() as session:
+        _site, registration, headers = auth_context(session, settings)
+        central_url = registration.central_url
+    response = checked(
+        client.get(f"{central_url}/api/v1/sync/media-transfer-manifests", headers=headers)
+    )
+    manifests = response.json().get("manifests", [])
+    with factory.begin() as session:
+        recover_media_transfer_manifests(session, manifests)
+
+
 def synchronize_once(
     factory: sessionmaker[Session],
     settings: SiteSettings,
@@ -303,11 +319,16 @@ def synchronize_once(
     owns_client = client is None
     client = client or httpx.Client(timeout=10.0)
     try:
+        # Deferred manifests are durable Site state and can become runnable without a new
+        # Central event (for example, after deploying identity-reconciliation code).
+        with factory.begin() as session:
+            reconcile_deferred_media_transfers(session)
         enrollment_step(factory, settings, client)
         enqueue_due_heartbeat(factory, settings)
         try:
             deliver_site_events(factory, settings, client, worker_id)
             pull_central_events(factory, settings, client)
+            recover_central_media_manifests(factory, settings, client)
         except DeliveryFailure as exc:
             if exc.code != "not_registered":
                 raise

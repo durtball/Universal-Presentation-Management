@@ -240,7 +240,7 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
             assert persisted.committed_storage_key is None
             queued = session.scalar(
                 select(ProcessingJob).where(
-                    ProcessingJob.idempotency_key == str(result.media_import_id)
+                    ProcessingJob.idempotency_key == f"intake:{result.media_import_id}"
                 )
             )
             assert queued is not None
@@ -268,7 +268,7 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
     finally:
         with factory.begin() as session:
             session.query(ProcessingJob).filter(
-                ProcessingJob.idempotency_key == str(result.media_import_id)
+                ProcessingJob.idempotency_key == f"intake:{result.media_import_id}"
             ).delete(synchronize_session=False)
             session.query(PresentationMediaImport).filter(
                 PresentationMediaImport.event_id == event_id
@@ -354,6 +354,9 @@ async def test_generated_500_file_batch_remains_staged_before_confirmation() -> 
                 select(PresentationMediaImport).where(PresentationMediaImport.event_id == event_id)
             ).all()
             assert len(imports) == 500
+            assert {item.source_relative_path for item in imports} == {
+                f"batch/unknown-{index}.pptx" for index in range(500)
+            }
             assert all(item.import_state == MediaImportState.STAGED for item in imports)
             assert all(item.staging_key and item.staging_storage_root_id for item in imports)
             assert all(item.committed_storage_key is None for item in imports)
@@ -362,7 +365,11 @@ async def test_generated_500_file_batch_remains_staged_before_confirmation() -> 
                 session.scalar(
                     select(func.count())
                     .select_from(ProcessingJob)
-                    .where(ProcessingJob.idempotency_key.in_([str(value) for value in import_ids]))
+                    .where(
+                        ProcessingJob.idempotency_key.in_(
+                            [f"intake:{value}" for value in import_ids]
+                        )
+                    )
                 )
                 == 500
             )
@@ -370,7 +377,7 @@ async def test_generated_500_file_batch_remains_staged_before_confirmation() -> 
     finally:
         with factory.begin() as session:
             session.query(ProcessingJob).filter(
-                ProcessingJob.idempotency_key.in_([str(value) for value in import_ids])
+                ProcessingJob.idempotency_key.in_([f"intake:{value}" for value in import_ids])
             ).delete(synchronize_session=False)
             session.query(PresentationMediaImport).filter(
                 PresentationMediaImport.event_id == event_id

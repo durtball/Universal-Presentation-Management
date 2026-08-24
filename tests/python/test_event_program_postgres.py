@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from upm_central.api import create_app
@@ -31,6 +31,8 @@ from upm_central.persistence.models import (
     Site,
 )
 from upm_central.persistence.models import Session as ProgramSession
+from upm_central.persistence.queue import CentralQueue
+from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import (
     EnrollmentState,
     JobStatus,
@@ -529,8 +531,9 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         assert rematched.status_code == 200
         assert rematched.json()["match_state"] == "suggested"
         assert rematched.json()["presentation_id"] is None
-        assert rematched.json()["suggested_candidate"]["presentation_id"] == (
-            rematched.json()["match_candidates"][0]["presentation_id"]
+        assert (
+            rematched.json()["suggested_candidate"]["presentation_id"]
+            == (rematched.json()["match_candidates"][0]["presentation_id"])
         )
         assert rematched.json()["suggested_candidate"]["presenters"][0]["family_name"] == "Lomow"
         evidence = rematched.json()["match_candidates"][0]["evidence"]
@@ -541,12 +544,15 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         assert rescan.json()["total"] == 1
         assert rescan.json()["complete"] == 0
         with Session(engine) as session:
-            job = session.scalar(select(ProcessingJob).where(
-                ProcessingJob.payload["data"]["rescan_operation_id"].astext
-                == rescan.json()["operation_id"]
-            ))
+            job = session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.job_type == "presentation_media.rescan",
+                    ProcessingJob.payload["data"]["operation_id"].astext
+                    == rescan.json()["operation_id"],
+                )
+            )
             assert job is not None
-            assert job.payload["data"]["media_import_id"] == str(media_id)
+            assert job.payload["data"]["media_import_ids"] == [str(media_id)]
         assert "Session ID 3261629 matched filename" in evidence
         assert "Presenter last name Lomow matched filename" in evidence
         with Session(engine) as session:
@@ -592,10 +598,12 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
         assert confirmed.status_code == 200
         assert confirmed.json()["match_state"] == "confirmed"
         with Session(engine) as session:
-            queued_rescan = session.scalar(select(ProcessingJob).where(
-                ProcessingJob.payload["data"]["rescan_operation_id"].astext
-                == rescan.json()["operation_id"]
-            ))
+            queued_rescan = session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.payload["data"]["operation_id"].astext
+                    == rescan.json()["operation_id"]
+                )
+            )
             queued_rescan.status = JobStatus.SUCCEEDED
             session.commit()
         preserved = client.post(
@@ -607,4 +615,155 @@ def test_session_roster_materializes_and_repairs_assignable_presentation(
             assert (
                 session.scalar(select(func.count(PresentationVersion.presentation_version_id))) == 1
             )
+    engine.dispose()
+
+
+def test_event_media_rescan_uses_one_resumable_metadata_only_job(
+    program_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    class StorageMustNotBeUsed:
+        def __getattr__(self, name):
+            raise AssertionError(f"rescan must not access media storage: {name}")
+
+    with TestClient(create_app(settings)) as client:
+        event_id = UUID(
+            client.post(
+                "/api/v1/admin/events",
+                headers=headers,
+                json={"name": "Batch rescan", "timezone": "UTC"},
+            ).json()["event_id"]
+        )
+        with factory.begin() as session:
+            presentation = Presentation(
+                event_id=event_id,
+                title="Batch match target",
+                presentation_code="MATCH-001",
+                presentation_identifier="MATCH-001",
+            )
+            session.add(presentation)
+            session.flush()
+            records = [
+                PresentationMediaImport(
+                    event_id=event_id,
+                    original_filename=f"MATCH-001-deck-{index}.pptx",
+                    staging_key=f"rescan/{event_id}/{index}",
+                    match_state=MediaMatchState.UNMATCHED,
+                    match_reason="No matching identity evidence",
+                    match_candidates=[],
+                    import_state=MediaImportState.NEEDS_REVIEW,
+                    sync_state=SyncState.LOCAL,
+                )
+                for index in range(220)
+            ]
+            session.add_all(records)
+
+        started = client.post(
+            f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
+        )
+        assert started.status_code == 200
+        assert started.json()["total"] == 220
+        operation_id = started.json()["operation_id"]
+        duplicate = client.post(
+            f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
+        )
+        assert duplicate.json()["operation_id"] == operation_id
+
+        with factory.begin() as session:
+            jobs = list(
+                session.scalars(
+                    select(ProcessingJob).where(
+                        ProcessingJob.job_type == "presentation_media.rescan",
+                        ProcessingJob.payload["data"]["event_id"].astext == str(event_id),
+                    )
+                )
+            )
+            assert len(jobs) == 1
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ProcessingJob)
+                    .where(
+                        ProcessingJob.job_type == "presentation_media.process",
+                        ProcessingJob.payload["data"]["event_id"].astext == str(event_id),
+                    )
+                )
+                == 0
+            )
+            job = jobs[0]
+            job.status = JobStatus.RUNNING
+            job.claimed_by_worker_id = "rescan-test-worker"
+            # This record changed after the target snapshot and must not be overwritten.
+            changed = session.get(
+                PresentationMediaImport, UUID(job.payload["data"]["media_import_ids"][-1])
+            )
+            changed.presentation_id = presentation.presentation_id
+            changed.match_state = MediaMatchState.CONFIRMED
+            changed.import_state = MediaImportState.ASSIGNED
+            job_id = job.processing_job_id
+
+        candidate_loads = 0
+        original_load = CentralMediaStagingService._load_match_candidates
+
+        def counted_load(service, session, target_event_id):
+            nonlocal candidate_loads
+            candidate_loads += 1
+            return original_load(service, session, target_event_id)
+
+        monkeypatch.setattr(CentralMediaStagingService, "_load_match_candidates", counted_load)
+        interrupted_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
+        original_refresh = interrupted_service.refresh_match_suggestion
+        refreshes = 0
+
+        def interrupt_after_first_batch(session, record):
+            nonlocal refreshes
+            refreshes += 1
+            if refreshes == 76:
+                raise KeyboardInterrupt("simulated worker interruption")
+            original_refresh(session, record)
+
+        monkeypatch.setattr(
+            interrupted_service, "refresh_match_suggestion", interrupt_after_first_batch
+        )
+        with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
+            interrupted_service.rescan(job_id, "rescan-test-worker")
+
+        with factory() as session:
+            interrupted = session.get(ProcessingJob, job_id)
+            assert interrupted.payload["data"]["processed"] == 75
+            assert interrupted.progress > 0
+
+        resumed_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
+        result = resumed_service.rescan(job_id, "rescan-test-worker")
+        assert result == {
+            "total": 220,
+            "processed": 220,
+            "suggested": 219,
+            "unmatched": 0,
+            "failed": 0,
+        }
+        assert candidate_loads == 2
+        with factory.begin() as session:
+            job = session.get(ProcessingJob, job_id)
+            CentralQueue(session).complete(job, "rescan-test-worker")
+            changed = session.get(PresentationMediaImport, changed.media_import_id)
+            assert changed.match_state is MediaMatchState.CONFIRMED
+            assert changed.import_state is MediaImportState.ASSIGNED
+
+        progress = client.get(f"/api/v1/admin/media-rescans/{operation_id}", headers=headers)
+        assert progress.status_code == 200
+        assert progress.json()["processed"] == progress.json()["total"] == 220
+        assert progress.json()["suggested"] == 219
+        assert progress.json()["failed"] == 0
+        assert progress.json()["status"] == "succeeded"
+        assert progress.json()["finished"] is True
     engine.dispose()

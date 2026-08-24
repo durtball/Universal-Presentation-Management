@@ -168,61 +168,159 @@ def _match_token(value: str | None) -> str:
     return _TOKEN.sub("", unicodedata.normalize("NFKC", value or "").upper())
 
 
-def match_presentation(filename: str, candidates: Iterable[MatchCandidate]) -> MatchResult:
-    """Rank event-scoped candidates without ever confirming an assignment.
+def match_presentation(
+    filename: str,
+    candidates: Iterable[MatchCandidate],
+    *,
+    event_timezone: str = "UTC",
+) -> MatchResult:
+    """Rank event-scoped candidates using filename and non-authoritative path evidence.
 
-    The caller supplies the authority boundary (normally one Event). This function only returns a
-    suggestion; persistence of an assignment is deliberately outside the matcher.
+    Folder values remain evidence only. This function can suggest a candidate but deliberately
+    cannot confirm or persist an assignment.
     """
-    basename = unicodedata.normalize("NFKC", PurePath(filename).stem).strip().upper()
-    normalized = _match_token(basename)
-    candidates = tuple(candidates)
+    raw_path = unicodedata.normalize("NFKC", filename).replace("\\", "/").strip()
+    path_parts = tuple(part for part in PurePosixPath(raw_path).parts if part not in {"", "."})
+    basename = PurePosixPath(raw_path).stem.strip().upper()
+    folder_parts = tuple(part.upper() for part in path_parts[:-1])
+    immediate_parent = folder_parts[-1] if folder_parts else None
+    ancestor_parts = folder_parts[:-1]
     filename_tokens = {token for token in re.split(r"[^A-Z0-9]+", basename) if token}
-    identifier_hits: dict[UUID, list[str]] = {}
-    ranked: list[tuple[int, MatchCandidate, list[str]]] = []
+    folder_tokens = {
+        token for part in folder_parts for token in re.split(r"[^A-Z0-9]+", part) if token
+    }
+    path_tokens = filename_tokens | folder_tokens
+    normalized_filename = _match_token(basename)
+    normalized_components = tuple(_match_token(part) for part in (*folder_parts, basename))
+    normalized_parent = _match_token(immediate_parent)
+    normalized_ancestors = {_match_token(part) for part in ancestor_parts}
+    candidates = tuple(candidates)
+
+    def path_location(value: str | None) -> str | None:
+        token = _match_token(value)
+        if not token:
+            return None
+        allow_component_substring = bool(re.search(r"[^A-Za-z0-9]", value or ""))
+        if token == normalized_filename or token in filename_tokens:
+            return "filename"
+        if normalized_parent and (
+            token == normalized_parent or (allow_component_substring and token in normalized_parent)
+        ):
+            return "parent folder"
+        if any(
+            token == part or (allow_component_substring and token in part)
+            for part in normalized_ancestors
+        ):
+            return "ancestor folder"
+        if any(
+            token == part or (allow_component_substring and token in part)
+            for part in normalized_components
+        ):
+            return "path"
+        return None
+
     surname_counts: dict[str, int] = {}
     for item in candidates:
         surname = _match_token(item.presenter_family_name)
-        if surname and surname in filename_tokens:
+        if surname and surname in path_tokens:
             surname_counts[surname] = surname_counts.get(surname, 0) + 1
+
+    identifier_hits: dict[UUID, list[str]] = {}
+    ranked: list[tuple[int, MatchCandidate, list[str]]] = []
     for item in candidates:
         score, evidence = 0, []
-        for label, value in (
-            ("Presentation ID", item.presentation_identifier),
-            ("External presentation ID", item.external_presentation_id),
+        for label, value, points in (
+            ("Presentation ID", item.presentation_identifier, 120),
+            ("External presentation ID", item.external_presentation_id, 120),
+            ("Session ID", item.session_external_id, 110),
         ):
-            token = _match_token(value)
-            raw_value = unicodedata.normalize("NFKC", value or "").strip().upper()
-            identifier_match = token in filename_tokens or (
-                bool(re.search(r"[^A-Z0-9]", raw_value)) and token in normalized
-            )
-            if token and identifier_match:
-                score += 100
-                evidence.append(f"{label} {value} matched filename")
-                identifier_hits.setdefault(item.presentation_id, []).append(token)
+            location = path_location(value)
+            if location:
+                score += points
+                evidence.append(f"{label} {value} matched {location}")
+                if label != "Session ID":
+                    identifier_hits.setdefault(item.presentation_id, []).append(_match_token(value))
+
         if (
             item.expected_filename
-            and _match_token(PurePath(item.expected_filename).stem) == normalized
+            and _match_token(PurePath(item.expected_filename).stem) == normalized_filename
         ):
             score += 90
             evidence.append("Expected filename matched")
+
         surname = _match_token(item.presenter_family_name)
-        if surname and surname in filename_tokens:
-            score += 55 if surname_counts[surname] == 1 else 35
-            evidence.append(f"Presenter last name {item.presenter_family_name} matched filename")
         given = _match_token(item.presenter_given_name)
-        if given and given in filename_tokens:
-            score += 15
-            evidence.append(f"Presenter first name {item.presenter_given_name} matched filename")
-        session_id = _match_token(item.session_external_id)
-        if session_id and session_id in filename_tokens:
-            score += 45
-            evidence.append(f"Session ID {item.session_external_id} matched filename")
+        full_names = tuple(
+            value
+            for value in (
+                f"{item.presenter_given_name or ''} {item.presenter_family_name or ''}".strip(),
+                f"{item.presenter_family_name or ''} {item.presenter_given_name or ''}".strip(),
+            )
+            if value
+        )
+        full_name_location = next(
+            (path_location(value) for value in full_names if path_location(value)), None
+        )
+        if full_name_location:
+            score += 85
+            evidence.append(f"Presenter {full_name_location} match")
+        elif surname and surname in path_tokens:
+            location = path_location(item.presenter_family_name) or "path"
+            score += 60 if surname_counts[surname] == 1 else 35
+            evidence.append(f"Presenter last name {item.presenter_family_name} matched {location}")
+            if given and given in path_tokens:
+                score += 20
+                evidence.append(f"Presenter first name {item.presenter_given_name} matched path")
+
+        title_location = path_location(item.title)
+        session_title_location = path_location(item.session_title)
+        if title_location:
+            score += 70 if title_location != "filename" else 45
+            evidence.append(f"Title {title_location} match")
+        if session_title_location:
+            score += 65 if session_title_location != "filename" else 40
+            evidence.append(f"Session title {session_title_location} match")
+
+        room_location = path_location(item.room)
+        if room_location:
+            score += 60 if room_location != "filename" else 30
+            evidence.append(f"Room {room_location} match: {item.room}")
+
+        time_matched = False
+        date_matched = False
+        if item.starts_at:
+            local = item.starts_at.astimezone(ZoneInfo(event_timezone))
+            time_values = {local.strftime("%H%M"), local.strftime("%I%M").lstrip("0")}
+            date_values = {
+                _match_token(local.strftime("%A")),
+                local.strftime("%Y%m%d"),
+                local.strftime("%m%d"),
+                _match_token(local.strftime("%B %d")),
+            }
+            time_matched = any(value and value in normalized_components for value in time_values)
+            date_matched = any(value and value in normalized_components for value in date_values)
+            if time_matched:
+                score += 50
+                evidence.append(f"{local.strftime('%H:%M')} session time folder match")
+            if date_matched:
+                score += 25
+                evidence.append(f"{local.strftime('%A')} event date folder match")
+            if room_location and time_matched:
+                score += 35
+                evidence.append("Room and session time combination matched")
+
+        # Retain weaker token evidence after deterministic component evidence.
         for label, value, points in (
-            ("Presentation title", item.title, 8),
-            ("Session title", item.session_title, 8),
-            ("Room", item.room, 5),
+            ("Presentation title", item.title, 7),
+            ("Session title", item.session_title, 7),
+            ("Room", item.room, 4),
         ):
+            if (
+                (label.startswith("Presentation") and title_location)
+                or (label.startswith("Session") and session_title_location)
+                or (label == "Room" and room_location)
+            ):
+                continue
             meaningful = {
                 part
                 for part in re.split(
@@ -230,23 +328,24 @@ def match_presentation(filename: str, candidates: Iterable[MatchCandidate]) -> M
                 )
                 if len(part) >= 4
             }
-            hits = meaningful & filename_tokens
+            hits = meaningful & path_tokens
             if hits:
                 score += min(points * len(hits), points * 2)
-                evidence.append(f"{label} token matched: {', '.join(sorted(hits))}")
+                evidence.append(f"{label} path token match: {', '.join(sorted(hits))}")
         if score:
             ranked.append((score, item, evidence))
+
     ranked.sort(key=lambda row: (-row[0], str(row[1].presentation_id)))
     if not ranked:
         return MatchResult(MediaMatchState.UNMATCHED, None, "No matching identity evidence")
-    numeric_tokens = {token for token in filename_tokens if token.isdigit()}
+    numeric_tokens = {token for token in path_tokens if token.isdigit()}
     strong_id_candidates = {
         pid for pid, hits in identifier_hits.items() if numeric_tokens & set(hits)
     }
     surname_candidate_ids = {
         item.presentation_id
-        for score, item, evidence in ranked
-        if any("last name" in reason for reason in evidence)
+        for _, item, evidence in ranked
+        if any("Presenter" in reason for reason in evidence)
     }
     conflict = bool(
         strong_id_candidates

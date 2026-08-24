@@ -1003,6 +1003,14 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
         ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
     )
     committed_storage_key: Mapped[str | None] = mapped_column(String(2048))
+    intake_storage_root_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
+    )
+    intake_storage_key: Mapped[str | None] = mapped_column(String(2048))
+    rejected_storage_root_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("storage_roots.storage_root_id", ondelete="RESTRICT")
+    )
+    rejected_storage_key: Mapped[str | None] = mapped_column(String(2048))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(255))
     sha256: Mapped[str | None] = mapped_column(String(64))
@@ -1013,6 +1021,9 @@ class PresentationMediaImport(CentralRecordMixin, CentralBase):
     match_candidates: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     confirmed_by: Mapped[str | None] = mapped_column(String(255))
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by: Mapped[str | None] = mapped_column(String(255))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(String(2048))
     import_state: Mapped[MediaImportState] = mapped_column(
         domain_enum(MediaImportState, length=24),
         default=MediaImportState.UPLOADING,
@@ -1095,8 +1106,8 @@ class PresentationAsset(CentralRecordMixin, CentralBase):
             postgresql_where=text("kind = 'original'"),
         ),
         CheckConstraint(
-            "(kind = 'original' AND source_asset_id IS NULL) OR "
-            "(kind = 'derivative' AND source_asset_id IS NOT NULL)",
+            "(kind = 'derivative' AND source_asset_id IS NOT NULL) OR "
+            "(kind <> 'derivative' AND source_asset_id IS NULL)",
             name="derivative_source",
         ),
     )

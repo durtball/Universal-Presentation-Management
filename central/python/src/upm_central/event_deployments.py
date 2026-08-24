@@ -23,6 +23,7 @@ from upm_central.persistence.models import (
     Session as CentralSession,
 )
 from upm_central.persistence.queue import CentralQueue
+from upm_central.presentation_media import target_confirmed_event_media
 from upm_central.sync import next_sequence
 from upm_shared.contracts.deployments import (
     EVENT_DEPLOYMENT_SCHEMA_VERSION,
@@ -34,6 +35,7 @@ from upm_shared.contracts.deployments import (
     PresentationPresenterSnapshot,
     PresentationSessionSnapshot,
     PresentationSnapshot,
+    PresentationVersionSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
     SiteUserSnapshot,
@@ -265,6 +267,13 @@ def build_snapshot(
                 processing_status=item.processing_status,
                 scheduled_at=item.scheduled_at,
                 central_revision=item.revision,
+                versions=[
+                    PresentationVersionSnapshot(
+                        presentation_version_id=version.presentation_version_id,
+                        version_number=version.version_number,
+                    )
+                    for version in sorted(item.versions, key=lambda row: row.version_number)
+                ],
                 version_numbers=sorted(version.version_number for version in item.versions),
                 sessions=[
                     PresentationSessionSnapshot(
@@ -451,9 +460,7 @@ def push_deployment(
     if deployment.status not in DEPLOYABLE_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="deployment cannot be pushed")
     session.scalar(
-        select(Event.event_id)
-        .where(Event.event_id == deployment.event_id)
-        .with_for_update()
+        select(Event.event_id).where(Event.event_id == deployment.event_id).with_for_update()
     )
     revision = deployment.desired_revision + 1
     snapshot = build_snapshot(session, deployment, revision)
@@ -483,6 +490,7 @@ def push_deployment(
     deployment.failure_at = None
     deployment.failure_reason = None
     _enqueue(session, deployment, event_type=event_type, payload=payload, revision=revision)
+    target_confirmed_event_media(session, deployment.event_id, deployment.site_id)
     session.add(
         AuditRecord(
             actor_id="central-admin",

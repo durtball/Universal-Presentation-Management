@@ -9,7 +9,13 @@ from upm_site.config import SiteSettings
 
 
 def create_site_engine(settings: SiteSettings) -> Engine:
-    return create_engine(settings.database_url, pool_pre_ping=True)
+    transfer_sessions = settings.transfer_pull_concurrency + settings.transfer_push_concurrency
+    return create_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=max(5, transfer_sessions + 2),
+        max_overflow=0,
+    )
 
 
 def create_site_session_factory(engine: Engine) -> sessionmaker[Session]:

@@ -25,9 +25,13 @@ from upm_site.persistence.models import (
     EventParticipation,
     ExternalIdentifierProjection,
     LocalSiteIdentity,
+    MediaReplicationSession,
+    MediaTransferSession,
+    OperationalLog,
     OutboxEvent,
     PersonProjection,
     Presentation,
+    PresentationAsset,
     PresentationPresenter,
     PresentationSession,
     PresentationVersion,
@@ -45,6 +49,65 @@ from upm_site.room_operations import (
     materialize_program_room_mappings,
     reconcile_program_room_assignments,
 )
+
+
+def converge_presentation_version_identity(
+    session: Session,
+    *,
+    presentation_version_id: UUID,
+    presentation_id: UUID,
+    version_number: int,
+) -> PresentationVersion:
+    """Converge an old Site-generated version UUID to Central's canonical identity."""
+    canonical = session.get(PresentationVersion, presentation_version_id)
+    if canonical is not None:
+        if (
+            canonical.presentation_id != presentation_id
+            or canonical.version_number != version_number
+        ):
+            raise ValueError("presentation version metadata conflicts with Central")
+        canonical.sync_state = SyncState.SYNCHRONIZED
+        return canonical
+
+    versions = session.scalars(
+        select(PresentationVersion)
+        .where(PresentationVersion.presentation_id == presentation_id)
+        .with_for_update()
+    ).all()
+    legacy = next((item for item in versions if item.version_number == version_number), None)
+    if legacy is None:
+        canonical = PresentationVersion(
+            presentation_version_id=presentation_version_id,
+            presentation_id=presentation_id,
+            version_number=version_number,
+            sync_state=SyncState.SYNCHRONIZED,
+        )
+        session.add(canonical)
+        return canonical
+
+    temporary_number = max(item.version_number for item in versions) + 1
+    canonical = PresentationVersion(
+        presentation_version_id=presentation_version_id,
+        presentation_id=presentation_id,
+        version_number=temporary_number,
+        sync_state=SyncState.SYNCHRONIZED,
+        created_at=legacy.created_at,
+        revision=legacy.revision,
+    )
+    session.add(canonical)
+    session.flush([canonical])
+    for model in (PresentationAsset, MediaTransferSession, MediaReplicationSession, OperationalLog):
+        session.execute(
+            update(model)
+            .where(model.presentation_version_id == legacy.presentation_version_id)
+            .values(presentation_version_id=presentation_version_id)
+            .execution_options(synchronize_session=False)
+        )
+    session.delete(legacy)
+    session.flush()
+    canonical.version_number = version_number
+    session.flush([canonical])
+    return canonical
 
 
 def _status_event(
@@ -445,6 +508,14 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             presentation.sync_state = SyncState.SYNCHRONIZED
     session.flush()
     for item in snapshot.presentations:
+        explicit_version_numbers = {version.version_number for version in item.versions}
+        for version in item.versions:
+            converge_presentation_version_identity(
+                session,
+                presentation_version_id=version.presentation_version_id,
+                presentation_id=item.presentation_id,
+                version_number=version.version_number,
+            )
         existing_versions = set(
             session.scalars(
                 select(PresentationVersion.version_number).where(
@@ -453,7 +524,10 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             )
         )
         for version_number in item.version_numbers:
-            if version_number not in existing_versions:
+            if (
+                version_number not in explicit_version_numbers
+                and version_number not in existing_versions
+            ):
                 session.add(
                     PresentationVersion(
                         presentation_id=item.presentation_id,
