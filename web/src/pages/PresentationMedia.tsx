@@ -36,9 +36,12 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
   }, [mode, activeEvent, session?.csrfToken]);
   useEffect(() => {
     if (!activeEvent) return;
-    const timer = window.setInterval(data.poll, 3000);
+    const timer = window.setInterval(() => {
+      data.poll();
+      if (mode === "central") batches.poll();
+    }, 3000);
     return () => window.clearInterval(timer);
-  }, [activeEvent, data.poll]);
+  }, [activeEvent, mode, data.poll, batches.poll]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
   const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void, batchId?: string) => {

@@ -73,6 +73,7 @@ INTAKE_PUBLISH_JOB = "presentation_media.intake.publish"
 INTAKE_REJECT_JOB = "presentation_media.intake.reject"
 RESCAN_JOB = "presentation_media.rescan"
 RESCAN_BATCH_SIZE = 75
+MATCH_ALGORITHM_VERSION = 2
 
 ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.PENDING,
@@ -81,6 +82,57 @@ ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.UPDATE_PENDING,
     EventDeploymentStatus.FAILED,
 }
+
+
+def enqueue_match_repair_rescans(session: Session) -> int:
+    """Queue one deployment repair pass for existing review rows under this matcher version."""
+    event_ids = session.scalars(
+        select(PresentationMediaImport.event_id)
+        .where(
+            PresentationMediaImport.presentation_id.is_(None),
+            PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+            PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+        )
+        .distinct()
+    ).all()
+    queued = 0
+    for event_id in event_ids:
+        key = f"match-repair-v{MATCH_ALGORITHM_VERSION}:{event_id}"
+        if session.scalar(select(ProcessingJob).where(ProcessingJob.idempotency_key == key)):
+            continue
+        ids = list(
+            session.scalars(
+                select(PresentationMediaImport.media_import_id)
+                .where(
+                    PresentationMediaImport.event_id == event_id,
+                    PresentationMediaImport.presentation_id.is_(None),
+                    PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+                    PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+                )
+                .order_by(PresentationMediaImport.media_import_id)
+            )
+        )
+        operation_id = new_uuid7()
+        CentralQueue(session).enqueue_processing(
+            job_type=RESCAN_JOB,
+            payload={
+                "data": {
+                    "operation_id": str(operation_id),
+                    "event_id": str(event_id),
+                    "media_import_ids": [str(value) for value in ids],
+                    "total": len(ids),
+                    "processed": 0,
+                    "suggested": 0,
+                    "unmatched": 0,
+                    "failed": 0,
+                }
+            },
+            idempotency_key=key,
+            required_capabilities=["cpu"],
+            max_attempts=5,
+        )
+        queued += 1
+    return queued
 
 
 def enqueue_asset_reconciliation(session: Session, *, current_job_id=None):
@@ -806,6 +858,9 @@ class CentralMediaStagingService:
         batch_size: int = RESCAN_BATCH_SIZE,
     ) -> dict[str, int]:
         """Resume a durable metadata-only event rescan, committing after bounded batches."""
+        batch_candidates: list[MatchCandidate] | None = None
+        batch_event_id: UUID | None = None
+        batch_timezone = "UTC"
         while True:
             with self.factory.begin() as session:
                 job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
@@ -822,6 +877,26 @@ class CentralMediaStagingService:
                         for key in ("total", "processed", "suggested", "unmatched", "failed")
                     }
                 current_ids = media_import_ids[processed : processed + batch_size]
+                event_id = UUID(str(data["event_id"]))
+                if batch_candidates is None or batch_event_id != event_id:
+                    batch_timezone = (
+                        session.scalar(select(Event.timezone).where(Event.event_id == event_id))
+                        or "UTC"
+                    )
+                    batch_candidates = self._load_match_candidates(session, event_id)
+                    batch_event_id = event_id
+                records = {
+                    record.media_import_id: record
+                    for record in session.scalars(
+                        select(PresentationMediaImport)
+                        .where(
+                            PresentationMediaImport.media_import_id.in_(
+                                [UUID(str(value)) for value in current_ids]
+                            )
+                        )
+                        .with_for_update()
+                    )
+                }
                 counts = {
                     "suggested": int(data.get("suggested", 0)),
                     "unmatched": int(data.get("unmatched", 0)),
@@ -829,24 +904,26 @@ class CentralMediaStagingService:
                 }
                 for value in current_ids:
                     try:
-                        with session.begin_nested():
-                            record = session.get(
-                                PresentationMediaImport, UUID(str(value)), with_for_update=True
-                            )
-                            eligible = bool(
-                                record
-                                and record.event_id == UUID(str(data["event_id"]))
-                                and record.presentation_id is None
-                                and record.match_state is not MediaMatchState.CONFIRMED
-                                and record.import_state is MediaImportState.NEEDS_REVIEW
-                            )
-                            if not eligible:
-                                continue
-                            self.refresh_match_suggestion(session, record)
-                            if record.match_state is MediaMatchState.SUGGESTED:
-                                counts["suggested"] += 1
-                            else:
-                                counts["unmatched"] += 1
+                        record = records.get(UUID(str(value)))
+                        eligible = bool(
+                            record
+                            and record.event_id == event_id
+                            and record.presentation_id is None
+                            and record.match_state is not MediaMatchState.CONFIRMED
+                            and record.import_state is MediaImportState.NEEDS_REVIEW
+                        )
+                        if not eligible:
+                            continue
+                        self._automatic_match_and_assign(
+                            session,
+                            record,
+                            candidates=batch_candidates,
+                            event_timezone=batch_timezone,
+                        )
+                        if record.match_state is MediaMatchState.SUGGESTED:
+                            counts["suggested"] += 1
+                        else:
+                            counts["unmatched"] += 1
                     except Exception:
                         logger.exception(
                             "presentation_media_rescan_item_failed",
@@ -990,20 +1067,24 @@ class CentralMediaStagingService:
             return record
 
     def _automatic_match_and_assign(
-        self, session: Session, record: PresentationMediaImport
+        self,
+        session: Session,
+        record: PresentationMediaImport,
+        *,
+        candidates: list[MatchCandidate] | None = None,
+        event_timezone: str | None = None,
     ) -> None:
-        event_revision = (
-            session.scalar(select(Event.revision).where(Event.event_id == record.event_id)) or 1
-        )
-        cached = self._candidate_cache.get(record.event_id)
-        if cached and cached[0] == event_revision:
-            candidates = cached[1]
-        else:
-            candidates = self._load_match_candidates(session, record.event_id)
-            self._candidate_cache[record.event_id] = (event_revision, candidates)
-        event_timezone = (
-            session.scalar(select(Event.timezone).where(Event.event_id == record.event_id)) or "UTC"
-        )
+        if candidates is None:
+            event_revision, event_timezone = session.execute(
+                select(Event.revision, Event.timezone).where(Event.event_id == record.event_id)
+            ).one_or_none() or (1, "UTC")
+            cached = self._candidate_cache.get(record.event_id)
+            if cached and cached[0] == event_revision:
+                candidates = cached[1]
+            else:
+                candidates = self._load_match_candidates(session, record.event_id)
+                self._candidate_cache[record.event_id] = (event_revision, candidates)
+        event_timezone = event_timezone or "UTC"
         result = match_presentation(
             record.source_relative_path or record.original_filename,
             candidates,
@@ -1039,11 +1120,9 @@ class CentralMediaStagingService:
             )
         ).all()
         candidates = []
-        seen: set[UUID] = set()
         for item, program_session, presenter in rows:
-            if item.presentation_id in seen:
-                continue
-            seen.add(item.presentation_id)
+            # Keep every presenter alias as evidence. The persistence-free matcher collapses
+            # these joined rows by canonical presentation_id before ranking or ambiguity.
             candidates.append(
                 MatchCandidate(
                     item.presentation_id,

@@ -663,7 +663,7 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
                     import_state=MediaImportState.NEEDS_REVIEW,
                     sync_state=SyncState.LOCAL,
                 )
-                for index in range(220)
+                for index in range(420)
             ]
             session.add_all(records)
 
@@ -671,7 +671,7 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
             f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
         )
         assert started.status_code == 200
-        assert started.json()["total"] == 220
+        assert started.json()["total"] == 420
         operation_id = started.json()["operation_id"]
         duplicate = client.post(
             f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
@@ -721,18 +721,18 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
 
         monkeypatch.setattr(CentralMediaStagingService, "_load_match_candidates", counted_load)
         interrupted_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
-        original_refresh = interrupted_service.refresh_match_suggestion
+        original_match = interrupted_service._automatic_match_and_assign
         refreshes = 0
 
-        def interrupt_after_first_batch(session, record):
+        def interrupt_after_first_batch(session, record, **kwargs):
             nonlocal refreshes
             refreshes += 1
             if refreshes == 76:
                 raise KeyboardInterrupt("simulated worker interruption")
-            original_refresh(session, record)
+            original_match(session, record, **kwargs)
 
         monkeypatch.setattr(
-            interrupted_service, "refresh_match_suggestion", interrupt_after_first_batch
+            interrupted_service, "_automatic_match_and_assign", interrupt_after_first_batch
         )
         with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
             interrupted_service.rescan(job_id, "rescan-test-worker")
@@ -745,9 +745,9 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
         resumed_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
         result = resumed_service.rescan(job_id, "rescan-test-worker")
         assert result == {
-            "total": 220,
-            "processed": 220,
-            "suggested": 219,
+            "total": 420,
+            "processed": 420,
+            "suggested": 419,
             "unmatched": 0,
             "failed": 0,
         }
@@ -761,8 +761,8 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
 
         progress = client.get(f"/api/v1/admin/media-rescans/{operation_id}", headers=headers)
         assert progress.status_code == 200
-        assert progress.json()["processed"] == progress.json()["total"] == 220
-        assert progress.json()["suggested"] == 219
+        assert progress.json()["processed"] == progress.json()["total"] == 420
+        assert progress.json()["suggested"] == 419
         assert progress.json()["failed"] == 0
         assert progress.json()["status"] == "succeeded"
         assert progress.json()["finished"] is True

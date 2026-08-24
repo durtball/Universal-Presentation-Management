@@ -245,6 +245,31 @@ def test_matching_prefers_exact_identity_and_preserves_ambiguity() -> None:
     assert match_presentation("Smith.pptx", [first]).state is MediaMatchState.UNMATCHED
 
 
+def test_matcher_collapses_multiple_roster_rows_for_one_presentation() -> None:
+    presentation_id = UUID(int=1)
+    rows = [
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Shulman"),
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Sponsor"),
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Moderator"),
+    ]
+
+    result = match_presentation("3373594-Shulman.pptx", rows)
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == presentation_id
+    assert result.candidate_ids == (presentation_id,)
+
+
+def test_exact_presentation_id_wins_over_unrelated_supporting_person_evidence() -> None:
+    identifier = MatchCandidate(UUID(int=1), "3444132", presenter_family_name="Smith")
+    unrelated_person = MatchCandidate(UUID(int=2), "999", presenter_family_name="Johnson")
+
+    result = match_presentation("3444132-Johnson.pdf", [identifier, unrelated_person])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == identifier.presentation_id
+
+
 def test_identifier_and_surname_produce_explained_high_suggestion() -> None:
     lomow = MatchCandidate(
         UUID(int=1),
@@ -294,7 +319,9 @@ def test_unique_surname_suggests_but_ambiguous_surname_does_not() -> None:
 
 
 def test_conflicting_strong_identifier_and_surname_requires_review() -> None:
-    identifier = MatchCandidate(UUID(int=1), "3261629", presenter_family_name="Smith")
+    identifier = MatchCandidate(
+        UUID(int=1), "UPM-1", external_presentation_id="3261629", presenter_family_name="Smith"
+    )
     surname = MatchCandidate(UUID(int=2), "999", presenter_family_name="Lomow")
     result = match_presentation("3261629-Lomow.pptx", [identifier, surname])
     assert result.state is MediaMatchState.AMBIGUOUS
