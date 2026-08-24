@@ -29,6 +29,7 @@ from upm_site.sync import (
     encrypt_secret,
     enqueue_heartbeat,
     envelope,
+    reconcile_deferred_media_transfers,
 )
 
 TRANSIENT_STATUS_CODES = {408, 425, 429, 502, 503, 504}
@@ -303,6 +304,10 @@ def synchronize_once(
     owns_client = client is None
     client = client or httpx.Client(timeout=10.0)
     try:
+        # Deferred manifests are durable Site state and can become runnable without a new
+        # Central event (for example, after deploying identity-reconciliation code).
+        with factory.begin() as session:
+            reconcile_deferred_media_transfers(session)
         enrollment_step(factory, settings, client)
         enqueue_due_heartbeat(factory, settings)
         try:

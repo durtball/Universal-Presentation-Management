@@ -31,6 +31,7 @@ from upm_site.event_deployments import (
     apply_people_deletion,
     apply_revocation_event,
     apply_snapshot_event,
+    converge_presentation_version_identity,
 )
 from upm_site.persistence.models import (
     CentralRegistration,
@@ -71,21 +72,12 @@ def _materialize_media_transfer(
         if version is None:
             if manifest.presentation_version_number is None:
                 return False
-            collision = session.scalar(
-                select(PresentationVersion).where(
-                    PresentationVersion.presentation_id == manifest.presentation_id,
-                    PresentationVersion.version_number == manifest.presentation_version_number,
-                )
-            )
-            if collision is not None:
-                raise ValueError("media transfer presentation version identity conflicts")
-            version = PresentationVersion(
+            version = converge_presentation_version_identity(
+                session,
                 presentation_version_id=manifest.presentation_version_id,
                 presentation_id=manifest.presentation_id,
                 version_number=manifest.presentation_version_number,
             )
-            session.add(version)
-            session.flush([version])
         elif version.presentation_id != manifest.presentation_id:
             raise ValueError("media transfer version belongs to another presentation")
 
@@ -117,7 +109,7 @@ def _materialize_media_transfer(
         return True
 
 
-def _reconcile_deferred_media_transfers(session: Session) -> None:
+def reconcile_deferred_media_transfers(session: Session) -> None:
     transfers = session.scalars(
         select(TransferJob).where(
             TransferJob.transfer_type == "presentation_media.central_pull",
@@ -355,7 +347,7 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         session.add(cursor)
     cursor.last_sequence = event.source_sequence
     cursor.last_event_id = event.event_id
-    _reconcile_deferred_media_transfers(session)
+    reconcile_deferred_media_transfers(session)
     return EventAcknowledgement(
         event_id=event.event_id,
         accepted=True,
