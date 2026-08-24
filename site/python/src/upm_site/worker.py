@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from upm_shared.enums import JobStatus, MediaReplicationState
+from upm_shared.enums import JobStatus, MediaReplicationState, MediaTransferState
 from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 from upm_shared.smb import SmbControlClient
@@ -34,6 +34,7 @@ from upm_site.persistence.models import (
     MediaReplicationSession,
     MediaTransferSession,
     ProcessingJob,
+    TransferJob,
     utc_now,
 )
 from upm_site.persistence.queue import SiteQueue
@@ -71,6 +72,38 @@ from upm_site.smb_presentations import enqueue as enqueue_smb_presentations
 from upm_site.smb_presentations import reconcile as reconcile_smb_presentations
 from upm_site.sync import bootstrap_identity
 from upm_site.sync_transport import synchronize_once
+
+
+def fail_central_pull(
+    session: Session,
+    queue: SiteQueue,
+    work: TransferJob,
+    worker_id: str,
+    error: Exception,
+    settings: SiteSettings,
+) -> None:
+    """Persist a retryable pull failure without allowing progress replay to escape."""
+    queue.fail(
+        work,
+        worker_id,
+        error_code="media_pull_failed",
+        message=str(error),
+        retryable=True,
+        base_delay_seconds=settings.worker_retry_base_seconds,
+    )
+    transfer = session.get(MediaTransferSession, work.transfer_job_id)
+    if transfer is None:
+        return
+    transfer.retry_count += 1
+    transfer.error_detail = str(error)[:2048]
+    transfer.last_progress_at = utc_now()
+    transfer.state = (
+        MediaTransferState.RETRY_WAIT
+        if work.status is JobStatus.RETRY_WAIT
+        else MediaTransferState.FAILED
+    )
+    enqueue_transfer_progress(session, transfer)
+
 
 STARTUP_MAINTENANCE_LOCK_ID = 7_091_625_311
 
@@ -367,20 +400,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                     session, factory, settings, work, client
                                 )
                         except Exception as error:
-                            transfer_session = session.get(
-                                MediaTransferSession, work.transfer_job_id
-                            )
-                            if transfer_session is not None:
-                                transfer_session.error_detail = str(error)[:2048]
-                                enqueue_transfer_progress(session, transfer_session)
-                            queue.fail(
-                                work,
-                                worker_id,
-                                error_code="media_pull_failed",
-                                message=str(error),
-                                retryable=True,
-                                base_delay_seconds=settings.worker_retry_base_seconds,
-                            )
+                            fail_central_pull(session, queue, work, worker_id, error, settings)
                             log("media_pull_failed", work_id=work_id, detail=str(error)[:2048])
                             continue
                     elif (
