@@ -2,8 +2,8 @@
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import aclosing, asynccontextmanager
 from typing import Annotated
 from urllib.parse import quote, unquote
 from uuid import UUID
@@ -62,6 +62,25 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageUnavailable
 
 logger = logging.getLogger(__name__)
+
+
+async def stream_transfer_object(
+    storage: AsyncMediaStorageClient,
+    storage_target_id: UUID,
+    storage_key: str,
+    offset: int,
+    count: int,
+) -> AsyncIterator[bytes]:
+    """Stream a transfer range while deterministically releasing the storage response."""
+    try:
+        async with aclosing(
+            storage.stream_object(storage_target_id, storage_key, offset, count)
+        ) as stream:
+            async for chunk in stream:
+                yield chunk
+    except MediaStorageUnavailable as error:
+        logger.exception("central_media_transfer_storage_unavailable")
+        raise RuntimeError("transfer storage unavailable") from error
 
 
 class ReplicationCreate(BaseModel):
@@ -990,23 +1009,23 @@ def register_presentation_media_routes(
             raise HTTPException(409, "committed transfer source is unavailable")
         count = min(settings().transfer_block_bytes, expected_size - offset)
 
-        async def content():
-            try:
-                async for chunk in media_storage().stream_object(
-                    item.committed_storage_root_id, item.committed_storage_key, offset, count
-                ):
-                    yield chunk
-            except MediaStorageUnavailable as error:
-                logger.exception("central_media_transfer_storage_unavailable")
-                raise RuntimeError("transfer storage unavailable") from error
-
         headers = {
             "X-UPM-Transfer-Offset": str(offset),
             "X-UPM-Transfer-Next-Offset": str(offset + count),
             "X-UPM-Transfer-Size": str(expected_size),
             "X-UPM-Transfer-SHA256": item.sha256 or "",
         }
-        return StreamingResponse(content(), media_type="application/octet-stream", headers=headers)
+        return StreamingResponse(
+            stream_transfer_object(
+                media_storage(),
+                item.committed_storage_root_id,
+                item.committed_storage_key,
+                offset,
+                count,
+            ),
+            media_type="application/octet-stream",
+            headers=headers,
+        )
 
     def replication_for_site(
         replication_session_id: UUID,

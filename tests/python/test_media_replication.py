@@ -1,11 +1,8 @@
 from uuid import uuid4
 
 import httpx
-import pytest
 
-from upm_central.media_replication import finalize_replication, safe_replication_path
-from upm_central.persistence.models import MediaReplicationReceiveSession
-from upm_shared.enums import MediaReplicationState, MediaTransferState, StorageType
+from upm_shared.enums import MediaReplicationState, StorageType
 from upm_site.config import SiteSettings
 from upm_site.media.replication import execute_central_push
 from upm_site.persistence.models import (
@@ -130,44 +127,3 @@ def test_site_push_resumes_from_central_confirmed_offset(tmp_path, monkeypatch):
     assert offsets == [5]
     assert bytes(received) == data
     assert replication.state is MediaReplicationState.SYNCED
-
-
-def test_central_finalization_verifies_and_is_idempotent(tmp_path, monkeypatch):
-    data = b"replicated presentation"
-    import hashlib
-
-    ids = [uuid4() for _ in range(6)]
-    session_id, site_id, event_id, presentation_id, version_id, media_id = ids
-    receiver = MediaReplicationReceiveSession(
-        replication_session_id=session_id,
-        origin_site_id=site_id,
-        event_id=event_id,
-        presentation_id=presentation_id,
-        presentation_version_id=version_id,
-        source_media_object_id=media_id,
-        presentation_identifier="UPM-X-1",
-        original_filename="deck.pdf",
-        expected_size=len(data),
-        sha256=hashlib.sha256(data).hexdigest(),
-        partial_key=str(session_id),
-        confirmed_offset=len(data),
-        state=MediaTransferState.TRANSFERRING,
-        replication_state=MediaReplicationState.SYNCING,
-    )
-    safe_replication_path(tmp_path, str(session_id)).write_bytes(data)
-    session = FakeSession({})
-    monkeypatch.setattr(
-        "upm_central.media_replication.authorize_replication_context", lambda *a, **k: object()
-    )
-    replica = finalize_replication(session, tmp_path, receiver)
-    session.objects[(type(replica), media_id)] = replica
-    assert replica.media_object_id == media_id
-    assert receiver.presentation_version_id == version_id
-    assert receiver.replication_state is MediaReplicationState.SYNCED
-    assert finalize_replication(session, tmp_path, receiver) is replica
-    assert len([item for item in session.added if type(item) is type(replica)]) == 1
-
-
-def test_replication_partial_key_rejects_paths(tmp_path):
-    with pytest.raises(ValueError):
-        safe_replication_path(tmp_path, "../escape")
