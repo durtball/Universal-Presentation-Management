@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -452,6 +453,7 @@ class CentralMediaStagingService:
         self.storage = storage
         self.max_upload_bytes = max_upload_bytes
         self._candidate_cache: dict[UUID, tuple[int, list[MatchCandidate]]] = {}
+        self._candidate_cache_lock = Lock()
 
     @staticmethod
     def _storage_root(session: Session, target: dict, role: str) -> StorageRoot:
@@ -1078,12 +1080,13 @@ class CentralMediaStagingService:
             event_revision, event_timezone = session.execute(
                 select(Event.revision, Event.timezone).where(Event.event_id == record.event_id)
             ).one_or_none() or (1, "UTC")
-            cached = self._candidate_cache.get(record.event_id)
-            if cached and cached[0] == event_revision:
-                candidates = cached[1]
-            else:
-                candidates = self._load_match_candidates(session, record.event_id)
-                self._candidate_cache[record.event_id] = (event_revision, candidates)
+            with self._candidate_cache_lock:
+                cached = self._candidate_cache.get(record.event_id)
+                if cached and cached[0] == event_revision:
+                    candidates = cached[1]
+                else:
+                    candidates = self._load_match_candidates(session, record.event_id)
+                    self._candidate_cache[record.event_id] = (event_revision, candidates)
         event_timezone = event_timezone or "UTC"
         result = match_presentation(
             record.source_relative_path or record.original_filename,

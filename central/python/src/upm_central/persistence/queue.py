@@ -57,9 +57,20 @@ class CentralQueue:
         return job
 
     def claim_processing(
-        self, worker_id: str, capabilities: set[str], lease: timedelta
+        self,
+        worker_id: str,
+        capabilities: set[str],
+        lease: timedelta,
+        *,
+        excluded_job_types: set[str] | None = None,
     ) -> ProcessingJob | None:
-        return self._claim(ProcessingJob, worker_id, capabilities, lease)
+        return self._claim(
+            ProcessingJob,
+            worker_id,
+            capabilities,
+            lease,
+            excluded_job_types=excluded_job_types,
+        )
 
     def claim_transfer(
         self, worker_id: str, capabilities: set[str], lease: timedelta
@@ -72,6 +83,8 @@ class CentralQueue:
         worker_id: str,
         capabilities: set[str],
         lease: timedelta,
+        *,
+        excluded_job_types: set[str] | None = None,
     ) -> JobModel | None:
         now = utc_now()
         available = and_(
@@ -79,10 +92,13 @@ class CentralQueue:
             model.next_attempt_at <= now,
         )
         expired = and_(model.status == JobStatus.RUNNING, model.lease_expires_at < now)
+        statement = select(model).where(or_(available, expired)).where(
+            model.required_capabilities.op("<@")(cast(sorted(capabilities), JSONB))
+        )
+        if excluded_job_types and model is ProcessingJob:
+            statement = statement.where(model.job_type.not_in(sorted(excluded_job_types)))
         statement = (
-            select(model)
-            .where(or_(available, expired))
-            .where(model.required_capabilities.op("<@")(cast(sorted(capabilities), JSONB)))
+            statement
             .order_by(model.priority.desc(), model.created_at, getattr(model, model_id_name(model)))
             .with_for_update(skip_locked=True)
             .limit(1)
