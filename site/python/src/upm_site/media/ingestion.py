@@ -479,6 +479,7 @@ class MediaIngestionService:
             )
             media.failure_reason = None
             media.availability = MediaAvailability.AVAILABLE
+            media.deleted_at = None
             asset = None
             if request.presentation_version_id is not None:
                 asset = session.scalar(
@@ -498,7 +499,8 @@ class MediaIngestionService:
                         or not linked.content_hash
                         or linked.size_bytes is None
                     )
-                    if not (same_content or incomplete):
+                    authoritative_transfer = (request.idempotency_key or "").startswith("transfer:")
+                    if not (same_content or incomplete or authoritative_transfer):
                         raise IngestionConflictError(
                             "presentation version already has a different original asset"
                         )
@@ -589,7 +591,7 @@ class MediaIngestionService:
             )
             if media is None:
                 return None
-            if media.availability != MediaAvailability.AVAILABLE:
+            if media.availability != MediaAvailability.AVAILABLE or media.deleted_at is not None:
                 # adopt_committed can reconcile this row by its committed object
                 # identity.  Do not short-circuit that recovery path.
                 return None

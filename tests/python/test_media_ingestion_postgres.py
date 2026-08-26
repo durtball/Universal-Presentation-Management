@@ -221,6 +221,7 @@ def test_adopt_committed_finishes_interrupted_media_and_reuses_original_asset(
                 category=MediaCategory.PRESENTATION_VERSION,
                 original_filename="session.jpg",
                 availability=MediaAvailability.FINALIZING,
+                deleted_at=datetime.now(UTC),
                 ingestion_idempotency_key="transfer:interrupted",
             )
         )
@@ -256,6 +257,7 @@ def test_adopt_committed_finishes_interrupted_media_and_reuses_original_asset(
             select(MediaObject).where(MediaObject.media_object_id == media_id)
         )
         assert restored.availability is MediaAvailability.AVAILABLE
+        assert restored.deleted_at is None
         assets = session.scalars(
             select(PresentationAsset).where(
                 PresentationAsset.presentation_version_id == media_context["version_id"]

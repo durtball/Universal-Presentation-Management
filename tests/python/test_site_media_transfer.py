@@ -129,7 +129,7 @@ def test_duplicate_transfer_progress_is_idempotent() -> None:
         source_system=SourceSystem.SITE,
         payload={},
         idempotency_key=(
-            f"media-progress:{transfer.transfer_session_id}:0:{MediaTransferState.RETRY_WAIT}"
+            f"media-progress:{transfer.transfer_session_id}:0:0:{MediaTransferState.RETRY_WAIT}"
         ),
         status=JobStatus.PENDING,
     )

@@ -18,10 +18,12 @@ from upm_shared.contracts.sync import (
     SyncEventEnvelope,
 )
 from upm_shared.enums import (
+    AssetKind,
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
     JobStatus,
+    MediaAvailability,
     MediaTransferState,
     SourceSystem,
 )
@@ -39,15 +41,18 @@ from upm_site.persistence.models import (
     Event,
     LocalSiteIdentity,
     ManagedSetting,
+    MediaObject,
     MediaTransferSession,
     OutboxEvent,
     Presentation,
+    PresentationAsset,
     PresentationVersion,
     Site,
     SyncCursor,
     SyncReceipt,
     SyncSequence,
     TransferJob,
+    utc_now,
 )
 from upm_site.persistence.queue import SiteQueue
 
@@ -56,6 +61,29 @@ from upm_site.persistence.queue import SiteQueue
 # permanent identity without relying on exception handling after a uniqueness violation.
 SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
 DEFERRED_TRANSFER_CAPABILITY = "sync-dependencies"
+
+
+def _manifest_is_satisfied(session: Session, manifest: MediaTransferManifest) -> bool:
+    """Return whether the desired original asset is live and usable on this Site."""
+    row = session.execute(
+        select(PresentationAsset, MediaObject)
+        .join(MediaObject, MediaObject.media_object_id == PresentationAsset.media_object_id)
+        .where(
+            PresentationAsset.presentation_version_id == manifest.presentation_version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
+        .with_for_update()
+    ).first()
+    if row is None:
+        return False
+    _asset, media = row
+    return bool(
+        media.deleted_at is None
+        and media.availability is MediaAvailability.AVAILABLE
+        and media.content_hash == manifest.sha256
+        and media.size_bytes == manifest.expected_size
+        and media.object_key
+    )
 
 
 def _materialize_media_transfer(
@@ -106,6 +134,17 @@ def _materialize_media_transfer(
             or local_session.presentation_version_id != manifest.presentation_version_id
         ):
             raise ValueError("transfer manifest conflicts with existing transfer state")
+        elif local_session.state is MediaTransferState.COMPLETED:
+            # A completed historical transfer is only evidence of a past state.
+            # Desired-vs-actual reconciliation has already found the canonical
+            # asset unsatisfied, so make the same durable intent runnable again.
+            local_session.storage_target_id = None
+            local_session.confirmed_offset = 0
+            local_session.state = MediaTransferState.AVAILABLE
+            local_session.retry_count += 1
+            local_session.last_progress_at = None
+            local_session.error_detail = None
+            local_session.media_object_id = None
         transfer.required_capabilities = ["transfer"]
         return True
 
@@ -148,8 +187,28 @@ def persist_media_transfer_manifest(
             }:
                 raise ValueError("transfer manifest conflicts with durable transfer intent")
             transfer.payload = payload
-        if transfer.status is JobStatus.SUCCEEDED:
+        if _manifest_is_satisfied(session, manifest):
+            transfer.status = JobStatus.SUCCEEDED
+            transfer.progress = 100
+            transfer.error_code = None
+            transfer.last_error = None
             return transfer
+        if transfer.status in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.EXHAUSTED,
+            JobStatus.CANCELLED,
+        }:
+            transfer.status = JobStatus.PENDING
+            transfer.progress = 0
+            transfer.attempt_count = 0
+            transfer.next_attempt_at = utc_now()
+            transfer.claimed_by_worker_id = None
+            transfer.lease_expires_at = None
+            transfer.heartbeat_at = None
+            transfer.error_code = None
+            transfer.last_error = None
+            transfer.completed_at = None
     else:
         transfer = TransferJob(
             transfer_job_id=manifest.transfer_session_id,
