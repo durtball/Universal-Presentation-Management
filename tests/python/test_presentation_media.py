@@ -120,6 +120,48 @@ def test_presenter_room_time_and_title_folders_rank_a_weak_filename() -> None:
     assert result.state is not MediaMatchState.CONFIRMED
 
 
+def test_representative_import_paths_have_no_avoidable_unmatched_files() -> None:
+    candidates = [
+        MatchCandidate(
+            UUID(int=1),
+            "UPM-ONE",
+            title="Clinical Update",
+            presenter_family_name="Shulman",
+            session_title="Clinical Advances",
+            session_external_id="S-101",
+            room="Ballroom A",
+            starts_at=datetime(2026, 8, 19, 13, 30, tzinfo=UTC),
+        ),
+        MatchCandidate(
+            UUID(int=2),
+            "UPM-TWO",
+            title="Future of Imaging",
+            presenter_family_name="Kapoor",
+            session_title="Imaging Forum",
+            session_external_id="S-202",
+            room="Room 204",
+            starts_at=datetime(2026, 8, 20, 15, 0, tzinfo=UTC),
+        ),
+    ]
+    paths = [
+        "Wednesday/0930/Ballroom A/Shulman/Clinical Update/slides.jpg",
+        "Thursday/1100/Room 204/Imaging Forum/Kapoor/video.mp4",
+        "Thursday/S-202/Future of Imaging/handout.pdf",
+    ]
+
+    results = [
+        match_presentation(path, candidates, event_timezone="America/New_York")
+        for path in paths
+    ]
+
+    assert all(result.state is MediaMatchState.SUGGESTED for result in results)
+    assert [result.presentation_id for result in results] == [
+        candidates[0].presentation_id,
+        candidates[1].presentation_id,
+        candidates[1].presentation_id,
+    ]
+
+
 @pytest.mark.parametrize(
     "path",
     ["Ballroom A/Smith/final.pptx", r"Ballroom A\Smith\final.pptx"],

@@ -33,7 +33,7 @@ from upm_central.persistence.models import (
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_central.persistence.queue import CentralQueue
-from upm_central.presentation_media import CentralMediaStagingService
+from upm_central.presentation_media import CentralMediaStagingService, recover_stranded_intake
 from upm_shared.enums import (
     EnrollmentState,
     JobStatus,
@@ -876,4 +876,55 @@ def test_bulk_media_confirmation_queues_large_mixed_batch_idempotently(
         )
         assert len(jobs) == 250
         assert len({job.idempotency_key for job in jobs}) == 250
+    engine.dispose()
+
+
+def test_stranded_staging_is_requeued_or_clearly_failed(program_database: str) -> None:
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id, root_id = uuid4(), uuid4()
+    with factory.begin() as session:
+        session.add(Event(event_id=event_id, name="Stranded Intake", timezone="UTC"))
+        session.add(
+            StorageRoot(
+                storage_root_id=root_id,
+                role="staging",
+                display_name="Staging",
+                backend_type="filesystem",
+                path="/storage/staging",
+                enabled=False,
+            )
+        )
+        recoverable = PresentationMediaImport(
+            event_id=event_id,
+            original_filename="recoverable.pptx",
+            staging_key="staging/recoverable",
+            staging_storage_root_id=root_id,
+            sha256="a" * 64,
+            size_bytes=100,
+            match_state=MediaMatchState.UNMATCHED,
+            import_state=MediaImportState.STAGED,
+            sync_state=SyncState.LOCAL,
+        )
+        impossible = PresentationMediaImport(
+            event_id=event_id,
+            original_filename="impossible.pptx",
+            staging_key="staging/impossible",
+            match_state=MediaMatchState.UNMATCHED,
+            import_state=MediaImportState.STAGED,
+            sync_state=SyncState.LOCAL,
+        )
+        session.add_all([recoverable, impossible])
+        session.flush()
+        requeued, failed = recover_stranded_intake(session)
+        assert (requeued, failed) == (1, 1)
+        assert recoverable.import_state is MediaImportState.UPLOADING
+        assert impossible.import_state is MediaImportState.FAILED
+        assert impossible.error_code == "stranded_staging_state"
+    with factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.intake.publish"
+            )
+        ) == 1
     engine.dispose()

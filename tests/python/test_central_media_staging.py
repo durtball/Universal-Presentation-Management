@@ -19,8 +19,9 @@ from upm_central.worker import (
     PARALLEL_PRESENTATION_MEDIA_JOBS,
     PresentationMediaJobPool,
     execute_processing_job,
+    presentation_media_slot_failure_context,
 )
-from upm_shared.enums import MediaMatchState
+from upm_shared.enums import JobStatus, MediaMatchState
 from upm_shared.presentation_media import MatchCandidate, match_presentation
 
 
@@ -187,6 +188,13 @@ def test_media_pool_four_run_in_parallel_fifth_waits_and_failure_is_isolated() -
 
 def test_promotion_jobs_use_bounded_parallel_media_slots() -> None:
     assert "presentation_media.promote" in PARALLEL_PRESENTATION_MEDIA_JOBS
+
+
+def test_successful_promotion_never_surfaces_as_slot_failure() -> None:
+    completed = SimpleNamespace(status=JobStatus.SUCCEEDED)
+    assert presentation_media_slot_failure_context(completed, ValueError("late artifact")) is None
+    failure = presentation_media_slot_failure_context(None, ValueError("genuine failure"))
+    assert failure == {"error_type": "ValueError", "safe_message": "genuine failure"}
 
 
 def test_rescan_batch_matches_concurrently_with_deterministic_results() -> None:

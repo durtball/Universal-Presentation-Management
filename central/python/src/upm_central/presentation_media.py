@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Lock
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -103,6 +103,92 @@ ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.UPDATE_PENDING,
     EventDeploymentStatus.FAILED,
 }
+
+
+def recover_stranded_intake(session: Session) -> tuple[int, int]:
+    """Requeue durable staging uploads and clearly fail records whose bytes are unaddressable."""
+    records = list(
+        session.scalars(
+            select(PresentationMediaImport).where(
+                or_(
+                    PresentationMediaImport.import_state == MediaImportState.STAGED,
+                    (
+                        PresentationMediaImport.intake_storage_root_id.is_(None)
+                        & PresentationMediaImport.import_state.in_(
+                            [MediaImportState.UPLOADING, MediaImportState.RETRY_WAIT]
+                        )
+                    ),
+                )
+            )
+        )
+    )
+    existing = set(
+        session.scalars(
+            select(ProcessingJob.idempotency_key).where(
+                ProcessingJob.job_type == INTAKE_PUBLISH_JOB,
+                ProcessingJob.idempotency_key.in_(
+                    [f"intake:{record.media_import_id}" for record in records]
+                ),
+                ProcessingJob.status.in_(
+                    [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT]
+                ),
+            )
+        )
+    )
+    existing_processes = set(
+        session.scalars(
+            select(ProcessingJob.idempotency_key).where(
+                ProcessingJob.job_type == "presentation_media.process",
+                ProcessingJob.idempotency_key.in_(
+                    [str(record.media_import_id) for record in records]
+                ),
+            )
+        )
+    )
+    requeued = failed = 0
+    for record in records:
+        if (
+            record.intake_storage_root_id
+            and record.intake_storage_key
+            and record.sha256
+            and record.size_bytes is not None
+        ):
+            record.import_state = MediaImportState.NEEDS_REVIEW
+            process_key = str(record.media_import_id)
+            if process_key not in existing_processes:
+                CentralQueue(session).enqueue_processing(
+                    job_type="presentation_media.process",
+                    payload={"data": {"media_import_id": str(record.media_import_id)}},
+                    idempotency_key=process_key,
+                    required_capabilities=["cpu"],
+                    max_attempts=5,
+                )
+                requeued += 1
+            continue
+        complete_staging = bool(
+            record.staging_storage_root_id
+            and record.staging_key
+            and record.sha256
+            and record.size_bytes is not None
+        )
+        if not complete_staging:
+            record.import_state = MediaImportState.FAILED
+            record.error_code = "stranded_staging_state"
+            record.error_detail = "Staging metadata is incomplete; operator retry is required."
+            failed += 1
+            continue
+        record.import_state = MediaImportState.UPLOADING
+        key = f"intake:{record.media_import_id}"
+        if key not in existing:
+            CentralQueue(session).enqueue_processing(
+                job_type=INTAKE_PUBLISH_JOB,
+                payload={"data": {"media_import_id": str(record.media_import_id)}},
+                idempotency_key=key,
+                required_capabilities=["cpu"],
+                max_attempts=5,
+            )
+            requeued += 1
+    return requeued, failed
 
 
 def enqueue_match_repair_rescans(session: Session) -> int:
@@ -665,8 +751,8 @@ class CentralMediaStagingService:
                 record = session.get(PresentationMediaImport, import_id)
                 record.size_bytes = staged["size_bytes"]
                 record.sha256 = staged["sha256"]
-                record.import_state = MediaImportState.STAGED
-                record.match_reason = "Durably staged; downstream processing is queued"
+                record.import_state = MediaImportState.UPLOADING
+                record.match_reason = "Durably uploaded; Intake publication is queued"
                 CentralQueue(session).enqueue_processing(
                     job_type=INTAKE_PUBLISH_JOB,
                     payload={"data": {"media_import_id": str(import_id)}},
@@ -736,8 +822,10 @@ class CentralMediaStagingService:
                 record.size_bytes = total
                 record.sha256 = staged["sha256"]
                 record.match_state = MediaMatchState.UNMATCHED
-                record.match_reason = "Post-upload processing failed; file preserved for review"
-                record.import_state = MediaImportState.NEEDS_REVIEW
+                record.match_reason = (
+                    "Post-upload Intake publication failed; staged bytes are preserved for retry"
+                )
+                record.import_state = MediaImportState.RETRY_WAIT
                 record.error_code = (
                     error.code if isinstance(error, MediaStagingError) else "processing_failed"
                 )

@@ -37,6 +37,7 @@ from upm_central.presentation_media import (
     backfill_confirmed_original_assets,
     enqueue_asset_reconciliation,
     enqueue_match_repair_rescans,
+    recover_stranded_intake,
 )
 from upm_central.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
@@ -120,6 +121,15 @@ class PresentationMediaJobPool:
 
 def log(event: str, **context: object) -> None:
     print(json.dumps({"event": event, **context}, default=str), flush=True)
+
+
+def presentation_media_slot_failure_context(
+    completed_job: ProcessingJob | None, error: BaseException
+) -> dict[str, str] | None:
+    """Suppress executor artifacts after durable success; describe genuine slot failures."""
+    if completed_job is not None and completed_job.status is JobStatus.SUCCEEDED:
+        return None
+    return {"error_type": type(error).__name__, "safe_message": str(error)[:1024]}
 
 
 def execute_processing_job(
@@ -343,6 +353,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         enqueue_smb_presentations(session, delay_seconds=0)
         enqueue_asset_reconciliation(session)
         if "cpu" in capabilities:
+            recover_stranded_intake(session)
             enqueue_match_repair_rescans(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
@@ -352,12 +363,18 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             parallel_media_work_id = None
             for completed_id, error in media_pool.reap():
                 if error is not None:
-                    log(
-                        "presentation_media_slot_failed",
-                        worker_id=worker_id,
-                        work_id=completed_id,
-                        error_type=type(error).__name__,
-                    )
+                    with factory() as status_session:
+                        completed_job = status_session.get(ProcessingJob, completed_id)
+                        failure_context = presentation_media_slot_failure_context(
+                            completed_job, error
+                        )
+                    if failure_context is not None:
+                        log(
+                            "presentation_media_slot_failed",
+                            worker_id=worker_id,
+                            work_id=completed_id,
+                            **failure_context,
+                        )
             with factory.begin() as session:
                 queue = CentralQueue(session)
                 queue.register_worker(
