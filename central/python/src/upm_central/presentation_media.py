@@ -63,7 +63,11 @@ from upm_shared.media_storage_client import (
     MediaStorageUnavailable,
 )
 from upm_shared.presentation_media import (
+    DOCUMENT_PRESENTATION_EXTENSIONS,
+    IMAGE_PRESENTATION_EXTENSIONS,
+    POWERPOINT_PRESENTATION_EXTENSIONS,
     SUPPORTED_PRESENTATION_EXTENSIONS,
+    VIDEO_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
     MatchCandidate,
     MatchResult,
@@ -122,29 +126,38 @@ def recover_stranded_intake(session: Session) -> tuple[int, int]:
             )
         )
     )
-    existing = set(
-        session.scalars(
-            select(ProcessingJob.idempotency_key).where(
+    existing = {
+        job.idempotency_key: job
+        for job in session.scalars(
+            select(ProcessingJob).where(
                 ProcessingJob.job_type == INTAKE_PUBLISH_JOB,
                 ProcessingJob.idempotency_key.in_(
                     [f"intake:{record.media_import_id}" for record in records]
                 ),
-                ProcessingJob.status.in_(
-                    [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT]
-                ),
             )
         )
-    )
-    existing_processes = set(
-        session.scalars(
-            select(ProcessingJob.idempotency_key).where(
+    }
+    existing_processes = {
+        job.idempotency_key: job
+        for job in session.scalars(
+            select(ProcessingJob).where(
                 ProcessingJob.job_type == "presentation_media.process",
                 ProcessingJob.idempotency_key.in_(
                     [str(record.media_import_id) for record in records]
                 ),
             )
         )
-    )
+    }
+
+    def revive(job: ProcessingJob) -> bool:
+        if job.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT}:
+            return False
+        job.status = JobStatus.RETRY_WAIT
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.next_attempt_at = utc_now()
+        job.max_attempts = max(job.max_attempts, job.attempt_count + 5)
+        return True
     requeued = failed = 0
     for record in records:
         if (
@@ -155,7 +168,10 @@ def recover_stranded_intake(session: Session) -> tuple[int, int]:
         ):
             record.import_state = MediaImportState.NEEDS_REVIEW
             process_key = str(record.media_import_id)
-            if process_key not in existing_processes:
+            process_job = existing_processes.get(process_key)
+            if process_job is not None:
+                requeued += int(revive(process_job))
+            else:
                 CentralQueue(session).enqueue_processing(
                     job_type="presentation_media.process",
                     payload={"data": {"media_import_id": str(record.media_import_id)}},
@@ -179,7 +195,10 @@ def recover_stranded_intake(session: Session) -> tuple[int, int]:
             continue
         record.import_state = MediaImportState.UPLOADING
         key = f"intake:{record.media_import_id}"
-        if key not in existing:
+        intake_job = existing.get(key)
+        if intake_job is not None:
+            requeued += int(revive(intake_job))
+        else:
             CentralQueue(session).enqueue_processing(
                 job_type=INTAKE_PUBLISH_JOB,
                 payload={"data": {"media_import_id": str(record.media_import_id)}},
@@ -189,6 +208,36 @@ def recover_stranded_intake(session: Session) -> tuple[int, int]:
             )
             requeued += 1
     return requeued, failed
+
+
+def retry_extension_policy_failures(session: Session) -> int:
+    """Make jobs failed by the former downstream extension whitelist retryable in place."""
+    jobs = [
+        *session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.promote",
+                ProcessingJob.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED]),
+                ProcessingJob.last_error.ilike("%unsupported presentation media extension%"),
+            )
+        ),
+        *session.scalars(
+            select(TransferJob).where(
+                TransferJob.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED]),
+                TransferJob.last_error.ilike("%unsupported presentation media extension%"),
+            )
+        ),
+    ]
+    for job in jobs:
+        job.status = JobStatus.RETRY_WAIT
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.next_attempt_at = utc_now()
+        job.max_attempts = max(job.max_attempts, job.attempt_count + 5)
+        job.error_metadata = {
+            **(job.error_metadata or {}),
+            "recovered_by": "presentation_media_extension_policy",
+        }
+    return len(jobs)
 
 
 def enqueue_match_repair_rescans(session: Session) -> int:
@@ -308,13 +357,13 @@ def ensure_confirmed_original_asset(
     extension = Path(record.original_filename).suffix.lower()
     kind = (
         AssetKind.ORIGINAL
-        if extension in SUPPORTED_PRESENTATION_EXTENSIONS
+        if extension in POWERPOINT_PRESENTATION_EXTENSIONS or extension == ".pdf"
         else AssetKind.IMAGE
-        if extension in {".jpg", ".jpeg", ".png"}
+        if extension in IMAGE_PRESENTATION_EXTENSIONS
         else AssetKind.VIDEO
-        if extension in {".mp4", ".mov", ".mkv", ".webm"}
+        if extension in VIDEO_PRESENTATION_EXTENSIONS
         else AssetKind.DOCUMENT
-        if extension in {".doc", ".docx", ".txt"}
+        if extension in DOCUMENT_PRESENTATION_EXTENSIONS
         else AssetKind.OTHER
     )
     existing = session.scalar(
@@ -357,7 +406,10 @@ def backfill_confirmed_original_assets(session: Session) -> int:
     )
     version_counts = Counter(record.presentation_version_id for record in records)
     for record in records:
-        if Path(record.original_filename).suffix.lower() not in SUPPORTED_PRESENTATION_EXTENSIONS:
+        if (
+            Path(record.original_filename).suffix.lower()
+            not in POWERPOINT_PRESENTATION_EXTENSIONS | {".pdf"}
+        ):
             continue
         if version_counts[record.presentation_version_id] != 1:
             continue
@@ -1659,7 +1711,8 @@ class CentralMediaStagingService:
             )
         )
         primary_asset = (
-            Path(record.original_filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
+            Path(record.original_filename).suffix.lower()
+            in POWERPOINT_PRESENTATION_EXTENSIONS | {".pdf"}
         )
         if latest is None or (latest_assigned and primary_asset):
             latest = PresentationVersion(

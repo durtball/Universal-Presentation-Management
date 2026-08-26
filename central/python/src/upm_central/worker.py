@@ -38,6 +38,7 @@ from upm_central.presentation_media import (
     enqueue_asset_reconciliation,
     enqueue_match_repair_rescans,
     recover_stranded_intake,
+    retry_extension_policy_failures,
 )
 from upm_central.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
@@ -354,6 +355,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         enqueue_asset_reconciliation(session)
         if "cpu" in capabilities:
             recover_stranded_intake(session)
+            retry_extension_policy_failures(session)
             enqueue_match_repair_rescans(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:

@@ -33,7 +33,7 @@ pytestmark = [
 ]
 
 
-def _seed_event(session: Session):
+def _seed_event(session: Session, filename: str = "deployment-deck.pptx"):
     event_id, site_id, presentation_id, version_id, import_id = [new_uuid7() for _ in range(5)]
     session.add(
         Site(
@@ -63,8 +63,8 @@ def _seed_event(session: Session):
         presentation_id=presentation_id,
         presentation_version_id=version_id,
         presentation_identifier=presentation.presentation_identifier,
-        original_filename="deployment-deck.pptx",
-        canonical_filename="deployment-deck--v001.pptx",
+        original_filename=filename,
+        canonical_filename=f"deployment-deck--v001{filename[filename.rfind('.'):]}",
         staging_key=f"staging/{import_id}",
         committed_storage_key=f"objects/sha256/aa/{'a' * 64}",
         size_bytes=12,
@@ -123,14 +123,15 @@ def test_media_confirmed_before_event_deployment_is_targeted_and_queued() -> Non
         engine.dispose()
 
 
-def test_media_confirmed_after_event_deployment_inherits_site_and_queues() -> None:
+@pytest.mark.parametrize("filename", ["session-graphic.jpg", "speaker-show.ppsx"])
+def test_supported_media_confirmed_after_deployment_queues_transfer(filename: str) -> None:
     engine = create_engine(CENTRAL_URL)
     connection = engine.connect()
     transaction = connection.begin()
     factory = sessionmaker(bind=connection, expire_on_commit=False)
     try:
         with factory() as session:
-            event_id, site_id, presentation_id, record = _seed_event(session)
+            event_id, site_id, presentation_id, record = _seed_event(session, filename)
             record.presentation_id = None
             record.presentation_version_id = None
             record.presentation_identifier = None
@@ -158,6 +159,7 @@ def test_media_confirmed_after_event_deployment_inherits_site_and_queues() -> No
             transfer = session.get(TransferJob, record.transfer_job_id)
             assert transfer.transfer_type == "presentation_media.central_to_site"
             assert transfer.owning_site_id == site_id
+            assert record.canonical_filename.endswith(filename[filename.rfind(".") :])
             assert (
                 session.scalar(
                     select(func.count())

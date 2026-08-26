@@ -1,4 +1,8 @@
-export const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx", ".pdf"]);
+export const PRESENTATION_EXTENSIONS = new Set([
+  ".ppt", ".pptx", ".pps", ".ppsx", ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+  ".tif", ".tiff", ".webp", ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi",
+  ".doc", ".docx", ".txt",
+]);
 const configuredConcurrency = Number(import.meta.env.VITE_UPM_UPLOAD_CONCURRENCY ?? 6);
 export const DEFAULT_UPLOAD_CONCURRENCY = Number.isInteger(configuredConcurrency)
   ? Math.min(8, Math.max(1, configuredConcurrency))

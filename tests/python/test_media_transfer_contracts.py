@@ -49,6 +49,17 @@ def test_manifest_is_site_specific_and_round_trips() -> None:
     )
 
 
+@pytest.mark.parametrize("extension", ["jpg", "ppsx"])
+def test_jpg_and_ppsx_transfer_manifests_preserve_original_extension(extension: str) -> None:
+    item = manifest(
+        original_filename=f"session-media.{extension}",
+        canonical_filename=f"P-100_session-media_v01.{extension}",
+    )
+    restored = MediaTransferManifest.model_validate_json(item.model_dump_json())
+    assert restored.original_filename.endswith(f".{extension}")
+    assert restored.canonical_filename.endswith(f".{extension}")
+
+
 def test_direction_requires_the_corresponding_site_identity() -> None:
     with pytest.raises(ValidationError, match="destination_site_id"):
         manifest(destination_site_id=None)

@@ -30,7 +30,20 @@ _WINDOWS_RESERVED = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
-SUPPORTED_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pdf"})
+POWERPOINT_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pps", ".ppsx"})
+IMAGE_PRESENTATION_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+)
+VIDEO_PRESENTATION_EXTENSIONS = frozenset(
+    {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+)
+DOCUMENT_PRESENTATION_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".txt"})
+SUPPORTED_PRESENTATION_EXTENSIONS = frozenset(
+    POWERPOINT_PRESENTATION_EXTENSIONS
+    | IMAGE_PRESENTATION_EXTENSIONS
+    | VIDEO_PRESENTATION_EXTENSIONS
+    | DOCUMENT_PRESENTATION_EXTENSIONS
+)
 
 
 def normalize_source_relative_path(value: str | None, original_filename: str) -> str | None:

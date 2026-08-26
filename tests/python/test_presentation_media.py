@@ -35,6 +35,28 @@ def test_source_relative_path_is_safe_provenance_only() -> None:
             normalize_source_relative_path(unsafe, "deck.pptx")
 
 
+@pytest.mark.parametrize(
+    ("filename", "kind"),
+    [("session-graphic.jpg", AssetKind.IMAGE), ("speaker-show.ppsx", AssetKind.ORIGINAL)],
+)
+def test_jpg_and_ppsx_use_canonical_media_policy(filename: str, kind: AssetKind) -> None:
+    canonical = canonical_presentation_filename(
+        CanonicalPresentationMetadata(
+            presentation_identifier="P-100",
+            event_timezone="UTC",
+            starts_at=datetime(2026, 8, 18, 9, tzinfo=UTC),
+            room_label="Room A",
+            presenter_family_name="Speaker",
+            presenter_given_name="Sam",
+            title="Session",
+            version_number=1,
+            original_filename=filename,
+        )
+    )
+    assert canonical.endswith(filename[filename.rfind(".") :])
+    assert intake_asset_kind(filename) is kind
+
+
 def test_source_relative_path_normalizes_windows_separators_without_losing_folders() -> None:
     assert (
         normalize_source_relative_path(r"Wednesday\0930\Ballroom A\final.pptx", "final.pptx")

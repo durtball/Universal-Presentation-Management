@@ -30,10 +30,15 @@ from upm_central.persistence.models import (
     SessionParticipant,
     Site,
     StorageRoot,
+    TransferJob,
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_central.persistence.queue import CentralQueue
-from upm_central.presentation_media import CentralMediaStagingService, recover_stranded_intake
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    recover_stranded_intake,
+    retry_extension_policy_failures,
+)
 from upm_shared.enums import (
     EnrollmentState,
     JobStatus,
@@ -916,15 +921,50 @@ def test_stranded_staging_is_requeued_or_clearly_failed(program_database: str) -
         )
         session.add_all([recoverable, impossible])
         session.flush()
+        existing_job = ProcessingJob(
+            job_type="presentation_media.intake.publish",
+            payload={"data": {"media_import_id": str(recoverable.media_import_id)}},
+            idempotency_key=f"intake:{recoverable.media_import_id}",
+            required_capabilities=["cpu"],
+            status=JobStatus.FAILED,
+            attempt_count=5,
+            max_attempts=5,
+        )
+        session.add(existing_job)
+        session.flush()
         requeued, failed = recover_stranded_intake(session)
         assert (requeued, failed) == (1, 1)
         assert recoverable.import_state is MediaImportState.UPLOADING
         assert impossible.import_state is MediaImportState.FAILED
         assert impossible.error_code == "stranded_staging_state"
+        assert existing_job.status is JobStatus.RETRY_WAIT
+        assert existing_job.max_attempts == 10
     with factory() as session:
         assert session.scalar(
             select(func.count()).select_from(ProcessingJob).where(
                 ProcessingJob.job_type == "presentation_media.intake.publish"
             )
         ) == 1
+    engine.dispose()
+
+
+def test_extension_policy_transfer_failure_becomes_retryable(program_database: str) -> None:
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        job = TransferJob(
+            transfer_type="presentation_media.central_to_site",
+            payload={"data": {}},
+            idempotency_key=f"extension-policy-{uuid4()}",
+            status=JobStatus.EXHAUSTED,
+            attempt_count=5,
+            max_attempts=5,
+            last_error="unsupported presentation media extension",
+        )
+        session.add(job)
+        session.flush()
+        assert retry_extension_policy_failures(session) == 1
+        assert job.status is JobStatus.RETRY_WAIT
+        assert job.max_attempts == 10
+        assert job.error_metadata["recovered_by"] == "presentation_media_extension_policy"
     engine.dispose()
