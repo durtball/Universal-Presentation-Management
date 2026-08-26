@@ -11,6 +11,21 @@ from sqlalchemy.orm import Session
 from upm_central.persistence.models import OperationalLog, utc_now
 from upm_shared.operational_logs import redact_context
 
+SUPPORTED_OPERATIONAL_LOG_IDS = frozenset(
+    {
+        "batch_id",
+        "media_import_id",
+        "event_id",
+        "presentation_id",
+        "presentation_version_id",
+        "session_id",
+        "room_id",
+        "device_id",
+        "worker_id",
+        "correlation_id",
+    }
+)
+
 
 def record_log(
     session: Session,
@@ -23,13 +38,20 @@ def record_log(
     flush: bool = True,
     **ids,
 ) -> OperationalLog:
+    supported_ids = {
+        key: value for key, value in ids.items() if key in SUPPORTED_OPERATIONAL_LOG_IDS
+    }
+    extra_context = dict(context or {})
+    for key, value in ids.items():
+        if key not in SUPPORTED_OPERATIONAL_LOG_IDS:
+            extra_context.setdefault(key, str(value) if isinstance(value, UUID) else value)
     item = OperationalLog(
         service=service,
         event_type=event_type,
         message=message[:1024],
         severity=severity,
-        context=redact_context(context or {}),
-        **ids,
+        context=redact_context(extra_context),
+        **supported_ids,
     )
     session.add(item)
     if flush:

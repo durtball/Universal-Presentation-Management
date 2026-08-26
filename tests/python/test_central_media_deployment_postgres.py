@@ -1,15 +1,23 @@
 """Focused regression coverage for deployment-aware Central presentation media."""
 
 import os
+from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
+from upm_central.api import create_app
+from upm_central.config import CentralDatabaseSettings
 from upm_central.event_deployments import create_deployment, push_deployment
+from upm_central.persistence.base import CentralBase
 from upm_central.persistence.models import (
     Event,
     EventDeployment,
+    OperationalLog,
     OutboxEvent,
     Presentation,
     PresentationMediaImport,
@@ -32,6 +40,21 @@ pytestmark = [
     pytest.mark.postgres,
     pytest.mark.skipif(not CENTRAL_URL, reason="a migrated Central PostgreSQL URL is required"),
 ]
+
+
+def _schema_url(raw: str, schema: str) -> str:
+    url = make_url(raw)
+    query = dict(url.query)
+    query["options"] = f"-csearch_path={schema}"
+    return URL.create(
+        drivername=url.drivername,
+        username=url.username,
+        password=url.password,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        query=query,
+    ).render_as_string(hide_password=False)
 
 
 def _seed_event(session: Session, filename: str = "deployment-deck.pptx"):
@@ -139,10 +162,95 @@ def test_media_confirmed_before_event_deployment_is_targeted_and_queued() -> Non
             )
             assert replay is not None
             assert replay.payload["presentation_version_id"] == str(record.presentation_version_id)
+            planned = session.scalar(
+                select(OperationalLog)
+                .where(
+                    OperationalLog.event_type == "event_media_redeployment_planned",
+                    OperationalLog.event_id == event_id,
+                )
+                .order_by(OperationalLog.occurred_at.desc())
+            )
+            assert planned.context["site_id"] == str(site_id)
+            assert planned.context["manifests_published"] == 1
+
+            push_deployment(session, deployment)
+            session.flush()
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(TransferJob)
+                    .where(TransferJob.idempotency_key == f"central-media:{record.media_import_id}")
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OutboxEvent)
+                    .where(
+                        OutboxEvent.aggregate_id == transfer_id,
+                        OutboxEvent.event_type == "central.media_transfer.available",
+                    )
+                )
+                == 3
+            )
     finally:
         transaction.rollback()
         connection.close()
         engine.dispose()
+
+
+def test_redeploy_api_commits_manifest_and_operational_log() -> None:
+    schema = f"central_media_redeploy_{uuid4().hex}"
+    admin = create_engine(CENTRAL_URL)
+    engine = None
+    try:
+        with admin.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        database_url = _schema_url(CENTRAL_URL, schema)
+        engine = create_engine(database_url)
+        CentralBase.metadata.create_all(engine)
+        with Session(engine) as session, session.begin():
+            event_id, site_id, _, record = _seed_event(session)
+            deployment = create_deployment(session, event_id, site_id)
+            transfer_id = record.transfer_job_id
+            session.get(TransferJob, transfer_id).status = JobStatus.SUCCEEDED
+            record.import_state = MediaImportState.SITE_READY
+            deployment_id = deployment.deployment_id
+
+        token = "test-admin-token-at-least-32-characters"
+        settings = CentralDatabaseSettings(database_url=database_url, admin_token=token)
+        with TestClient(create_app(settings)) as client:
+            response = client.post(
+                f"/api/v1/admin/event-deployments/{deployment_id}/push",
+                headers={"X-UPM-Admin-Token": token},
+            )
+        assert response.status_code == 200, response.text
+
+        with Session(engine) as session:
+            deployment = session.get(EventDeployment, deployment_id)
+            assert deployment.desired_revision == 2
+            replay = session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.idempotency_key == f"media-transfer-desired:{transfer_id}:"
+                    f"{deployment_id}:2"
+                )
+            )
+            assert replay is not None
+            planned = session.scalar(
+                select(OperationalLog).where(
+                    OperationalLog.event_type == "event_media_redeployment_planned",
+                    OperationalLog.event_id == event_id,
+                )
+            )
+            assert planned.context["site_id"] == str(site_id)
+            assert planned.context["manifests_published"] == 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        admin.dispose()
 
 
 @pytest.mark.parametrize("filename", ["session-graphic.jpg", "speaker-show.ppsx"])

@@ -595,8 +595,8 @@ def target_confirmed_event_media(
         event_type="event_media_redeployment_planned",
         message="Planned desired presentation media manifests for event deployment.",
         event_id=event_id,
-        site_id=site_id,
         context={
+            "site_id": str(site_id),
             "deployment_id": str(deployment_id),
             "deployment_revision": deployment_revision,
             "desired": len(records),
