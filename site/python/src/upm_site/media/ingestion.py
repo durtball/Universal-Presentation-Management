@@ -413,6 +413,9 @@ class MediaIngestionService:
         self, request: IngestionRequest, committed: dict, size_bytes: int, sha256: str
     ) -> IngestionResult:
         """Materialize already verified receiver bytes without copying them through the app."""
+        # Look up the committed object before rejecting an incomplete idempotent
+        # attempt.  A process may have committed the bytes and database rows but
+        # died before marking the media available.
         existing = self._find_retry(request)
         if existing is not None:
             return existing
@@ -461,28 +464,46 @@ class MediaIngestionService:
             )
             if media is None:
                 return None
-            if (
-                media.content_hash != sha256
-                or media.size_bytes != size_bytes
-                or media.hash_algorithm != "sha256"
-                or media.availability is not MediaAvailability.AVAILABLE
+            if (media.content_hash not in (None, sha256)) or media.size_bytes not in (
+                None,
+                size_bytes,
             ):
                 raise IngestionConflictError(
                     "content-addressed object metadata conflicts with committed bytes"
                 )
+            media.content_hash = sha256
+            media.size_bytes = size_bytes
+            media.hash_algorithm = "sha256"
+            media.mime_type = (
+                request.client_mime_type or media.mime_type or "application/octet-stream"
+            )
+            media.failure_reason = None
+            media.availability = MediaAvailability.AVAILABLE
             asset = None
             if request.presentation_version_id is not None:
                 asset = session.scalar(
-                    select(PresentationAsset).where(
+                    select(PresentationAsset)
+                    .where(
                         PresentationAsset.presentation_version_id
                         == request.presentation_version_id,
                         PresentationAsset.kind == AssetKind.ORIGINAL,
                     )
+                    .with_for_update()
                 )
                 if asset is not None and asset.media_object_id != media.media_object_id:
-                    raise IngestionConflictError(
-                        "presentation version already has a different original asset"
+                    linked = session.get(MediaObject, asset.media_object_id, with_for_update=True)
+                    same_content = linked is not None and linked.content_hash == sha256
+                    incomplete = linked is None or (
+                        linked.availability is not MediaAvailability.AVAILABLE
+                        or not linked.content_hash
+                        or linked.size_bytes is None
                     )
+                    if not (same_content or incomplete):
+                        raise IngestionConflictError(
+                            "presentation version already has a different original asset"
+                        )
+                    asset.media_object_id = media.media_object_id
+                    asset.original_filename = validate_original_filename(request.original_filename)
                 if asset is None:
                     asset = PresentationAsset(
                         presentation_version_id=request.presentation_version_id,
@@ -497,6 +518,23 @@ class MediaIngestionService:
                     ProcessingJob.media_object_id == media.media_object_id
                 )
             )
+            if job_id is None:
+                job_id = (
+                    SiteQueue(session)
+                    .enqueue_processing(
+                        site_id=request.site_id,
+                        media_object_id=media.media_object_id,
+                        job_type="media.inspect",
+                        payload={
+                            "schema_version": 1,
+                            "data": {"media_object_id": str(media.media_object_id)},
+                        },
+                        idempotency_key=f"media.inspect:{media.media_object_id}",
+                        priority=PRIORITY_VALUES[JobPriority.NORMAL],
+                        required_capabilities=["cpu"],
+                    )
+                    .processing_job_id
+                )
             return IngestionResult(
                 media.media_object_id,
                 asset.presentation_asset_id if asset else None,
@@ -552,15 +590,25 @@ class MediaIngestionService:
             if media is None:
                 return None
             if media.availability != MediaAvailability.AVAILABLE:
-                raise IngestionConflictError(
-                    "an ingestion with this idempotency key is still incomplete",
-                    code="incomplete_retry",
-                )
+                # adopt_committed can reconcile this row by its committed object
+                # identity.  Do not short-circuit that recovery path.
+                return None
             asset_id = session.scalar(
                 select(PresentationAsset.presentation_asset_id).where(
-                    PresentationAsset.media_object_id == media.media_object_id
+                    PresentationAsset.media_object_id == media.media_object_id,
+                    *(
+                        (
+                            PresentationAsset.presentation_version_id
+                            == request.presentation_version_id,
+                            PresentationAsset.kind == AssetKind.ORIGINAL,
+                        )
+                        if request.presentation_version_id is not None
+                        else ()
+                    ),
                 )
             )
+            if request.presentation_version_id is not None and asset_id is None:
+                return None
             job_id = session.scalar(
                 select(ProcessingJob.processing_job_id).where(
                     ProcessingJob.media_object_id == media.media_object_id
@@ -723,13 +771,30 @@ class MediaIngestionService:
             session.add(media)
             if request.presentation_version_id is None:
                 return None
-            asset = PresentationAsset(
-                presentation_version_id=request.presentation_version_id,
-                media_object_id=media_id,
-                original_filename=filename,
-                kind=AssetKind.ORIGINAL,
+            asset = session.scalar(
+                select(PresentationAsset)
+                .where(
+                    PresentationAsset.presentation_version_id == request.presentation_version_id,
+                    PresentationAsset.kind == AssetKind.ORIGINAL,
+                )
+                .with_for_update()
             )
-            session.add(asset)
+            if asset is None:
+                asset = PresentationAsset(
+                    presentation_version_id=request.presentation_version_id,
+                    media_object_id=media_id,
+                    original_filename=filename,
+                    kind=AssetKind.ORIGINAL,
+                )
+                session.add(asset)
+            else:
+                linked = session.get(MediaObject, asset.media_object_id, with_for_update=True)
+                if linked is not None and linked.availability is MediaAvailability.AVAILABLE:
+                    raise IngestionConflictError(
+                        "presentation version already has a different original asset"
+                    )
+                asset.media_object_id = media_id
+                asset.original_filename = filename
             session.flush()
             return asset.presentation_asset_id
 

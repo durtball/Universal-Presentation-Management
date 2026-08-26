@@ -284,7 +284,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         item.strip() for item in settings.worker_capabilities.split(",") if item.strip()
     }
     stop = Event()
-    storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
+    # Rebuilding a large SMB presentation view can legitimately take longer than
+    # the client's short control-plane default even while Media Storage is healthy.
+    storage_client = MediaStorageClient(
+        settings.media_storage_url, settings.media_storage_token, timeout=300
+    )
     ingestion_service = MediaIngestionService(
         factory,
         max_upload_bytes=settings.max_upload_bytes,

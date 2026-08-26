@@ -176,6 +176,17 @@ def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
             if presentation is not None:
                 presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
             repaired += 1
+        elif existing.media_object_id != media.media_object_id:
+            linked = session.get(MediaObject, existing.media_object_id)
+            if linked is None or (
+                linked.availability is not MediaAvailability.AVAILABLE
+                or not linked.content_hash
+                or linked.size_bytes is None
+                or linked.content_hash == media.content_hash
+            ):
+                existing.media_object_id = media.media_object_id
+                existing.original_filename = media.original_filename
+                repaired += 1
     session.flush()
     return repaired
 

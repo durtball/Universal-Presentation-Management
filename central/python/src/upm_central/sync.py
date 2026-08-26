@@ -274,9 +274,13 @@ def apply_site_event(
             if progress.state is MediaTransferState.COMPLETED and progress.local_media_ready:
                 transfer.status = JobStatus.SUCCEEDED
                 transfer.completed_at = utc_now()
+                transfer.error_code = None
+                transfer.last_error = None
                 media_import.import_state = MediaImportState.SITE_READY
                 media_import.site_media_object_id = progress.media_object_id
                 media_import.sync_state = SyncState.SYNCHRONIZED
+                media_import.error_code = None
+                media_import.error_detail = None
             elif progress.state is MediaTransferState.FAILED:
                 transfer.status = JobStatus.FAILED
                 transfer.last_error = progress.error_detail
