@@ -29,6 +29,7 @@ from upm_central.persistence.models import (
     ProcessingJob,
     SessionParticipant,
     Site,
+    StorageRoot,
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_central.persistence.queue import CentralQueue
@@ -768,4 +769,111 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
         assert progress.json()["failed"] == 0
         assert progress.json()["status"] == "succeeded"
         assert progress.json()["finished"] is True
+    engine.dispose()
+
+
+def test_bulk_media_confirmation_queues_large_mixed_batch_idempotently(
+    program_database: str,
+) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id, other_event_id, root_id = uuid4(), uuid4(), uuid4()
+    with factory.begin() as session:
+        session.add_all(
+            [
+                Event(event_id=event_id, name="Bulk confirmations", timezone="UTC"),
+                Event(event_id=other_event_id, name="Other event", timezone="UTC"),
+                StorageRoot(
+                    storage_root_id=root_id,
+                    role="media",
+                    display_name="Bulk confirmation Intake",
+                    backend_type="filesystem",
+                    path="/storage/media",
+                    enabled=False,
+                ),
+            ]
+        )
+        presentation = Presentation(
+            event_id=event_id,
+            title="Bulk target",
+            presentation_identifier="BULK-001",
+        )
+        other_presentation = Presentation(
+            event_id=other_event_id,
+            title="Wrong event",
+            presentation_identifier="OTHER-001",
+        )
+        session.add_all([presentation, other_presentation])
+        session.flush()
+        imports = [
+            PresentationMediaImport(
+                event_id=event_id,
+                original_filename=f"BULK-001-{index}.pptx",
+                staging_key=f"bulk/{index}",
+                intake_storage_root_id=root_id,
+                intake_storage_key=f"intake/{index}",
+                sha256=f"{index:064x}",
+                size_bytes=100 + index,
+                match_state=MediaMatchState.SUGGESTED,
+                import_state=MediaImportState.NEEDS_REVIEW,
+                sync_state=SyncState.LOCAL,
+            )
+            for index in range(250)
+        ]
+        session.add_all(imports)
+        session.flush()
+        requests = [
+            {
+                "media_import_id": str(item.media_import_id),
+                "presentation_id": str(presentation.presentation_id),
+            }
+            for item in imports
+        ]
+        requests.extend(
+            [
+                {
+                    "media_import_id": str(uuid4()),
+                    "presentation_id": str(presentation.presentation_id),
+                },
+                {
+                    "media_import_id": str(imports[0].media_import_id),
+                    "presentation_id": str(other_presentation.presentation_id),
+                },
+            ]
+        )
+
+    with TestClient(create_app(settings)) as client:
+        first = client.post(
+            "/api/v1/admin/media-imports/confirmations",
+            headers=headers,
+            json={"items": requests},
+        )
+        assert first.status_code == 200
+        assert [item["status"] for item in first.json()["results"]].count("queued") == 250
+        assert [item["status"] for item in first.json()["results"]].count("failed") == 2
+        retry = client.post(
+            "/api/v1/admin/media-imports/confirmations",
+            headers=headers,
+            json={"items": requests[:250]},
+        )
+        assert retry.status_code == 200
+        assert {item["status"] for item in retry.json()["results"]} == {"queued"}
+
+    with factory() as session:
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.job_type == "presentation_media.promote"
+                )
+            )
+        )
+        assert len(jobs) == 250
+        assert len({job.idempotency_key for job in jobs}) == 250
     engine.dispose()

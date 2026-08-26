@@ -20,6 +20,7 @@ def record_log(
     message: str,
     severity: str = "info",
     context: dict[str, object] | None = None,
+    flush: bool = True,
     **ids,
 ) -> OperationalLog:
     item = OperationalLog(
@@ -31,7 +32,8 @@ def record_log(
         **ids,
     )
     session.add(item)
-    session.flush()
+    if flush:
+        session.flush()
     return item
 
 

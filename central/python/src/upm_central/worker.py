@@ -68,7 +68,11 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 
-PARALLEL_PRESENTATION_MEDIA_JOBS = {INTAKE_PUBLISH_JOB, "presentation_media.process"}
+PARALLEL_PRESENTATION_MEDIA_JOBS = {
+    INTAKE_PUBLISH_JOB,
+    "presentation_media.process",
+    "presentation_media.promote",
+}
 
 
 class PresentationMediaJobPool:

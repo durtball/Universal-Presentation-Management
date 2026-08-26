@@ -15,7 +15,11 @@ from upm_central.presentation_media import (
     MediaStagingError,
     _safe_staging_path,
 )
-from upm_central.worker import PresentationMediaJobPool, execute_processing_job
+from upm_central.worker import (
+    PARALLEL_PRESENTATION_MEDIA_JOBS,
+    PresentationMediaJobPool,
+    execute_processing_job,
+)
 from upm_shared.enums import MediaMatchState
 from upm_shared.presentation_media import MatchCandidate, match_presentation
 
@@ -179,6 +183,10 @@ def test_media_pool_four_run_in_parallel_fifth_waits_and_failure_is_isolated() -
     finally:
         release.set()
         pool.shutdown()
+
+
+def test_promotion_jobs_use_bounded_parallel_media_slots() -> None:
+    assert "presentation_media.promote" in PARALLEL_PRESENTATION_MEDIA_JOBS
 
 
 def test_rescan_batch_matches_concurrently_with_deterministic_results() -> None:

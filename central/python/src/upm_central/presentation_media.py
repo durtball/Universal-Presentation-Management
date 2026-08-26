@@ -15,6 +15,7 @@ from threading import Lock
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.operational_logs import record_log
@@ -1162,10 +1163,16 @@ class CentralMediaStagingService:
         existing = session.scalar(
             select(ProcessingJob).where(
                 ProcessingJob.job_type == "presentation_media.promote",
-                ProcessingJob.idempotency_key == idempotency_key,
+                ProcessingJob.payload["data"]["media_import_id"].astext
+                == str(record.media_import_id),
             )
         )
         if existing is not None:
+            if UUID(str(existing.payload["data"]["presentation_id"])) != presentation_id:
+                raise MediaStagingError(
+                    "media import already has a promotion queued for another presentation",
+                    "already_confirmed",
+                )
             return
         CentralQueue(session).enqueue_processing(
             job_type="presentation_media.promote",
@@ -1191,6 +1198,163 @@ class CentralMediaStagingService:
             presentation_id=presentation_id,
             context={"processing_job_id": idempotency_key},
         )
+
+    def queue_promotions(
+        self,
+        session: Session,
+        requests: list[tuple[UUID, UUID]],
+        *,
+        actor: str,
+    ) -> list[dict[str, object]]:
+        """Validate and durably enqueue a confirmation batch with bounded query count."""
+        media_ids = {media_import_id for media_import_id, _ in requests}
+        presentation_ids = {presentation_id for _, presentation_id in requests}
+        records = {
+            record.media_import_id: record
+            for record in session.scalars(
+                select(PresentationMediaImport)
+                .where(PresentationMediaImport.media_import_id.in_(media_ids))
+                .with_for_update()
+            )
+        }
+        presentations = {
+            presentation.presentation_id: presentation
+            for presentation in session.scalars(
+                select(Presentation).where(Presentation.presentation_id.in_(presentation_ids))
+            )
+        }
+        requested_keys = {
+            f"{media_import_id}:{presentation_id}"
+            for media_import_id, presentation_id in requests
+        }
+        existing_promotions = session.execute(
+            select(ProcessingJob.idempotency_key, ProcessingJob.payload).where(
+                    ProcessingJob.job_type == "presentation_media.promote",
+                    ProcessingJob.payload["data"]["media_import_id"].astext.in_(
+                        [str(value) for value in media_ids]
+                    ),
+                )
+        ).all()
+        existing_keys = {key for key, _ in existing_promotions if key in requested_keys}
+        existing_targets: dict[UUID, set[UUID]] = {}
+        for _, payload in existing_promotions:
+            existing_targets.setdefault(
+                UUID(str(payload["data"]["media_import_id"])), set()
+            ).add(UUID(str(payload["data"]["presentation_id"])))
+        queued_keys = set(existing_keys)
+        selected_targets: dict[UUID, UUID] = {}
+        job_rows: list[dict[str, object]] = []
+        log_context: dict[str, tuple[PresentationMediaImport, UUID]] = {}
+        results: list[dict[str, object]] = []
+
+        for media_import_id, presentation_id in requests:
+            record = records.get(media_import_id)
+            presentation = presentations.get(presentation_id)
+            error: MediaStagingError | None = None
+            previous_target = selected_targets.setdefault(media_import_id, presentation_id)
+            if previous_target != presentation_id:
+                error = MediaStagingError(
+                    "media import was requested for multiple presentations", "invalid_match"
+                )
+            elif (
+                media_import_id in existing_targets
+                and existing_targets[media_import_id] != {presentation_id}
+            ):
+                error = MediaStagingError(
+                    "media import already has a promotion queued for another presentation",
+                    "already_confirmed",
+                )
+            elif record is None:
+                error = MediaStagingError("media import not found", "not_found")
+            elif presentation is None or presentation.event_id != record.event_id:
+                error = MediaStagingError(
+                    "presentation is not in the import event", "invalid_match"
+                )
+            elif record.match_state is MediaMatchState.CONFIRMED:
+                if record.presentation_id != presentation_id:
+                    error = MediaStagingError(
+                        "media import was confirmed to another presentation",
+                        "already_confirmed",
+                    )
+            elif record.import_state is MediaImportState.REJECTED or record.rejected_at:
+                error = MediaStagingError("rejected media cannot be confirmed", "rejected")
+            elif (
+                not record.sha256
+                or record.size_bytes is None
+                or not record.intake_storage_root_id
+            ):
+                error = MediaStagingError("media import is not in durable Intake", "not_in_intake")
+
+            if error is not None:
+                results.append(
+                    {
+                        "media_import_id": media_import_id,
+                        "status": "failed",
+                        "code": error.code,
+                        "message": str(error),
+                    }
+                )
+                continue
+            if record.match_state is MediaMatchState.CONFIRMED:
+                results.append(
+                    {
+                        "media_import_id": media_import_id,
+                        "status": "confirmed",
+                        "presentation_version_id": record.presentation_version_id,
+                    }
+                )
+                continue
+
+            idempotency_key = f"{media_import_id}:{presentation_id}"
+            if idempotency_key not in queued_keys:
+                job_rows.append(
+                    {
+                        "processing_job_id": new_uuid7(),
+                        "job_type": "presentation_media.promote",
+                        "payload": {
+                            "schema_version": 1,
+                            "data": {
+                                "media_import_id": str(media_import_id),
+                                "presentation_id": str(presentation_id),
+                                "actor": actor,
+                            },
+                        },
+                        "idempotency_key": idempotency_key,
+                        "required_capabilities": ["cpu"],
+                        "max_attempts": 5,
+                    }
+                )
+                queued_keys.add(idempotency_key)
+                log_context[idempotency_key] = (record, presentation_id)
+
+            results.append({"media_import_id": media_import_id, "status": "queued"})
+
+        inserted_keys: set[str] = set()
+        if job_rows:
+            inserted_keys = set(
+                session.scalars(
+                    insert(ProcessingJob)
+                    .values(job_rows)
+                    .on_conflict_do_nothing(index_elements=["job_type", "idempotency_key"])
+                    .returning(ProcessingJob.idempotency_key)
+                )
+            )
+        for idempotency_key in inserted_keys:
+            record, presentation_id = log_context[idempotency_key]
+            record_log(
+                session,
+                service="central-api",
+                event_type="confirmation.requested",
+                message="Presentation confirmation queued",
+                batch_id=record.batch_id,
+                media_import_id=record.media_import_id,
+                event_id=record.event_id,
+                presentation_id=presentation_id,
+                context={"processing_job_id": idempotency_key},
+                flush=False,
+            )
+        session.flush()
+        return results
 
     async def promote_and_assign(
         self, media_import_id: UUID, presentation_id: UUID, *, actor: str

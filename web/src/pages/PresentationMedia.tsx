@@ -39,7 +39,7 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     const timer = window.setInterval(() => {
       data.poll();
       if (mode === "central") batches.poll();
-    }, 3000);
+    }, 10000);
     return () => window.clearInterval(timer);
   }, [activeEvent, mode, data.poll, batches.poll]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
