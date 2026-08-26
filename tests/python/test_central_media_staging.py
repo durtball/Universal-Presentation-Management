@@ -10,8 +10,14 @@ from sqlalchemy import Integer
 from upm_central.api import create_app
 from upm_central.config import CentralDatabaseSettings
 from upm_central.persistence.models import StorageRoot
-from upm_central.presentation_media import MediaStagingError, _safe_staging_path
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    MediaStagingError,
+    _safe_staging_path,
+)
 from upm_central.worker import PresentationMediaJobPool, execute_processing_job
+from upm_shared.enums import MediaMatchState
+from upm_shared.presentation_media import MatchCandidate, match_presentation
 
 
 def test_staging_key_cannot_escape_configured_root(tmp_path: Path) -> None:
@@ -173,6 +179,46 @@ def test_media_pool_four_run_in_parallel_fifth_waits_and_failure_is_isolated() -
     finally:
         release.set()
         pool.shutdown()
+
+
+def test_rescan_batch_matches_concurrently_with_deterministic_results() -> None:
+    candidate = MatchCandidate(uuid4(), "MATCH-001", presenter_family_name="Smith")
+    items = [(uuid4(), f"Room A/MATCH-001-Smith-{index}.pptx") for index in range(8)]
+    serial = CentralMediaStagingService(None, None, 1, matching_concurrency=1)
+    expected = serial._match_rescan_batch(items, [candidate], "UTC")
+
+    parallel = CentralMediaStagingService(None, None, 1, matching_concurrency=4)
+    release = Event()
+    four_started = Event()
+    lock = Lock()
+    in_flight = 0
+    peak = 0
+
+    def observed_match(source_path, candidates, event_timezone):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            if in_flight == 4:
+                four_started.set()
+        assert four_started.wait(1)
+        release.set()
+        result = match_presentation(source_path, candidates, event_timezone=event_timezone)
+        with lock:
+            in_flight -= 1
+        return result
+
+    parallel._match_rescan_item = observed_match
+    actual = parallel._match_rescan_batch(items, [candidate], "UTC")
+
+    assert peak == 4
+    assert [media_id for media_id, _ in actual] == [media_id for media_id, _ in expected]
+    assert [result.state for _, result in actual] == [
+        MediaMatchState.SUGGESTED for _ in items
+    ]
+    assert [result.presentation_id for _, result in actual] == [
+        result.presentation_id for _, result in expected
+    ]
 
 
 def test_central_presentation_ingestion_has_no_legacy_data_path_dependency() -> None:

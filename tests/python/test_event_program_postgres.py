@@ -721,18 +721,18 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
 
         monkeypatch.setattr(CentralMediaStagingService, "_load_match_candidates", counted_load)
         interrupted_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
-        original_match = interrupted_service._automatic_match_and_assign
+        original_match = interrupted_service._match_rescan_item
         refreshes = 0
 
-        def interrupt_after_first_batch(session, record, **kwargs):
+        def interrupt_after_first_batch(source_path, candidates, event_timezone):
             nonlocal refreshes
             refreshes += 1
             if refreshes == 76:
                 raise KeyboardInterrupt("simulated worker interruption")
-            original_match(session, record, **kwargs)
+            return original_match(source_path, candidates, event_timezone)
 
         monkeypatch.setattr(
-            interrupted_service, "_automatic_match_and_assign", interrupt_after_first_batch
+            interrupted_service, "_match_rescan_item", interrupt_after_first_batch
         )
         with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
             interrupted_service.rescan(job_id, "rescan-test-worker")
@@ -742,7 +742,9 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
             assert interrupted.payload["data"]["processed"] == 75
             assert interrupted.progress > 0
 
-        resumed_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
+        resumed_service = CentralMediaStagingService(
+            factory, StorageMustNotBeUsed(), 1, matching_concurrency=4
+        )
         result = resumed_service.rescan(job_id, "rescan-test-worker")
         assert result == {
             "total": 420,

@@ -11,6 +11,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import PurePath, PurePosixPath
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -164,8 +165,18 @@ class MatchResult:
     has_conflict: bool = False
 
 
+@lru_cache(maxsize=32_768)
 def _match_token(value: str | None) -> str:
     return _TOKEN.sub("", unicodedata.normalize("NFKC", value or "").upper())
+
+
+@lru_cache(maxsize=32_768)
+def _meaningful_match_tokens(value: str | None) -> frozenset[str]:
+    return frozenset(
+        part
+        for part in re.split(r"[^A-Z0-9]+", unicodedata.normalize("NFKC", value or "").upper())
+        if len(part) >= 4
+    )
 
 
 def match_presentation(
@@ -323,13 +334,7 @@ def match_presentation(
                 or (label == "Room" and room_location)
             ):
                 continue
-            meaningful = {
-                part
-                for part in re.split(
-                    r"[^A-Z0-9]+", unicodedata.normalize("NFKC", value or "").upper()
-                )
-                if len(part) >= 4
-            }
+            meaningful = _meaningful_match_tokens(value)
             hits = meaningful & path_tokens
             if hits:
                 score += min(points * len(hits), points * 2)

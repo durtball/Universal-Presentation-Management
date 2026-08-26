@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import re
 from collections import Counter
 from collections.abc import AsyncIterator
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -63,12 +65,29 @@ from upm_shared.presentation_media import (
     SUPPORTED_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
     MatchCandidate,
+    MatchResult,
     canonical_presentation_filename,
     match_presentation,
     normalize_source_relative_path,
 )
 
 logger = logging.getLogger(__name__)
+_PROCESS_MATCH_CANDIDATES: list[MatchCandidate] = []
+_PROCESS_MATCH_TIMEZONE = "UTC"
+
+
+def _initialize_rescan_matcher(
+    candidates: list[MatchCandidate], event_timezone: str
+) -> None:
+    global _PROCESS_MATCH_CANDIDATES, _PROCESS_MATCH_TIMEZONE
+    _PROCESS_MATCH_CANDIDATES = candidates
+    _PROCESS_MATCH_TIMEZONE = event_timezone
+
+
+def _match_rescan_process_item(source_path: str) -> MatchResult:
+    return match_presentation(
+        source_path, _PROCESS_MATCH_CANDIDATES, event_timezone=_PROCESS_MATCH_TIMEZONE
+    )
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
 INTAKE_PUBLISH_JOB = "presentation_media.intake.publish"
 INTAKE_REJECT_JOB = "presentation_media.intake.reject"
@@ -448,10 +467,14 @@ class CentralMediaStagingService:
         factory: sessionmaker[Session],
         storage: AsyncMediaStorageClient,
         max_upload_bytes: int,
+        matching_concurrency: int = 1,
     ) -> None:
         self.factory = factory
         self.storage = storage
         self.max_upload_bytes = max_upload_bytes
+        if not 1 <= matching_concurrency <= 16:
+            raise ValueError("matching concurrency must be between 1 and 16")
+        self.matching_concurrency = matching_concurrency
         self._candidate_cache: dict[UUID, tuple[int, list[MatchCandidate]]] = {}
         self._candidate_cache_lock = Lock()
 
@@ -851,6 +874,67 @@ class CentralMediaStagingService:
         """Refresh metadata-only suggestions without assigning or touching stored media."""
         self._automatic_match_and_assign(session, record)
 
+    @staticmethod
+    def _match_rescan_item(
+        source_path: str,
+        candidates: list[MatchCandidate],
+        event_timezone: str,
+    ) -> MatchResult:
+        return match_presentation(source_path, candidates, event_timezone=event_timezone)
+
+    def _match_rescan_batch(
+        self,
+        items: list[tuple[UUID, str]],
+        candidates: list[MatchCandidate],
+        event_timezone: str,
+        executor: Executor | None = None,
+    ) -> list[tuple[UUID, MatchResult | Exception]]:
+        """CPU-match a bounded snapshot without sharing ORM state across workers."""
+        if self.matching_concurrency == 1:
+            output = []
+            for media_import_id, source_path in items:
+                try:
+                    output.append(
+                        (
+                            media_import_id,
+                            self._match_rescan_item(source_path, candidates, event_timezone),
+                        )
+                    )
+                except Exception as exc:
+                    output.append((media_import_id, exc))
+            return output
+        owned_executor = (
+            ThreadPoolExecutor(
+                max_workers=self.matching_concurrency,
+                thread_name_prefix="central-media-rescan",
+            )
+            if executor is None
+            else None
+        )
+        active_executor = executor or owned_executor
+        try:
+            futures = [
+                (
+                    media_import_id,
+                    active_executor.submit(
+                        self._match_rescan_item, source_path, candidates, event_timezone
+                    )
+                    if owned_executor is not None
+                    else active_executor.submit(_match_rescan_process_item, source_path),
+                )
+                for media_import_id, source_path in items
+            ]
+            output = []
+            for media_import_id, future in futures:
+                try:
+                    output.append((media_import_id, future.result()))
+                except Exception as exc:
+                    output.append((media_import_id, exc))
+            return output
+        finally:
+            if owned_executor is not None:
+                owned_executor.shutdown()
+
     def rescan(
         self,
         processing_job_id: UUID,
@@ -859,13 +943,49 @@ class CentralMediaStagingService:
         lease_seconds: int = 60,
         batch_size: int = RESCAN_BATCH_SIZE,
     ) -> dict[str, int]:
-        """Resume a durable metadata-only event rescan, committing after bounded batches."""
+        """Run a resumable rescan with one bounded process pool for all CPU batches."""
+        if self.matching_concurrency == 1:
+            return self._rescan_batches(
+                processing_job_id,
+                worker_id,
+                lease_seconds=lease_seconds,
+                batch_size=batch_size,
+            )
+        # Spawn is safe even when independent Intake jobs are active in worker threads. Candidate
+        # metadata is serialized once per process and then reused for every bounded rescan batch.
+        executors: list[ProcessPoolExecutor] = []
+        try:
+            return self._rescan_batches(
+                processing_job_id,
+                worker_id,
+                lease_seconds=lease_seconds,
+                batch_size=batch_size,
+                executor_holder=executors,
+            )
+        finally:
+            for executor in executors:
+                executor.shutdown()
+
+    def _rescan_batches(
+        self,
+        processing_job_id: UUID,
+        worker_id: str,
+        *,
+        lease_seconds: int = 60,
+        batch_size: int = RESCAN_BATCH_SIZE,
+        executor_holder: list[ProcessPoolExecutor] | None = None,
+    ) -> dict[str, int]:
+        """Resume a durable metadata-only rescan with bounded parallel CPU matching."""
         batch_candidates: list[MatchCandidate] | None = None
+        unmaterialized_session_codes: dict[str, str] = {}
         batch_event_id: UUID | None = None
         batch_timezone = "UTC"
+        executor: Executor | None = None
         while True:
-            with self.factory.begin() as session:
-                job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
+            # Snapshot one bounded batch without row locks. Matching below is persistence-free and
+            # may run for a while; authoritative eligibility is checked again under lock on write.
+            with self.factory() as session:
+                job = session.get(ProcessingJob, processing_job_id)
                 if job is None or job.job_type != RESCAN_JOB:
                     raise MediaStagingError("media rescan job not found", "not_found")
                 if job.status is not JobStatus.RUNNING or job.claimed_by_worker_id != worker_id:
@@ -886,56 +1006,131 @@ class CentralMediaStagingService:
                         or "UTC"
                     )
                     batch_candidates = self._load_match_candidates(session, event_id)
+                    if executor_holder is not None:
+                        executor = ProcessPoolExecutor(
+                            max_workers=self.matching_concurrency,
+                            mp_context=multiprocessing.get_context("spawn"),
+                            initializer=_initialize_rescan_matcher,
+                            initargs=(batch_candidates, batch_timezone),
+                        )
+                        executor_holder.append(executor)
+                    unmaterialized_session_codes = {
+                        code.casefold(): code
+                        for code in session.scalars(
+                            select(ProgramSession.session_code).where(
+                                ProgramSession.event_id == event_id,
+                                ProgramSession.session_code.is_not(None),
+                                ~ProgramSession.session_id.in_(
+                                    select(Presentation.session_id).where(
+                                        Presentation.event_id == event_id,
+                                        Presentation.session_id.is_not(None),
+                                    )
+                                ),
+                            )
+                        )
+                    }
                     batch_event_id = event_id
-                records = {
-                    record.media_import_id: record
-                    for record in session.scalars(
-                        select(PresentationMediaImport)
-                        .where(
+                records = list(
+                    session.scalars(
+                        select(PresentationMediaImport).where(
                             PresentationMediaImport.media_import_id.in_(
                                 [UUID(str(value)) for value in current_ids]
                             )
                         )
+                    )
+                )
+                snapshots = [
+                    (
+                        record.media_import_id,
+                        record.source_relative_path or record.original_filename,
+                    )
+                    for record in records
+                    if record.event_id == event_id
+                    and record.presentation_id is None
+                    and record.match_state is not MediaMatchState.CONFIRMED
+                    and record.import_state is MediaImportState.NEEDS_REVIEW
+                ]
+
+            results = self._match_rescan_batch(
+                snapshots, batch_candidates, batch_timezone, executor
+            )
+
+            with self.factory.begin() as session:
+                job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
+                if (
+                    job is None
+                    or job.status is not JobStatus.RUNNING
+                    or job.claimed_by_worker_id != worker_id
+                ):
+                    raise MediaStagingError("media rescan lease is no longer owned", "lease_lost")
+                latest_data = dict(job.payload.get("data", {}))
+                if int(latest_data.get("processed", 0)) != processed:
+                    raise MediaStagingError(
+                        "media rescan progress changed concurrently", "lease_lost"
+                    )
+                result_ids = [media_import_id for media_import_id, _ in results]
+                writable = {
+                    record.media_import_id: record
+                    for record in session.scalars(
+                        select(PresentationMediaImport)
+                        .where(PresentationMediaImport.media_import_id.in_(result_ids))
                         .with_for_update()
                     )
                 }
                 counts = {
-                    "suggested": int(data.get("suggested", 0)),
-                    "unmatched": int(data.get("unmatched", 0)),
-                    "failed": int(data.get("failed", 0)),
+                    "suggested": int(latest_data.get("suggested", 0)),
+                    "unmatched": int(latest_data.get("unmatched", 0)),
+                    "failed": int(latest_data.get("failed", 0)),
                 }
-                for value in current_ids:
-                    try:
-                        record = records.get(UUID(str(value)))
-                        eligible = bool(
-                            record
-                            and record.event_id == event_id
-                            and record.presentation_id is None
-                            and record.match_state is not MediaMatchState.CONFIRMED
-                            and record.import_state is MediaImportState.NEEDS_REVIEW
-                        )
-                        if not eligible:
-                            continue
-                        self._automatic_match_and_assign(
-                            session,
-                            record,
-                            candidates=batch_candidates,
-                            event_timezone=batch_timezone,
-                        )
-                        if record.match_state is MediaMatchState.SUGGESTED:
-                            counts["suggested"] += 1
-                        else:
-                            counts["unmatched"] += 1
-                    except Exception:
-                        logger.exception(
+                for media_import_id, result in results:
+                    if isinstance(result, Exception):
+                        logger.error(
                             "presentation_media_rescan_item_failed",
-                            extra={"media_import_id": str(value)},
+                            extra={
+                                "media_import_id": str(media_import_id),
+                                "exception_type": type(result).__name__,
+                            },
                         )
                         counts["failed"] += 1
+                        continue
+                    record = writable.get(media_import_id)
+                    if not (
+                        record
+                        and record.event_id == event_id
+                        and record.presentation_id is None
+                        and record.match_state is not MediaMatchState.CONFIRMED
+                        and record.import_state is MediaImportState.NEEDS_REVIEW
+                    ):
+                        continue
+                    record.match_state = result.state
+                    record.match_reason = result.reason
+                    record.match_candidates = list(result.candidates)
+                    if result.state is MediaMatchState.UNMATCHED:
+                        session_code = next(
+                            (
+                                unmaterialized_session_codes[token.casefold()]
+                                for token in re.split(
+                                    r"[^A-Za-z0-9]+", Path(record.original_filename).stem
+                                )
+                                if token.casefold() in unmaterialized_session_codes
+                            ),
+                            None,
+                        )
+                        if session_code:
+                            record.match_reason = (
+                                f"Session {session_code} found, but no assignable Presentation "
+                                "record is materialized. Re-run matching to repair imported "
+                                "program data."
+                            )
+                    record.import_state = MediaImportState.NEEDS_REVIEW
+                    if record.match_state is MediaMatchState.SUGGESTED:
+                        counts["suggested"] += 1
+                    else:
+                        counts["unmatched"] += 1
                 processed += len(current_ids)
-                data.update(counts)
-                data["processed"] = processed
-                job.payload = {**job.payload, "data": data}
+                latest_data.update(counts)
+                latest_data["processed"] = processed
+                job.payload = {**job.payload, "data": latest_data}
                 job.progress = Decimal(processed * 100 / max(len(media_import_ids), 1)).quantize(
                     Decimal("0.01")
                 )

@@ -294,6 +294,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         factory,
         AsyncMediaStorageClient(settings.media_storage_url, settings.media_storage_token),
         settings.max_upload_bytes,
+        settings.presentation_media_concurrency,
     )
     storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
     media_pool = PresentationMediaJobPool(settings.presentation_media_concurrency)
