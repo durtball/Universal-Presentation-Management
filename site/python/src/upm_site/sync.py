@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -61,6 +62,7 @@ from upm_site.persistence.queue import SiteQueue
 # permanent identity without relying on exception handling after a uniqueness violation.
 SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
 DEFERRED_TRANSFER_CAPABILITY = "sync-dependencies"
+logger = logging.getLogger(__name__)
 
 
 def _manifest_is_satisfied(session: Session, manifest: MediaTransferManifest) -> bool:
@@ -234,17 +236,43 @@ def recover_media_transfer_manifests(session: Session, manifests: list[dict]) ->
     """Restore missing Site transfer intent from Central's authoritative manifest inventory."""
     site_id = _local_site_id(session)
     recovered = 0
+    received = satisfied = revived = runnable = invalid = 0
     for payload in manifests:
+        received += 1
         try:
             manifest = MediaTransferManifest.model_validate(payload)
             if manifest.destination_site_id != site_id:
                 continue
-            existed = session.get(TransferJob, manifest.transfer_session_id) is not None
-            persist_media_transfer_manifest(session, manifest, site_id)
+            before = session.get(TransferJob, manifest.transfer_session_id)
+            existed = before is not None
+            before_status = before.status if before is not None else None
+            transfer = persist_media_transfer_manifest(session, manifest, site_id)
         except (TypeError, ValueError):
+            invalid += 1
             continue
         else:
             recovered += int(not existed)
+            if transfer.status is JobStatus.SUCCEEDED:
+                satisfied += 1
+            elif existed and before_status in {
+                JobStatus.SUCCEEDED,
+                JobStatus.FAILED,
+                JobStatus.EXHAUSTED,
+                JobStatus.CANCELLED,
+            }:
+                revived += 1
+            else:
+                runnable += 1
+    logger.info(
+        "presentation_media_manifests_reconciled site_id=%s received=%d satisfied=%d "
+        "revived=%d runnable=%d invalid=%d",
+        site_id,
+        received,
+        satisfied,
+        revived,
+        runnable,
+        invalid,
+    )
     return recovered
 
 

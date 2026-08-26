@@ -490,7 +490,13 @@ def push_deployment(
     deployment.failure_at = None
     deployment.failure_reason = None
     _enqueue(session, deployment, event_type=event_type, payload=payload, revision=revision)
-    target_confirmed_event_media(session, deployment.event_id, deployment.site_id)
+    target_confirmed_event_media(
+        session,
+        deployment.event_id,
+        deployment.site_id,
+        deployment_id=deployment.deployment_id,
+        deployment_revision=revision,
+    )
     session.add(
         AuditRecord(
             actor_id="central-admin",

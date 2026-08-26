@@ -21,6 +21,7 @@ from upm_central.presentation_media import CentralMediaStagingService
 from upm_shared.enums import (
     EnrollmentState,
     EventDeploymentStatus,
+    JobStatus,
     MediaImportState,
     MediaMatchState,
 )
@@ -64,7 +65,7 @@ def _seed_event(session: Session, filename: str = "deployment-deck.pptx"):
         presentation_version_id=version_id,
         presentation_identifier=presentation.presentation_identifier,
         original_filename=filename,
-        canonical_filename=f"deployment-deck--v001{filename[filename.rfind('.'):]}",
+        canonical_filename=f"deployment-deck--v001{filename[filename.rfind('.') :]}",
         staging_key=f"staging/{import_id}",
         committed_storage_key=f"objects/sha256/aa/{'a' * 64}",
         size_bytes=12,
@@ -106,6 +107,8 @@ def test_media_confirmed_before_event_deployment_is_targeted_and_queued() -> Non
                 == 1
             )
 
+            transfer.status = JobStatus.SUCCEEDED
+            record.import_state = MediaImportState.SITE_READY
             push_deployment(session, deployment)
             session.flush()
             assert record.transfer_job_id == transfer_id
@@ -117,6 +120,25 @@ def test_media_confirmed_before_event_deployment_is_targeted_and_queued() -> Non
                 )
                 == 1
             )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OutboxEvent)
+                    .where(
+                        OutboxEvent.aggregate_id == transfer_id,
+                        OutboxEvent.event_type == "central.media_transfer.available",
+                    )
+                )
+                == 2
+            )
+            replay = session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.idempotency_key == f"media-transfer-desired:{transfer_id}:"
+                    f"{deployment.deployment_id}:{deployment.desired_revision}"
+                )
+            )
+            assert replay is not None
+            assert replay.payload["presentation_version_id"] == str(record.presentation_version_id)
     finally:
         transaction.rollback()
         connection.close()

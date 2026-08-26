@@ -436,7 +436,6 @@ def queue_central_to_site_transfer(
         or not record.presentation_version_id
     ):
         raise MediaStagingError("confirmed media has no Site destination", "missing_destination")
-    presentation = session.get(Presentation, record.presentation_id)
     payload = {
         "media_import_id": str(record.media_import_id),
         "presentation_id": str(record.presentation_id),
@@ -470,43 +469,13 @@ def queue_central_to_site_transfer(
     record.transfer_job_id = transfer.transfer_job_id
     record.import_state = MediaImportState.TRANSFER_QUEUED
     record.sync_state = SyncState.PENDING
-    manifest = MediaTransferManifest(
-        transfer_session_id=transfer.transfer_job_id,
-        origin_system=SourceSystem.CENTRAL,
-        destination_site_id=record.destination_site_id,
-        event_id=record.event_id,
-        presentation_id=record.presentation_id,
-        presentation_version_id=record.presentation_version_id,
-        presentation_version_number=session.get(
-            PresentationVersion, record.presentation_version_id
-        ).version_number,
-        presentation_identifier=presentation.presentation_identifier,
-        original_filename=record.original_filename,
-        canonical_filename=record.canonical_filename,
-        expected_size=record.size_bytes or 0,
-        sha256=record.sha256 or "",
-        media_type=record.mime_type,
-        created_at=record.created_at,
-        state=MediaTransferState.AVAILABLE,
-    )
+    manifest = _media_transfer_manifest(session, record, transfer)
     outbox_key = f"media-transfer-available:{transfer.transfer_job_id}"
     existing_event = session.scalar(
         select(OutboxEvent).where(OutboxEvent.idempotency_key == outbox_key)
     )
     if existing_event is None:
-        CentralQueue(session).enqueue_outbox(
-            event_type="central.media_transfer.available",
-            aggregate_type="media_transfer",
-            aggregate_id=transfer.transfer_job_id,
-            owning_site_id=record.destination_site_id,
-            source_sequence=next_sequence(session, record.destination_site_id),
-            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-            idempotency_key=outbox_key,
-            payload=OutboxPayload(
-                source_system=SourceSystem.CENTRAL,
-                data=manifest.model_dump(mode="json"),
-            ),
-        )
+        _publish_media_transfer_manifest(session, record, transfer, manifest, outbox_key)
     elif existing_event.status is JobStatus.PENDING:
         existing_event.payload = manifest.model_dump(mode="json")
     else:
@@ -516,29 +485,135 @@ def queue_central_to_site_transfer(
     return transfer
 
 
-def target_confirmed_event_media(session: Session, event_id: UUID, site_id: UUID) -> int:
-    """Target confirmed canonical event media and create any missing transfer manifests."""
+def _media_transfer_manifest(
+    session: Session, record: PresentationMediaImport, transfer: TransferJob
+) -> MediaTransferManifest:
+    presentation = session.get(Presentation, record.presentation_id)
+    version = session.get(PresentationVersion, record.presentation_version_id)
+    if presentation is None or version is None or version.presentation_id != record.presentation_id:
+        raise MediaStagingError("confirmed media identity is incomplete", "invalid_confirmation")
+    return MediaTransferManifest(
+        transfer_session_id=transfer.transfer_job_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=record.destination_site_id,
+        event_id=record.event_id,
+        presentation_id=record.presentation_id,
+        presentation_version_id=record.presentation_version_id,
+        presentation_version_number=version.version_number,
+        presentation_identifier=presentation.presentation_identifier,
+        original_filename=record.original_filename,
+        canonical_filename=record.canonical_filename,
+        expected_size=record.size_bytes or 0,
+        sha256=record.sha256 or "",
+        media_type=record.mime_type,
+        created_at=record.created_at,
+        state=MediaTransferState.AVAILABLE,
+    )
+
+
+def _publish_media_transfer_manifest(
+    session: Session,
+    record: PresentationMediaImport,
+    transfer: TransferJob,
+    manifest: MediaTransferManifest,
+    idempotency_key: str,
+) -> OutboxEvent:
+    return CentralQueue(session).enqueue_outbox(
+        event_type="central.media_transfer.available",
+        aggregate_type="media_transfer",
+        aggregate_id=transfer.transfer_job_id,
+        owning_site_id=record.destination_site_id,
+        source_sequence=next_sequence(session, record.destination_site_id),
+        protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+        idempotency_key=idempotency_key,
+        payload=OutboxPayload(
+            source_system=SourceSystem.CENTRAL,
+            data=manifest.model_dump(mode="json"),
+        ),
+    )
+
+
+def target_confirmed_event_media(
+    session: Session,
+    event_id: UUID,
+    site_id: UUID,
+    *,
+    deployment_id: UUID,
+    deployment_revision: int,
+) -> int:
+    """Publish the complete desired media state for one deployment generation."""
     records = session.scalars(
-        select(PresentationMediaImport).where(
+        select(PresentationMediaImport)
+        .where(
             PresentationMediaImport.event_id == event_id,
             PresentationMediaImport.match_state == MediaMatchState.CONFIRMED,
-            PresentationMediaImport.import_state.in_(
-                [MediaImportState.ASSIGNED, MediaImportState.TRANSFER_QUEUED]
+            PresentationMediaImport.import_state.notin_(
+                [MediaImportState.CANCELLED, MediaImportState.REJECTED]
             ),
-            PresentationMediaImport.transfer_job_id.is_(None),
             PresentationMediaImport.presentation_id.is_not(None),
             PresentationMediaImport.presentation_version_id.is_not(None),
             PresentationMediaImport.committed_storage_key.is_not(None),
+            PresentationMediaImport.sha256.is_not(None),
+            PresentationMediaImport.size_bytes.is_not(None),
         )
+        .order_by(PresentationMediaImport.media_import_id)
     ).all()
-    queued = 0
+    published = 0
+    skipped_no_media = 0
     for record in records:
         if record.destination_site_id not in (None, site_id):
             continue
         record.destination_site_id = site_id
-        queue_central_to_site_transfer(session, record)
-        queued += 1
-    return queued
+        if record.transfer_job_id is None:
+            queue_central_to_site_transfer(session, record)
+            published += 1
+            continue
+        transfer = session.get(TransferJob, record.transfer_job_id)
+        if transfer is None:
+            record.transfer_job_id = None
+            queue_central_to_site_transfer(session, record)
+            published += 1
+            continue
+        try:
+            manifest = _media_transfer_manifest(session, record, transfer)
+        except MediaStagingError:
+            skipped_no_media += 1
+            continue
+        generation_key = (
+            f"media-transfer-desired:{transfer.transfer_job_id}:"
+            f"{deployment_id}:{deployment_revision}"
+        )
+        existing = session.scalar(
+            select(OutboxEvent).where(OutboxEvent.idempotency_key == generation_key)
+        )
+        if existing is None:
+            _publish_media_transfer_manifest(session, record, transfer, manifest, generation_key)
+            published += 1
+    record_log(
+        session,
+        service="central.event_deployment",
+        event_type="event_media_redeployment_planned",
+        message="Planned desired presentation media manifests for event deployment.",
+        event_id=event_id,
+        site_id=site_id,
+        context={
+            "deployment_id": str(deployment_id),
+            "deployment_revision": deployment_revision,
+            "desired": len(records),
+            "manifests_published": published,
+            "skipped_no_media": skipped_no_media,
+        },
+    )
+    logging.getLogger(__name__).info(
+        "event_media_redeployment_planned event_id=%s site_id=%s desired=%d "
+        "manifests_published=%d skipped_no_media=%d",
+        event_id,
+        site_id,
+        len(records),
+        published,
+        skipped_no_media,
+    )
+    return published
 
 
 def _complete_batch_if_accounted(session: Session, batch_id: UUID | None) -> None:
