@@ -77,6 +77,37 @@ from upm_site.sync_transport import synchronize_once
 
 PULL_TRANSFER = "presentation_media.central_pull"
 PUSH_TRANSFER = "presentation_media.central_push"
+LOCAL_SMB_JOB_TYPES = {
+    SMB_SCAN_JOB,
+    SMB_INGEST_JOB,
+    SMB_RETIRE_JOB,
+    SMB_PRESENTATIONS_JOB,
+    "smb.user.revoke",
+}
+
+
+def disable_local_smb_jobs(session: Session) -> int:
+    """Terminalize queued Site-local SMB work without invoking any SMB boundary."""
+    jobs = session.scalars(
+        select(ProcessingJob).where(
+            ProcessingJob.job_type.in_(LOCAL_SMB_JOB_TYPES),
+            ProcessingJob.status.in_(
+                [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT, JobStatus.FAILED]
+            ),
+        )
+    ).all()
+    now = utc_now()
+    for job in jobs:
+        job.status = JobStatus.SUCCEEDED
+        job.progress = 100
+        job.completed_at = now
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.heartbeat_at = None
+        job.error_code = None
+        job.last_error = None
+        job.error_metadata = {"disabled_feature": "site_local_smb"}
+    return len(jobs)
 
 
 class TransferExecutors:
@@ -345,8 +376,12 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             site_id=site.site_id,
             retention_days=settings.operational_log_retention_days,
         )
-        enqueue_smb_reconciliation(session, site.site_id)
-        enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
+        if settings.smb_enabled:
+            enqueue_smb_reconciliation(session, site.site_id)
+            enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
+        else:
+            disabled_smb_jobs = disable_local_smb_jobs(session)
+            log("site_local_smb_disabled", terminalized_jobs=disabled_smb_jobs)
         enqueue_asset_reconciliation(session, site.site_id)
         recover_exhausted_finalizations(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
@@ -395,7 +430,14 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     completed = True
-                    if kind == "processing" and work.job_type == "operational_logs.prune":
+                    if (
+                        kind == "processing"
+                        and work.job_type in LOCAL_SMB_JOB_TYPES
+                        and not settings.smb_enabled
+                    ):
+                        work.error_metadata = {"disabled_feature": "site_local_smb"}
+                        log("site_local_smb_job_skipped", work_id=work_id, job_type=work.job_type)
+                    elif kind == "processing" and work.job_type == "operational_logs.prune":
                         prune_logs(session, settings.operational_log_retention_days)
                     elif kind == "processing" and work.job_type == ASSET_RECONCILIATION_JOB:
                         repaired = backfill_confirmed_original_assets(session, work.site_id)

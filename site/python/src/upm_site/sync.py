@@ -448,7 +448,9 @@ def envelope(event: OutboxEvent) -> SyncEventEnvelope:
     )
 
 
-def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAcknowledgement:
+def apply_central_event(
+    session: Session, event: SyncEventEnvelope, *, local_smb_enabled: bool = False
+) -> EventAcknowledgement:
     if event.protocol_version != UPM_SYNC_PROTOCOL_VERSION:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="incompatible_protocol"
@@ -493,7 +495,7 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         "central.event_deployment.updated",
     }:
         try:
-            apply_snapshot_event(session, event)
+            apply_snapshot_event(session, event, local_smb_enabled=local_smb_enabled)
         except PermissionError:
             return EventAcknowledgement(
                 event_id=event.event_id, accepted=False, error_code="invalid_authority"

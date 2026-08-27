@@ -169,7 +169,9 @@ def _site_id(session: Session) -> UUID:
     return identity.site_id
 
 
-def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dict[str, int]:
+def _upsert_snapshot(
+    session: Session, snapshot: EventDeploymentSnapshot, *, local_smb_enabled: bool = False
+) -> dict[str, int]:
     event = session.get(Event, snapshot.event_id)
     if event is None:
         event = Event(
@@ -199,13 +201,16 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             existing.active = False
             existing.web_access = False
             existing.smb_enabled = False
-            SiteQueue(session).enqueue_processing(
-                site_id=snapshot.site_id,
-                job_type="smb.user.revoke",
-                payload={"data": {"username": existing.username}},
-                idempotency_key=f"smb-user-revoke:{existing.user_id}:{snapshot.deployment_revision}",
-                required_capabilities=["cpu"],
-            )
+            if local_smb_enabled:
+                SiteQueue(session).enqueue_processing(
+                    site_id=snapshot.site_id,
+                    job_type="smb.user.revoke",
+                    payload={"data": {"username": existing.username}},
+                    idempotency_key=(
+                        f"smb-user-revoke:{existing.user_id}:{snapshot.deployment_revision}"
+                    ),
+                    required_capabilities=["cpu"],
+                )
     for item in snapshot.users:
         user = session.scalar(select(User).where(User.central_user_id == item.user_id))
         collision = session.scalar(
@@ -235,10 +240,10 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
             user.permissions = item.permissions
             user.active = item.enabled and collision is None
             user.web_access = item.web_access and collision is None
-            user.smb_enabled = item.smb_enabled and collision is None
+            user.smb_enabled = local_smb_enabled and item.smb_enabled and collision is None
             user.web_password_hash = item.password_verifier
             user.revision = item.central_revision
-            if not user.active or not user.smb_enabled:
+            if local_smb_enabled and (not user.active or not user.smb_enabled):
                 SiteQueue(session).enqueue_processing(
                     site_id=snapshot.site_id,
                     job_type="smb.user.revoke",
@@ -618,7 +623,9 @@ def _upsert_snapshot(session: Session, snapshot: EventDeploymentSnapshot) -> dic
     }
 
 
-def apply_snapshot_event(session: Session, event: SyncEventEnvelope) -> str:
+def apply_snapshot_event(
+    session: Session, event: SyncEventEnvelope, *, local_smb_enabled: bool = False
+) -> str:
     if event.payload_schema_version != EVENT_DEPLOYMENT_SCHEMA_VERSION:
         raise ValueError("unsupported deployment payload schema version")
     try:
@@ -640,7 +647,7 @@ def apply_snapshot_event(session: Session, event: SyncEventEnvelope) -> str:
         )
         _status_event(session, deployment, status_value, causation_id=event.event_id)
         return status_value
-    counts = _upsert_snapshot(session, snapshot)
+    counts = _upsert_snapshot(session, snapshot, local_smb_enabled=local_smb_enabled)
     session.flush()
     if deployment is None:
         deployment = EventDeploymentProjection(

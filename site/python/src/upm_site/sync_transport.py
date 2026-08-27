@@ -267,7 +267,10 @@ def pull_central_events(
     if not outbound.events:
         return
     with factory.begin() as session:
-        acknowledgements = [apply_central_event(session, event) for event in outbound.events]
+        acknowledgements = [
+            apply_central_event(session, event, local_smb_enabled=settings.smb_enabled)
+            for event in outbound.events
+        ]
         rejected = [ack for ack in acknowledgements if not ack.accepted]
         if rejected:
             raise DeliveryFailure(
