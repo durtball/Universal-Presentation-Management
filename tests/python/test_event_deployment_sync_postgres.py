@@ -838,6 +838,129 @@ def test_acknowledged_manifest_retains_intent_and_inventory_repairs_missing_job(
         assert local.confirmed_offset == 5
 
 
+def test_manifest_waits_for_snapshot_dependencies_before_becoming_runnable(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    event_id, presentation_id, version_id, transfer_id = [new_uuid7() for _ in range(4)]
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+    manifest = MediaTransferManifest(
+        transfer_session_id=transfer_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=site_id,
+        event_id=event_id,
+        presentation_id=presentation_id,
+        presentation_version_id=version_id,
+        presentation_version_number=1,
+        presentation_identifier="UPM-DEFERRED-1",
+        original_filename="deferred.pptx",
+        canonical_filename="UPM-DEFERRED-1_v01.pptx",
+        expected_size=12,
+        sha256="f" * 64,
+        created_at=datetime.now(UTC),
+    )
+
+    with site_factory.begin() as session:
+        assert recover_media_transfer_manifests(
+            session, [manifest.model_dump(mode="json")]
+        ) == 1
+    with site_factory() as session:
+        transfer = session.get(TransferJob, transfer_id)
+        assert transfer.status is JobStatus.PENDING
+        assert transfer.required_capabilities == ["sync-dependencies"]
+        assert session.get(MediaTransferSession, transfer_id) is None
+
+    with site_factory.begin() as session:
+        session.add(SiteEvent(event_id=event_id, site_id=site_id, name="Deferred event"))
+        session.flush()
+        session.add(
+            Presentation(
+                presentation_id=presentation_id,
+                event_id=event_id,
+                title="Deferred presentation",
+            )
+        )
+        session.flush()
+        session.add(
+            PresentationVersion(
+                presentation_version_id=version_id,
+                presentation_id=presentation_id,
+                version_number=1,
+            )
+        )
+        summary = reconcile_deferred_media_transfers(session)
+        assert summary["materialized"] == 1
+    with site_factory() as session:
+        transfer = session.get(TransferJob, transfer_id)
+        assert transfer.required_capabilities == ["transfer"]
+        assert session.get(MediaTransferSession, transfer_id) is not None
+        assert len(
+            session.scalars(
+                select(TransferJob).where(TransferJob.transfer_job_id == transfer_id)
+            ).all()
+        ) == 1
+
+
+def test_bulk_orphan_transfers_are_fenced_from_workers(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+        for index in range(501):
+            transfer_id = new_uuid7()
+            manifest = MediaTransferManifest(
+                transfer_session_id=transfer_id,
+                origin_system=SourceSystem.CENTRAL,
+                destination_site_id=site_id,
+                event_id=new_uuid7(),
+                presentation_id=new_uuid7(),
+                presentation_version_id=new_uuid7(),
+                presentation_version_number=1,
+                presentation_identifier=f"UPM-ORPHAN-{index}",
+                original_filename=f"orphan-{index}.pptx",
+                canonical_filename=f"UPM-ORPHAN-{index}_v01.pptx",
+                expected_size=12,
+                sha256=f"{index:064x}",
+                created_at=datetime.now(UTC),
+            )
+            session.add(
+                TransferJob(
+                    transfer_job_id=transfer_id,
+                    site_id=site_id,
+                    transfer_type="presentation_media.central_pull",
+                    payload=manifest.model_dump(mode="json"),
+                    status=JobStatus.PENDING,
+                    required_capabilities=["transfer"],
+                    idempotency_key=f"central-pull:{transfer_id}",
+                )
+            )
+        session.flush()
+        summary = reconcile_deferred_media_transfers(session)
+        assert summary["orphan_jobs_repaired"] == 501
+        assert summary["deferred"] == 501
+    with site_factory() as session:
+        jobs = session.scalars(
+            select(TransferJob).where(
+                TransferJob.transfer_type == "presentation_media.central_pull"
+            )
+        ).all()
+        assert len(jobs) == 501
+        assert all(job.required_capabilities == ["sync-dependencies"] for job in jobs)
+        assert session.scalars(select(MediaTransferSession)).all() == []
+
+
 def test_deployment_materializes_unmapped_rooms_and_preserves_site_overrides(
     deployment_databases: tuple[str, sessionmaker[Session]],
 ) -> None:

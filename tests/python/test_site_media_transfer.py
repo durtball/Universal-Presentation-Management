@@ -12,7 +12,7 @@ from upm_site.media.transfer import (
     recover_exhausted_finalizations,
 )
 from upm_site.persistence.models import MediaTransferSession, OutboxEvent
-from upm_site.worker import fail_central_pull
+from upm_site.worker import defer_orphaned_pull, fail_central_pull
 
 
 def test_partial_transfer_reference_is_opaque_and_durable() -> None:
@@ -183,6 +183,29 @@ def test_transient_pull_failure_remains_retryable_and_worker_handler_returns(mon
     assert transfer.retry_count == 1
     assert transfer.error_detail == "temporary DNS failure"
     assert emitted == [transfer]
+
+
+def test_orphaned_pull_is_deferred_without_burning_a_retry() -> None:
+    work = SimpleNamespace(
+        status=JobStatus.RUNNING,
+        required_capabilities=["transfer"],
+        claimed_by_worker_id="worker-1",
+        lease_expires_at=object(),
+        heartbeat_at=object(),
+        error_code=None,
+        last_error=None,
+        attempt_count=7,
+    )
+
+    defer_orphaned_pull(work)
+
+    assert work.status is JobStatus.PENDING
+    assert work.required_capabilities == ["sync-dependencies"]
+    assert work.claimed_by_worker_id is None
+    assert work.lease_expires_at is None
+    assert work.heartbeat_at is None
+    assert work.error_code == "sync_dependency_materialization_required"
+    assert work.attempt_count == 7
 
 
 def test_site_worker_has_same_central_endpoint_and_egress_networks_as_sync() -> None:

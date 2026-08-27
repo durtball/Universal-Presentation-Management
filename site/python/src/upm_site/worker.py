@@ -135,6 +135,10 @@ def execute_transfer_work(
         queue = SiteQueue(session)
         completed = True
         if work.transfer_type == PULL_TRANSFER:
+            if session.get(MediaTransferSession, work.transfer_job_id) is None:
+                defer_orphaned_pull(work)
+                log("media_pull_deferred_missing_session", work_id=transfer_job_id)
+                return
             try:
                 with httpx.Client(timeout=30.0) as client:
                     completed = execute_central_pull(session, factory, settings, work, client)
@@ -176,6 +180,17 @@ def execute_transfer_work(
             return
         queue.complete(work, worker_id)
         log("job_completed", worker_id=worker_id, job_kind="transfer", work_id=transfer_job_id)
+
+
+def defer_orphaned_pull(work: TransferJob) -> None:
+    """Fence an invalid pull intent from workers until sync can materialize dependencies."""
+    work.status = JobStatus.PENDING
+    work.required_capabilities = ["sync-dependencies"]
+    work.claimed_by_worker_id = None
+    work.lease_expires_at = None
+    work.heartbeat_at = None
+    work.error_code = "sync_dependency_materialization_required"
+    work.last_error = "transfer session is missing; returned to dependency reconciliation"
 
 
 def fill_transfer_slots(

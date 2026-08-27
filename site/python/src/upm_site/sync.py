@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import EVENT_DEPLOYMENT_SCHEMA_VERSION, SiteDeploymentStatus
@@ -114,22 +114,22 @@ def _materialize_media_transfer(
 
         local_session = session.get(MediaTransferSession, manifest.transfer_session_id)
         if local_session is None:
-            session.add(
-                MediaTransferSession(
-                    transfer_session_id=manifest.transfer_session_id,
-                    site_id=transfer.site_id,
-                    event_id=manifest.event_id,
-                    presentation_id=manifest.presentation_id,
-                    presentation_version_id=manifest.presentation_version_id,
-                    original_filename=manifest.original_filename,
-                    canonical_filename=manifest.canonical_filename,
-                    expected_size=manifest.expected_size,
-                    sha256=manifest.sha256,
-                    media_type=manifest.media_type,
-                    partial_key=f"transfers/{manifest.transfer_session_id}.partial",
-                    state=MediaTransferState.AVAILABLE,
-                )
+            local_session = MediaTransferSession(
+                transfer_session_id=manifest.transfer_session_id,
+                site_id=transfer.site_id,
+                event_id=manifest.event_id,
+                presentation_id=manifest.presentation_id,
+                presentation_version_id=manifest.presentation_version_id,
+                original_filename=manifest.original_filename,
+                canonical_filename=manifest.canonical_filename,
+                expected_size=manifest.expected_size,
+                sha256=manifest.sha256,
+                media_type=manifest.media_type,
+                partial_key=f"transfers/{manifest.transfer_session_id}.partial",
+                state=MediaTransferState.AVAILABLE,
             )
+            session.add(local_session)
+            session.flush([local_session])
         elif (
             local_session.expected_size != manifest.expected_size
             or local_session.sha256 != manifest.sha256
@@ -147,25 +147,107 @@ def _materialize_media_transfer(
             local_session.last_progress_at = None
             local_session.error_detail = None
             local_session.media_object_id = None
-        transfer.required_capabilities = ["transfer"]
         return True
 
 
-def reconcile_deferred_media_transfers(session: Session) -> None:
+def _defer_media_transfer(transfer: TransferJob) -> None:
+    transfer.required_capabilities = [DEFERRED_TRANSFER_CAPABILITY]
+
+
+def _activate_media_transfer(transfer: TransferJob) -> None:
+    transfer.required_capabilities = ["transfer"]
+    revived = False
+    if transfer.status in {
+        JobStatus.SUCCEEDED,
+        JobStatus.FAILED,
+        JobStatus.EXHAUSTED,
+        JobStatus.CANCELLED,
+    }:
+        transfer.status = JobStatus.PENDING
+        transfer.progress = 0
+        transfer.attempt_count = 0
+        transfer.next_attempt_at = utc_now()
+        transfer.completed_at = None
+        revived = True
+    if revived:
+        transfer.claimed_by_worker_id = None
+        transfer.lease_expires_at = None
+        transfer.heartbeat_at = None
+    transfer.error_code = None
+    transfer.last_error = None
+
+
+def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
+    orphan = ~select(MediaTransferSession.transfer_session_id).where(
+        MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id
+    ).exists()
     transfers = session.scalars(
         select(TransferJob).where(
             TransferJob.transfer_type == "presentation_media.central_pull",
-            TransferJob.required_capabilities == [DEFERRED_TRANSFER_CAPABILITY],
+            or_(
+                TransferJob.required_capabilities == [DEFERRED_TRANSFER_CAPABILITY],
+                (TransferJob.required_capabilities == ["transfer"]) & orphan,
+            ),
         )
     ).all()
+    already_valid = session.scalar(
+        select(func.count())
+        .select_from(TransferJob)
+        .where(
+            TransferJob.transfer_type == "presentation_media.central_pull",
+            TransferJob.required_capabilities == ["transfer"],
+            ~orphan,
+        )
+    ) or 0
+    summary = {
+        "total": len(transfers) + already_valid,
+        "materialized": 0,
+        "deferred": 0,
+        "orphan_jobs_repaired": 0,
+        "already_valid": already_valid,
+        "invalid": 0,
+    }
     for transfer in transfers:
+        was_orphan = transfer.required_capabilities == ["transfer"]
+        _defer_media_transfer(transfer)
+        if was_orphan:
+            summary["orphan_jobs_repaired"] += 1
+            if transfer.status is JobStatus.RUNNING:
+                transfer.status = JobStatus.PENDING
+                transfer.next_attempt_at = utc_now()
+            transfer.claimed_by_worker_id = None
+            transfer.lease_expires_at = None
+            transfer.heartbeat_at = None
         try:
             manifest = MediaTransferManifest.model_validate(transfer.payload)
-            _materialize_media_transfer(session, transfer, manifest)
-        except (TypeError, ValueError):
-            # A malformed/conflicting deferred manifest remains unclaimable without preventing
-            # later ordered sync events from applying.
+            materialized = _materialize_media_transfer(session, transfer, manifest)
+        except (TypeError, ValueError) as error:
+            transfer.error_code = "sync_dependency_materialization_failed"
+            transfer.last_error = str(error)[:2048]
+            summary["invalid"] += 1
             continue
+        if not materialized:
+            summary["deferred"] += 1
+            continue
+        if session.get(MediaTransferSession, transfer.transfer_job_id) is None:
+            transfer.error_code = "sync_dependency_materialization_failed"
+            transfer.last_error = "materialization completed without a transfer session"
+            summary["invalid"] += 1
+            continue
+        _activate_media_transfer(transfer)
+        summary["materialized"] += 1
+    logger.info(
+        "presentation_media_transfer_dependencies_reconciled "
+        "total=%d materialized=%d deferred=%d orphan_jobs_repaired=%d "
+        "already_valid=%d invalid=%d",
+        summary["total"],
+        summary["materialized"],
+        summary["deferred"],
+        summary["orphan_jobs_repaired"],
+        summary["already_valid"],
+        summary["invalid"],
+    )
+    return summary
 
 
 def persist_media_transfer_manifest(
@@ -195,22 +277,7 @@ def persist_media_transfer_manifest(
             transfer.error_code = None
             transfer.last_error = None
             return transfer
-        if transfer.status in {
-            JobStatus.SUCCEEDED,
-            JobStatus.FAILED,
-            JobStatus.EXHAUSTED,
-            JobStatus.CANCELLED,
-        }:
-            transfer.status = JobStatus.PENDING
-            transfer.progress = 0
-            transfer.attempt_count = 0
-            transfer.next_attempt_at = utc_now()
-            transfer.claimed_by_worker_id = None
-            transfer.lease_expires_at = None
-            transfer.heartbeat_at = None
-            transfer.error_code = None
-            transfer.last_error = None
-            transfer.completed_at = None
+        _defer_media_transfer(transfer)
     else:
         transfer = TransferJob(
             transfer_job_id=manifest.transfer_session_id,
@@ -224,9 +291,13 @@ def persist_media_transfer_manifest(
         session.flush([transfer])
     try:
         with session.begin_nested():
-            _materialize_media_transfer(session, transfer, manifest)
+            materialized = _materialize_media_transfer(session, transfer, manifest)
+        if materialized and session.get(MediaTransferSession, transfer.transfer_job_id) is not None:
+            _activate_media_transfer(transfer)
+        else:
+            _defer_media_transfer(transfer)
     except Exception as error:
-        transfer.required_capabilities = [DEFERRED_TRANSFER_CAPABILITY]
+        _defer_media_transfer(transfer)
         transfer.error_code = "sync_dependency_materialization_failed"
         transfer.last_error = str(error)[:2048]
     return transfer
