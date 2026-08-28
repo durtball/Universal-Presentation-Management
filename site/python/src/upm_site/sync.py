@@ -178,10 +178,93 @@ def _activate_media_transfer(transfer: TransferJob) -> None:
     transfer.last_error = None
 
 
+def _supersede_transfer_intent(
+    transfer: TransferJob, transfer_session: MediaTransferSession | None, *, desired_id: UUID
+) -> None:
+    """Terminalize one historical original-media intent without deleting its audit row."""
+    transfer.status = JobStatus.CANCELLED
+    transfer.required_capabilities = []
+    transfer.claimed_by_worker_id = None
+    transfer.lease_expires_at = None
+    transfer.heartbeat_at = None
+    transfer.completed_at = utc_now()
+    transfer.error_code = "superseded_original"
+    transfer.last_error = f"Superseded by desired transfer {desired_id}."
+    if transfer_session is not None:
+        transfer_session.state = MediaTransferState.CANCELLED
+        transfer_session.error_detail = f"Superseded by desired transfer {desired_id}."
+        transfer_session.last_progress_at = utc_now()
+
+
+def _supersede_other_original_intents(session: Session, manifest: MediaTransferManifest) -> int:
+    """Enforce one current Central ORIGINAL transfer per presentation version."""
+    older_sessions = session.scalars(
+        select(MediaTransferSession)
+        .where(
+            MediaTransferSession.presentation_version_id == manifest.presentation_version_id,
+            MediaTransferSession.transfer_session_id != manifest.transfer_session_id,
+            MediaTransferSession.state != MediaTransferState.CANCELLED,
+        )
+        .with_for_update()
+    ).all()
+    superseded = 0
+    for older in older_sessions:
+        job = session.get(TransferJob, older.transfer_session_id, with_for_update=True)
+        if job is None:
+            older.state = MediaTransferState.CANCELLED
+            older.error_detail = f"Superseded by desired transfer {manifest.transfer_session_id}."
+            older.last_progress_at = utc_now()
+        else:
+            _supersede_transfer_intent(job, older, desired_id=manifest.transfer_session_id)
+        superseded += 1
+    if superseded:
+        session.flush()
+    return superseded
+
+
+def reconcile_conflicting_original_transfers(session: Session) -> dict[str, int]:
+    """Repair historical duplicate active sessions before workers can claim them."""
+    sessions = session.scalars(
+        select(MediaTransferSession).order_by(
+            MediaTransferSession.presentation_version_id,
+            MediaTransferSession.created_at.desc(),
+            MediaTransferSession.transfer_session_id.desc(),
+        )
+    ).all()
+    by_version: dict[UUID, list[MediaTransferSession]] = {}
+    for item in sessions:
+        if item.state in {
+            MediaTransferState.CANCELLED,
+            MediaTransferState.EXPIRED,
+            MediaTransferState.FAILED,
+        }:
+            continue
+        by_version.setdefault(item.presentation_version_id, []).append(item)
+    superseded = 0
+    conflicts = 0
+    for version_sessions in by_version.values():
+        if len(version_sessions) < 2:
+            continue
+        conflicts += 1
+        winner = version_sessions[0]
+        for stale in version_sessions[1:]:
+            job = session.get(TransferJob, stale.transfer_session_id, with_for_update=True)
+            if job is None:
+                stale.state = MediaTransferState.CANCELLED
+                stale.error_detail = f"Superseded by desired transfer {winner.transfer_session_id}."
+            else:
+                _supersede_transfer_intent(job, stale, desired_id=winner.transfer_session_id)
+            superseded += 1
+    return {"conflicting_versions": conflicts, "superseded": superseded}
+
+
 def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
-    orphan = ~select(MediaTransferSession.transfer_session_id).where(
-        MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id
-    ).exists()
+    conflict_summary = reconcile_conflicting_original_transfers(session)
+    orphan = (
+        ~select(MediaTransferSession.transfer_session_id)
+        .where(MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id)
+        .exists()
+    )
     transfers = session.scalars(
         select(TransferJob).where(
             TransferJob.transfer_type == "presentation_media.central_pull",
@@ -191,15 +274,18 @@ def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
             ),
         )
     ).all()
-    already_valid = session.scalar(
-        select(func.count())
-        .select_from(TransferJob)
-        .where(
-            TransferJob.transfer_type == "presentation_media.central_pull",
-            TransferJob.required_capabilities == ["transfer"],
-            ~orphan,
+    already_valid = (
+        session.scalar(
+            select(func.count())
+            .select_from(TransferJob)
+            .where(
+                TransferJob.transfer_type == "presentation_media.central_pull",
+                TransferJob.required_capabilities == ["transfer"],
+                ~orphan,
+            )
         )
-    ) or 0
+        or 0
+    )
     summary = {
         "total": len(transfers) + already_valid,
         "materialized": 0,
@@ -207,6 +293,7 @@ def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
         "orphan_jobs_repaired": 0,
         "already_valid": already_valid,
         "invalid": 0,
+        **conflict_summary,
     }
     for transfer in transfers:
         was_orphan = transfer.required_capabilities == ["transfer"]
@@ -240,13 +327,15 @@ def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
     logger.info(
         "presentation_media_transfer_dependencies_reconciled "
         "total=%d materialized=%d deferred=%d orphan_jobs_repaired=%d "
-        "already_valid=%d invalid=%d",
+        "already_valid=%d invalid=%d conflicting_versions=%d superseded=%d",
         summary["total"],
         summary["materialized"],
         summary["deferred"],
         summary["orphan_jobs_repaired"],
         summary["already_valid"],
         summary["invalid"],
+        summary["conflicting_versions"],
+        summary["superseded"],
     )
     return summary
 
@@ -256,6 +345,7 @@ def persist_media_transfer_manifest(
 ) -> TransferJob:
     """Durably retain a valid manifest before attempting dependency materialization."""
     payload = manifest.model_dump(mode="json")
+    _supersede_other_original_intents(session, manifest)
     transfer = session.get(TransferJob, manifest.transfer_session_id)
     if transfer is not None:
         if transfer.payload != payload:
@@ -309,12 +399,24 @@ def recover_media_transfer_manifests(session: Session, manifests: list[dict]) ->
     site_id = _local_site_id(session)
     recovered = 0
     received = satisfied = revived = runnable = invalid = 0
+    desired_by_version: dict[UUID, MediaTransferManifest] = {}
     for payload in manifests:
         received += 1
         try:
             manifest = MediaTransferManifest.model_validate(payload)
             if manifest.destination_site_id != site_id:
                 continue
+        except (TypeError, ValueError):
+            invalid += 1
+            continue
+        previous = desired_by_version.get(manifest.presentation_version_id)
+        if previous is None or (manifest.created_at, str(manifest.transfer_session_id)) > (
+            previous.created_at,
+            str(previous.transfer_session_id),
+        ):
+            desired_by_version[manifest.presentation_version_id] = manifest
+    for manifest in desired_by_version.values():
+        try:
             before = session.get(TransferJob, manifest.transfer_session_id)
             existed = before is not None
             before_status = before.status if before is not None else None

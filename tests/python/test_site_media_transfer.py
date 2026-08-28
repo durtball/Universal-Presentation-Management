@@ -6,6 +6,7 @@ import httpx
 
 from upm_shared.enums import JobStatus, MediaTransferState, SourceSystem
 from upm_site.config import SiteSettings
+from upm_site.media.ingestion import IngestionConflictError
 from upm_site.media.transfer import (
     enqueue_transfer_progress,
     execute_central_pull,
@@ -183,6 +184,39 @@ def test_transient_pull_failure_remains_retryable_and_worker_handler_returns(mon
     assert transfer.retry_count == 1
     assert transfer.error_detail == "temporary DNS failure"
     assert emitted == [transfer]
+
+
+def test_original_asset_identity_conflict_is_not_retried(monkeypatch) -> None:
+    transfer = transfer_session()
+    work = SimpleNamespace(
+        transfer_job_id=transfer.transfer_session_id,
+        status=JobStatus.RUNNING,
+    )
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return transfer
+
+    class Queue:
+        def fail(self, job, _worker_id, **values):
+            assert values["retryable"] is False
+            assert values["error_code"] == "media_pull_identity_conflict"
+            job.status = JobStatus.FAILED
+
+    monkeypatch.setattr("upm_site.worker.enqueue_transfer_progress", lambda *_args: None)
+    fail_central_pull(
+        Session(),
+        Queue(),
+        work,
+        "worker-1",
+        IngestionConflictError("canonical asset identity is corrupt"),
+        SiteSettings(
+            database_url="postgresql+psycopg://u:p@db/site",
+            credential_encryption_key="x" * 32,
+        ),
+    )
+    assert work.status is JobStatus.FAILED
+    assert transfer.state is MediaTransferState.FAILED
 
 
 def test_orphaned_pull_is_deferred_without_burning_a_retry() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Lock
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -426,6 +426,36 @@ def backfill_confirmed_original_assets(session: Session) -> int:
     return repaired
 
 
+def _supersede_central_transfer(
+    session: Session, transfer: TransferJob, *, desired_media_import_id: UUID
+) -> None:
+    transfer.status = JobStatus.CANCELLED
+    transfer.required_capabilities = []
+    transfer.claimed_by_worker_id = None
+    transfer.lease_expires_at = None
+    transfer.heartbeat_at = None
+    transfer.completed_at = utc_now()
+    transfer.error_code = "superseded_original"
+    transfer.last_error = f"Superseded by desired media {desired_media_import_id}."
+    session.execute(
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.aggregate_id == transfer.transfer_job_id,
+            OutboxEvent.event_type == "central.media_transfer.available",
+            OutboxEvent.status.in_([JobStatus.PENDING, JobStatus.RETRY_WAIT]),
+        )
+        .values(
+            status=JobStatus.CANCELLED,
+            claimed_by_worker_id=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            processed_at=utc_now(),
+            error_code="superseded_original",
+            last_error=f"Superseded by desired media {desired_media_import_id}.",
+        )
+    )
+
+
 def queue_central_to_site_transfer(
     session: Session, record: PresentationMediaImport
 ) -> TransferJob:
@@ -436,6 +466,40 @@ def queue_central_to_site_transfer(
         or not record.presentation_version_id
     ):
         raise MediaStagingError("confirmed media has no Site destination", "missing_destination")
+    canonical_original_id = session.scalar(
+        select(PresentationAsset.media_object_id).where(
+            PresentationAsset.presentation_version_id == record.presentation_version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
+    )
+    if canonical_original_id is not None and canonical_original_id != record.media_import_id:
+        desired = session.get(PresentationMediaImport, canonical_original_id)
+        if desired is None:
+            raise MediaStagingError(
+                "canonical original media import is missing", "invalid_confirmation"
+            )
+        desired.destination_site_id = record.destination_site_id
+        if desired.transfer_job_id is None:
+            return queue_central_to_site_transfer(session, desired)
+        transfer = session.get(TransferJob, desired.transfer_job_id)
+        if transfer is None:
+            desired.transfer_job_id = None
+            return queue_central_to_site_transfer(session, desired)
+        return transfer
+    conflicting = session.scalars(
+        select(PresentationMediaImport).where(
+            PresentationMediaImport.presentation_version_id == record.presentation_version_id,
+            PresentationMediaImport.media_import_id != record.media_import_id,
+            PresentationMediaImport.transfer_job_id.is_not(None),
+        )
+    ).all()
+    for previous in conflicting:
+        previous_transfer = session.get(TransferJob, previous.transfer_job_id)
+        if previous_transfer is None or previous_transfer.status is JobStatus.CANCELLED:
+            continue
+        _supersede_central_transfer(
+            session, previous_transfer, desired_media_import_id=record.media_import_id
+        )
     payload = {
         "media_import_id": str(record.media_import_id),
         "presentation_id": str(record.presentation_id),
@@ -542,7 +606,7 @@ def target_confirmed_event_media(
     deployment_revision: int,
 ) -> int:
     """Publish the complete desired media state for one deployment generation."""
-    records = session.scalars(
+    eligible_records = session.scalars(
         select(PresentationMediaImport)
         .where(
             PresentationMediaImport.event_id == event_id,
@@ -558,6 +622,52 @@ def target_confirmed_event_media(
         )
         .order_by(PresentationMediaImport.media_import_id)
     ).all()
+    assets_by_media_id = {
+        asset.media_object_id: asset
+        for asset in session.scalars(
+            select(PresentationAsset).where(
+                PresentationAsset.presentation_version_id.in_(
+                    {record.presentation_version_id for record in eligible_records}
+                )
+            )
+        )
+    }
+    records_by_version: dict[UUID, list[PresentationMediaImport]] = defaultdict(list)
+    for record in eligible_records:
+        records_by_version[record.presentation_version_id].append(record)
+    records: list[PresentationMediaImport] = []
+    for version_records in records_by_version.values():
+        canonical = [
+            record for record in version_records if record.media_import_id in assets_by_media_id
+        ]
+        original = [
+            record
+            for record in canonical
+            if assets_by_media_id[record.media_import_id].kind is AssetKind.ORIGINAL
+        ]
+        records.append(
+            max(
+                original or canonical or version_records,
+                key=lambda record: (
+                    record.confirmed_at or record.created_at,
+                    record.created_at,
+                    str(record.media_import_id),
+                ),
+            )
+        )
+    records.sort(key=lambda record: str(record.presentation_version_id))
+    desired_by_version = {record.presentation_version_id: record for record in records}
+    for stale in eligible_records:
+        desired = desired_by_version.get(stale.presentation_version_id)
+        if desired is None or stale is desired or stale.transfer_job_id is None:
+            continue
+        stale_transfer = session.get(TransferJob, stale.transfer_job_id)
+        if stale_transfer is not None and stale_transfer.status is not JobStatus.CANCELLED:
+            _supersede_central_transfer(
+                session,
+                stale_transfer,
+                desired_media_import_id=desired.media_import_id,
+            )
     published = 0
     skipped_no_media = 0
     for record in records:

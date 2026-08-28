@@ -21,7 +21,7 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 from upm_shared.smb import SmbControlClient
 from upm_site.config import SiteSettings
-from upm_site.media.ingestion import MediaIngestionService
+from upm_site.media.ingestion import IngestionConflictError, MediaIngestionService
 from upm_site.media.replication import execute_central_push
 from upm_site.media.transfer import (
     cleanup_transfer_partials,
@@ -261,13 +261,14 @@ def fail_central_pull(
     error: Exception,
     settings: SiteSettings,
 ) -> None:
-    """Persist a retryable pull failure without allowing progress replay to escape."""
+    """Persist pull failure, terminalizing impossible canonical identity conflicts."""
+    retryable = not isinstance(error, IngestionConflictError)
     queue.fail(
         work,
         worker_id,
-        error_code="media_pull_failed",
+        error_code=("media_pull_failed" if retryable else "media_pull_identity_conflict"),
         message=str(error),
-        retryable=True,
+        retryable=retryable,
         base_delay_seconds=settings.worker_retry_base_seconds,
     )
     transfer = session.get(MediaTransferSession, work.transfer_job_id)

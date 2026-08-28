@@ -791,7 +791,12 @@ class MediaIngestionService:
                 session.add(asset)
             else:
                 linked = session.get(MediaObject, asset.media_object_id, with_for_update=True)
-                if linked is not None and linked.availability is MediaAvailability.AVAILABLE:
+                authoritative_transfer = (request.idempotency_key or "").startswith("transfer:")
+                if (
+                    linked is not None
+                    and linked.availability is MediaAvailability.AVAILABLE
+                    and not authoritative_transfer
+                ):
                     raise IngestionConflictError(
                         "presentation version already has a different original asset"
                     )
