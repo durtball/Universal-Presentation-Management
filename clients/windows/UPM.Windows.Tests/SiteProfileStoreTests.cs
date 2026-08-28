@@ -36,14 +36,16 @@ public sealed class SiteProfileStoreTests
       Assert.Equal(profile, loaded);
       Assert.Equal(profile, Assert.Single(listed));
 
-      await using var database = new SqliteConnection($"Data Source={databasePath}");
-      await database.OpenAsync();
-      var schema = database.CreateCommand();
-      schema.CommandText = "SELECT sql FROM sqlite_master WHERE name='site_profiles'";
-      var definition = Assert.IsType<string>(await schema.ExecuteScalarAsync());
-      Assert.DoesNotContain("password", definition, StringComparison.OrdinalIgnoreCase);
-      Assert.DoesNotContain("session", definition, StringComparison.OrdinalIgnoreCase);
-      Assert.DoesNotContain("csrf", definition, StringComparison.OrdinalIgnoreCase);
+      await using (var database = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+      {
+        await database.OpenAsync();
+        await using var schema = database.CreateCommand();
+        schema.CommandText = "SELECT sql FROM sqlite_master WHERE name='site_profiles'";
+        var definition = Assert.IsType<string>(await schema.ExecuteScalarAsync());
+        Assert.DoesNotContain("password", definition, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("session", definition, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("csrf", definition, StringComparison.OrdinalIgnoreCase);
+      }
 
       await store.DeleteSiteProfileAsync(profile.ProfileId);
       Assert.Null(await store.GetSiteProfileAsync(profile.ProfileId));

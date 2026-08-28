@@ -341,6 +341,52 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public Task<JsonElement[]> GetDevicesAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement[]>("api/v1/devices", cancellationToken);
 
+  public Task<JsonElement> GetDeviceRuntimeAsync(Guid deviceId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/devices/{deviceId}/runtime", cancellationToken);
+
+  public Task<JsonElement[]> GetRoomsAsync(CancellationToken cancellationToken) =>
+      GetAsync<JsonElement[]>("api/v1/rooms", cancellationToken);
+
+  public Task<JsonElement> GetRoomAsync(Guid roomId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/rooms/{roomId}", cancellationToken);
+
+  public Task<JsonElement> GetEventProgramAsync(Guid eventId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/events/{eventId}/program", cancellationToken);
+
+  public async Task<IReadOnlyList<JsonElement>> GetPresentationOperationsAsync(
+      Guid eventId,
+      string? search,
+      CancellationToken cancellationToken)
+  {
+    const int pageSize = 100;
+    var result = new List<JsonElement>();
+    for (var offset = 0; ; offset += pageSize)
+    {
+      var searchQuery = string.IsNullOrWhiteSpace(search)
+          ? string.Empty
+          : $"&search={Uri.EscapeDataString(search.Trim())}";
+      var page = await GetAsync<JsonElement>(
+          $"api/v1/events/{eventId}/presentations/operations?limit={pageSize}&offset={offset}{searchQuery}",
+          cancellationToken);
+      result.AddRange(page.Items());
+      if (result.Count >= page.Number("total") || page.Items().Count < pageSize)
+      {
+        return result;
+      }
+    }
+  }
+
+  public Task<JsonElement> GetOperationalLogsAsync(
+      Guid? eventId,
+      CancellationToken cancellationToken)
+  {
+    var eventQuery = eventId.HasValue ? $"&event_id={eventId.Value}" : string.Empty;
+    return GetAsync<JsonElement>($"api/v1/logs?minutes=1440&limit=250{eventQuery}", cancellationToken);
+  }
+
+  public Task<JsonElement> GetReviewSessionsAsync(CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>("api/v1/review-sessions?limit=200", cancellationToken);
+
   public Task<JsonElement> GetOperationsDashboardAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/operations/dashboard", cancellationToken);
 

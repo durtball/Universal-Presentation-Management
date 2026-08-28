@@ -29,14 +29,19 @@ public sealed partial class MainWindow : Window
 
   private readonly LocalStateStore store;
   private readonly ISiteConnectionManager connections;
+  private readonly IOperatorContext operatorContext;
   private readonly ObservableCollection<SiteProfile> profiles = [];
   private readonly ObservableCollection<EventDeployment> events = [];
   private bool updatingSelectors;
 
-  public MainWindow(LocalStateStore store, ISiteConnectionManager connections)
+  public MainWindow(
+      LocalStateStore store,
+      ISiteConnectionManager connections,
+      IOperatorContext operatorContext)
   {
     this.store = store;
     this.connections = connections;
+    this.operatorContext = operatorContext;
     InitializeComponent();
     SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
     AppWindow.Resize(new SizeInt32(1280, 800));
@@ -115,6 +120,7 @@ public sealed partial class MainWindow : Window
 
     var eventId = (EventSelector.SelectedItem as EventDeployment)?.EventId;
     await connections.SelectEventAsync(profile.ProfileId, eventId, CancellationToken.None);
+    operatorContext.SelectEvent(eventId);
   }
 
   private async Task RestoreOrPromptAsync(SiteProfile profile, bool prompt)
@@ -245,15 +251,42 @@ public sealed partial class MainWindow : Window
 
       EventSelector.IsEnabled = true;
       EventSelector.PlaceholderText = events.Count == 0 ? "No deployed events" : "Select event";
-      EventSelector.SelectedItem = events.FirstOrDefault(
+      var selectedEvent = events.FirstOrDefault(
           item => item.EventId == status.Profile?.LastSelectedEventId);
+      if (selectedEvent is null && events.Count == 1)
+      {
+        selectedEvent = events[0];
+      }
+
+      EventSelector.SelectedItem = selectedEvent;
+      operatorContext.SelectEvent(selectedEvent?.EventId);
+      if (selectedEvent is not null && selectedEvent.EventId != status.Profile?.LastSelectedEventId)
+      {
+        _ = PersistAutomaticEventSelectionAsync(status.ProfileId, selectedEvent.EventId);
+      }
     }
     else
     {
+      operatorContext.SelectEvent(null);
       EventSelector.IsEnabled = false;
       EventSelector.PlaceholderText = "Connect to select event";
     }
 
     updatingSelectors = false;
+  }
+
+  private async Task PersistAutomaticEventSelectionAsync(Guid profileId, Guid eventId)
+  {
+    try
+    {
+      await connections.SelectEventAsync(profileId, eventId, CancellationToken.None);
+    }
+    catch (Exception exception)
+    {
+      ConnectionInfoBar.Title = "EVENT SELECTION ERROR";
+      ConnectionInfoBar.Message = exception.Message;
+      ConnectionInfoBar.Severity = InfoBarSeverity.Error;
+      ConnectionInfoBar.IsOpen = true;
+    }
   }
 }

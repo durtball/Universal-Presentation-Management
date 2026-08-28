@@ -17,6 +17,10 @@ public sealed class LocalStateStore
   {
     DataSource = DatabasePath,
     Mode = SqliteOpenMode.ReadWriteCreate,
+    // The desktop store is long lived, but individual operations deliberately are not.
+    // Disabling provider pooling guarantees completed operations release the database
+    // file immediately (notably when tests or profile removal delete local state).
+    Pooling = false,
   }.ToString();
 
   public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -251,6 +255,22 @@ public sealed class LocalStateStore
     await command.ExecuteNonQueryAsync(cancellationToken);
   }
 
+  public async Task<IReadOnlyList<TransferItem>> ListTransfersAsync(
+      CancellationToken cancellationToken = default)
+  {
+    await using var database = await OpenAsync(cancellationToken);
+    await using var command = database.CreateCommand();
+    command.CommandText = "SELECT * FROM transfer_queue ORDER BY rowid DESC";
+    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+    var result = new List<TransferItem>();
+    while (await reader.ReadAsync(cancellationToken))
+    {
+      result.Add(ReadTransfer(reader));
+    }
+
+    return result;
+  }
+
   public async IAsyncEnumerable<TransferItem> LoadPendingAsync(
       [EnumeratorCancellation] CancellationToken cancellationToken = default)
   {
@@ -262,23 +282,7 @@ public sealed class LocalStateStore
     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
     while (await reader.ReadAsync(cancellationToken))
     {
-      yield return new TransferItem(
-          Guid.Parse(reader.GetString(0)),
-          Guid.Parse(reader.GetString(1)),
-          ReadGuid(reader, 2),
-          reader.GetString(3),
-          reader.GetString(4),
-          reader.GetString(5),
-          ReadString(reader, 6),
-          reader.GetInt64(7),
-          ParseDate(reader.GetString(8)),
-          reader.GetString(9),
-          (TransferState)reader.GetInt32(10),
-          reader.GetInt64(11),
-          ReadString(reader, 12),
-          reader.GetInt32(13),
-          ReadDate(reader, 14),
-          ReadString(reader, 15));
+      yield return ReadTransfer(reader);
     }
   }
 
@@ -301,6 +305,24 @@ public sealed class LocalStateStore
       ParseDate(reader.GetString(8)),
       ReadDate(reader, 9),
       ReadGuid(reader, 10));
+
+  private static TransferItem ReadTransfer(SqliteDataReader reader) => new(
+      Guid.Parse(reader.GetString(0)),
+      Guid.Parse(reader.GetString(1)),
+      ReadGuid(reader, 2),
+      reader.GetString(3),
+      reader.GetString(4),
+      reader.GetString(5),
+      ReadString(reader, 6),
+      reader.GetInt64(7),
+      ParseDate(reader.GetString(8)),
+      reader.GetString(9),
+      (TransferState)reader.GetInt32(10),
+      reader.GetInt64(11),
+      ReadString(reader, 12),
+      reader.GetInt32(13),
+      ReadDate(reader, 14),
+      ReadString(reader, 15));
 
   private static string? ReadString(SqliteDataReader reader, int ordinal) =>
       reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);

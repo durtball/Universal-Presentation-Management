@@ -26,6 +26,7 @@ from upm_site.persistence.models import (
     PresentationAsset,
     PresentationReviewSession,
     PresentationVersion,
+    Room,
     utc_now,
 )
 
@@ -480,6 +481,62 @@ def register_agent_control_routes(
             s.get(Presentation, p.presentation_id).event_id,
         )
         return {"review_session_id": review.review_session_id, "command": view(c)}
+
+    @app.get("/api/v1/review-sessions", tags=["reviews"])
+    def review_sessions(
+        s: Read,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> dict[str, object]:
+        rows = s.scalars(
+            select(PresentationReviewSession)
+            .order_by(PresentationReviewSession.opened_at.desc())
+            .limit(limit)
+        ).all()
+        presentations = {
+            item.presentation_id: item
+            for item in s.scalars(
+                select(Presentation).where(
+                    Presentation.presentation_id.in_([row.presentation_id for row in rows])
+                )
+            )
+        }
+        rooms = {
+            item.room_id: item
+            for item in s.scalars(
+                select(Room).where(Room.room_id.in_([row.room_id for row in rows]))
+            )
+        }
+        devices = {
+            item.device_id: item
+            for item in s.scalars(
+                select(Device).where(Device.device_id.in_([row.device_id for row in rows]))
+            )
+        }
+        return {
+            "items": [
+                {
+                    "review_session_id": row.review_session_id,
+                    "presentation_id": row.presentation_id,
+                    "presentation_title": presentations.get(row.presentation_id).title
+                    if presentations.get(row.presentation_id)
+                    else None,
+                    "base_presentation_version_id": row.base_presentation_version_id,
+                    "device_id": row.device_id,
+                    "device_name": devices.get(row.device_id).display_name
+                    if devices.get(row.device_id)
+                    else None,
+                    "room_id": row.room_id,
+                    "room_label": rooms.get(row.room_id).label if rooms.get(row.room_id) else None,
+                    "state": row.state,
+                    "opened_at": row.opened_at,
+                    "local_changes_at": row.local_changes_at,
+                    "saveback_version_id": row.saveback_version_id,
+                    "conflict_version_id": row.conflict_version_id,
+                    "completed_at": row.completed_at,
+                }
+                for row in rows
+            ]
+        }
 
     @app.get("/api/v1/review-sessions/{review_id}", tags=["reviews"])
     def review_detail(review_id: UUID, s: Read):

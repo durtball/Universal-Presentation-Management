@@ -36,6 +36,7 @@ public partial class App : Application
             services.AddSingleton(new LocalStateStore(Path.Combine(root, "state.db")));
             services.AddSingleton<ISiteClientFactory, SiteClientFactory>();
             services.AddSingleton<ISiteConnectionManager, SiteConnectionManager>();
+            services.AddSingleton<IOperatorContext, OperatorContext>();
             services.AddSingleton<ISiteTransferRouter, SiteTransferRouter>();
             services.AddSingleton<TransferWorker>();
             services.AddHostedService(provider => provider.GetRequiredService<TransferWorker>());

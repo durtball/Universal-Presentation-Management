@@ -38,12 +38,12 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Style="{StaticResource SectionTitleStyle}" Text="DURABLE TRANSFER QUEUE" VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="0 queued  •  0 active  •  0 failed" />
+            <TextBlock x:Name="QueueStatus" Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="0 queued  •  0 active  •  0 failed" />
         </Grid>
         <Border Grid.Row="3" Style="{StaticResource ControlRoomPanelStyle}">
             <Grid>
                 <ListView x:Name="Queue" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True" />
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" IsHitTestVisible="False">
+                <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" IsHitTestVisible="False">
                     <TextBlock FontSize="17" Text="Intake queue is empty" />
                     <TextBlock Foreground="{StaticResource MutedBrush}" Text="Drop supported presentation or media files to begin enumeration." TextAlignment="Center" TextWrapping="Wrap" />
                 </StackPanel>
