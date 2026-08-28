@@ -17,8 +17,10 @@
                         Foreground="{StaticResource MutedBrush}"
                         Text="Live Site status and show-readiness projection" />
                 </StackPanel>
-                <Button Grid.Column="1" IsEnabled="False" Content="REFRESH" ToolTipService.ToolTip="Connect to a Site to refresh" />
+                <Button x:Name="RefreshButton" Grid.Column="1" IsEnabled="False" Content="REFRESH" Click="OnRefreshClick" ToolTipService.ToolTip="Connect to a Site to refresh" />
             </Grid>
+
+            <InfoBar x:Name="DashboardInfo" IsOpen="False" IsClosable="True" />
 
             <GridView
                 x:Name="MetricGrid"
@@ -59,8 +61,9 @@
             <Border Style="{StaticResource ControlRoomPanelStyle}" MinHeight="210" Padding="24">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="620" Spacing="9">
                     <FontIcon Glyph="&#xE7F4;" FontSize="38" Foreground="{StaticResource VioletBrush}" />
-                    <TextBlock HorizontalAlignment="Center" FontSize="19" FontWeight="SemiBold" Text="No live room projection" />
+                    <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center" FontSize="19" FontWeight="SemiBold" Text="No live room projection" />
                     <TextBlock
+                        x:Name="EmptyStateDetail"
                         HorizontalAlignment="Center"
                         Foreground="{StaticResource MutedBrush}"
                         Text="Connect and select a deployed event to load room cards. Agent state remains UNKNOWN until fresh heartbeat telemetry is received."

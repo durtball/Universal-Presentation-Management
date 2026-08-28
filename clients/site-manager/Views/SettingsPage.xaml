@@ -1,28 +1,53 @@
 <Page
     x:Class="UPM.SiteManager.Views.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-        <Grid Padding="20" RowSpacing="14" MaxWidth="1100" HorizontalAlignment="Left">
-            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Loaded="OnLoaded">
+    <Grid Padding="20" RowSpacing="14">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
             <StackPanel>
-                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="SETTINGS" />
-                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Site profiles, transfer performance, security and appearance" />
+                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="SITE PROFILES" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Saved non-secret connection details and secure session actions" />
             </StackPanel>
-            <Border Grid.Row="1" Style="{StaticResource ControlRoomPanelStyle}" Padding="18">
-                <Grid ColumnSpacing="16" RowSpacing="12">
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                    <TextBlock Style="{StaticResource SectionTitleStyle}" Text="SITE PROFILE" />
-                    <TextBlock Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="No saved Site profiles" VerticalAlignment="Center" />
-                    <Button Grid.Column="2" Content="ADD SITE" />
-                    <TextBlock Grid.Row="1" Style="{StaticResource SectionTitleStyle}" Text="UPLOAD WORKERS" />
-                    <NumberBox Grid.Row="1" Grid.Column="1" Width="140" HorizontalAlignment="Left" Minimum="1" Maximum="16" Value="4" SpinButtonPlacementMode="Compact" />
-                    <TextBlock Grid.Row="2" Style="{StaticResource SectionTitleStyle}" Text="THEME" />
-                    <ComboBox Grid.Row="2" Grid.Column="1" Width="220" HorizontalAlignment="Left" SelectedIndex="0"><ComboBoxItem Content="Control Room (Default)" /><ComboBoxItem Content="Future theme support" IsEnabled="False" /></ComboBox>
-                </Grid>
-            </Border>
-            <InfoBar Grid.Row="2" IsOpen="True" Severity="Informational" Title="Secure credential storage" Message="Session material is stored with Windows Credential Manager. Plaintext Site passwords are never persisted." />
+            <Button Grid.Column="1" Content="ADD SITE" Click="OnAddClick" />
         </Grid>
-    </ScrollViewer>
+        <InfoBar x:Name="ActionInfo" Grid.Row="1" IsOpen="False" IsClosable="True" />
+        <Border Grid.Row="2" Style="{StaticResource ControlRoomPanelStyle}">
+            <Grid>
+                <ListView x:Name="ProfileList" SelectionMode="Single" IsItemClickEnabled="False">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid MinHeight="72" Padding="10" ColumnSpacing="14">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="*" /><ColumnDefinition Width="180" /><ColumnDefinition Width="140" /></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" />
+                                    <TextBlock Foreground="{StaticResource MutedBrush}" Text="{Binding BaseUri}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{Binding CanonicalSiteDisplayName, TargetNullValue='Not verified'}" />
+                                    <TextBlock Foreground="{StaticResource MutedBrush}" Text="{Binding CanonicalSiteId, TargetNullValue='Canonical Site ID not verified'}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Foreground="{StaticResource MutedBrush}" Text="LAST CONNECTED" />
+                                    <TextBlock Text="{Binding LastConnectedAt, TargetNullValue='Never'}" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="3" Foreground="{StaticResource AccentBrush}" Text="{Binding Status}" VerticalAlignment="Center" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <TextBlock x:Name="EmptyProfiles" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}" Text="No saved Site profiles. Add a Site to begin." />
+            </Grid>
+        </Border>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
+            <Button Content="CONNECT" Click="OnConnectClick" />
+            <Button Content="TEST" Click="OnTestClick" />
+            <Button Content="EDIT" Click="OnEditClick" />
+            <Button Content="DISCONNECT" Click="OnDisconnectClick" />
+            <Button Content="LOGOUT" Click="OnLogoutClick" />
+            <Button Content="REMOVE" Click="OnRemoveClick" />
+        </StackPanel>
+    </Grid>
 </Page>

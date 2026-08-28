@@ -382,7 +382,7 @@ def create_app(
     @app.get("/api/v1/auth/session", tags=["authentication"])
     def current_session(
         upm_site_session: Annotated[str | None, Cookie()] = None,
-        session: Annotated[Session, Depends(get_session)] = None,
+        session: Annotated[Session, Depends(transaction)] = None,
     ):
         _item, user = resolve(session, upm_site_session)
         if not user:

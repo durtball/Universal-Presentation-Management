@@ -9,14 +9,14 @@ public sealed partial class IntakePage : Page
 {
   public IntakePage() => InitializeComponent();
 
-  private void DragOver(object sender, DragEventArgs args)
+  private void OnDragOver(object sender, DragEventArgs args)
   {
     args.AcceptedOperation = DataPackageOperation.Copy;
     args.DragUIOverride.Caption = "Queue in UPM Site Manager";
     args.DragUIOverride.IsCaptionVisible = true;
   }
 
-  private async void Drop(object sender, DragEventArgs args)
+  private async void OnDrop(object sender, DragEventArgs args)
   {
     if (!args.DataView.Contains(StandardDataFormats.StorageItems))
     {

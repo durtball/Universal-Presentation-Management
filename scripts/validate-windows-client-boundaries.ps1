@@ -46,3 +46,21 @@ if ($windowCode -match "_\s*=>\s*typeof\(DashboardPage\)") {
 }
 
 Write-Host "Validated all nine distinct native navigation targets."
+
+$appXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/App.xaml") -Raw
+if ($appXaml -notmatch "XamlControlsResources") {
+    throw "App.xaml must merge WinUI XamlControlsResources."
+}
+if ($appXaml -notmatch 'RequestedTheme="Dark"') {
+    throw "Site Manager must request its dark control-room theme."
+}
+$mainXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/MainWindow.xaml") -Raw
+if ($mainXaml -match 'Icon="Monitor"') {
+    throw "NavigationView contains unsupported Symbol Monitor."
+}
+$dashboardXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/Views/DashboardPage.xaml") -Raw
+$dashboardCode = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/Views/DashboardPage.xaml.cs") -Raw
+if ($dashboardXaml -match 'SizeChanged="PageSizeChanged"' -and $dashboardCode -notmatch 'PageSizeChanged\s*\(') {
+    throw "DashboardPage has a dangling SizeChanged handler."
+}
+Write-Host "Validated WinUI resources, theme, icons, and event handlers."

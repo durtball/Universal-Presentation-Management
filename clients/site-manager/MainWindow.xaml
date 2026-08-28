@@ -3,78 +3,56 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="UPM Site Manager">
-    <Grid x:Name="WindowLayout" Background="{StaticResource GraphiteBrush}">
+    <Grid x:Name="WindowLayout" Background="{StaticResource GraphiteBrush}" Loaded="OnWindowLoaded">
         <Grid.RowDefinitions>
-            <RowDefinition x:Name="HeaderRow" Height="76" />
+            <RowDefinition x:Name="HeaderRow" Height="86" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-
-        <Border
-            x:Name="CommandBarSurface"
-            Padding="20,10"
-            BorderBrush="#284559"
-            BorderThickness="0,0,0,1">
-            <Grid x:Name="CommandBarGrid" ColumnSpacing="16" RowSpacing="8">
+        <Border Padding="18,8" BorderBrush="#284559" BorderThickness="0,0,0,1">
+            <Grid ColumnSpacing="12" RowSpacing="7">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition x:Name="BrandColumn" Width="220" />
-                    <ColumnDefinition Width="260" />
-                    <ColumnDefinition Width="260" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition x:Name="BrandColumn" Width="170" />
+                    <ColumnDefinition x:Name="SiteColumn" Width="390" />
+                    <ColumnDefinition x:Name="EventColumn" Width="250" />
+                    <ColumnDefinition x:Name="SpacerColumn" Width="*" />
+                    <ColumnDefinition x:Name="StatusColumn" Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
-                    <RowDefinition x:Name="CompactHeaderRow" Height="0" />
+                    <RowDefinition x:Name="CompactSiteRow" Height="0" />
+                    <RowDefinition x:Name="CompactEventRow" Height="0" />
                 </Grid.RowDefinitions>
-
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock
-                        Foreground="{StaticResource AccentBrush}"
-                        FontSize="19"
-                        FontWeight="SemiBold"
-                        Text="UPM" />
-                    <TextBlock
-                        Foreground="#DCE8F2"
-                        FontSize="11"
-                        CharacterSpacing="150"
-                        Text="SITE MANAGER" />
+                    <TextBlock Foreground="{StaticResource AccentBrush}" FontSize="19" FontWeight="SemiBold" Text="UPM" />
+                    <TextBlock Foreground="#DCE8F2" FontSize="11" CharacterSpacing="150" Text="SITE MANAGER" />
                 </StackPanel>
-
-                <ComboBox
-                    x:Name="SiteSelector"
-                    Grid.Column="1"
-                    Header="SITE"
-                    MinWidth="180"
-                    PlaceholderText="Select a Site" />
-                <ComboBox
-                    x:Name="EventSelector"
-                    Grid.Column="2"
-                    Header="EVENT"
-                    MinWidth="180"
-                    IsEnabled="False"
-                    PlaceholderText="Connect to select event" />
-
-                <StackPanel
-                    x:Name="ConnectionStatus"
-                    Grid.Column="4"
-                    HorizontalAlignment="Right"
-                    VerticalAlignment="Center">
+                <StackPanel x:Name="SiteControl" Grid.Column="1" Spacing="2">
+                    <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" Text="SITE" />
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <ComboBox x:Name="SiteSelector" MinWidth="190" PlaceholderText="Select a saved Site" DisplayMemberPath="DisplayName" SelectionChanged="OnSiteSelectionChanged" />
+                        <Button Grid.Column="1" Content="CONNECT" Click="OnConnectClick" />
+                        <Button Grid.Column="2" Content="+" AutomationProperties.Name="Add Site" Click="OnAddSiteClick" />
+                    </Grid>
+                </StackPanel>
+                <StackPanel x:Name="EventControl" Grid.Column="2" Spacing="2">
+                    <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" Text="EVENT" />
+                    <ComboBox x:Name="EventSelector" MinWidth="180" IsEnabled="False" PlaceholderText="Connect to select event" DisplayMemberPath="DisplayLabel" SelectionChanged="OnEventSelectionChanged" />
+                </StackPanel>
+                <StackPanel x:Name="ConnectionStatus" Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center" ToolTipService.ToolTip="Disconnected">
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Ellipse Width="8" Height="8" Fill="#6B7280" />
-                        <TextBlock Foreground="#DCE8F2" Text="SITE UNKNOWN" />
+                        <Ellipse x:Name="ConnectionIndicator" Width="8" Height="8" Fill="#6B7280" />
+                        <TextBlock x:Name="ConnectionTitle" Foreground="#DCE8F2" Text="DISCONNECTED" />
                     </StackPanel>
-                    <TextBlock
-                        Margin="16,3,0,0"
-                        Foreground="{StaticResource MutedBrush}"
-                        FontSize="11"
-                        Text="No authenticated session" />
+                    <TextBlock x:Name="ConnectionDetail" MaxWidth="280" Margin="16,3,0,0" Foreground="{StaticResource MutedBrush}" FontSize="11" Text="Select or add a Site" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
             </Grid>
         </Border>
-
+        <InfoBar x:Name="ConnectionInfoBar" Grid.Row="1" Margin="12,6" IsOpen="False" IsClosable="True" />
         <NavigationView
             x:Name="PrimaryNavigation"
-            Grid.Row="1"
+            Grid.Row="2"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             PaneDisplayMode="Auto"
@@ -91,37 +69,32 @@
                 <NavigationViewItem Content="Rooms" Tag="rooms" Icon="Map" />
                 <NavigationViewItem Content="Transfers" Tag="transfers" Icon="Sync" />
                 <NavigationViewItem Content="Review Sessions" Tag="reviews" Icon="Preview" />
-                <NavigationViewItem Content="Devices" Tag="devices" Icon="Monitor" />
+                <NavigationViewItem Content="Devices" Tag="devices" Icon="Remote" />
                 <NavigationViewItem Content="Activity" Tag="activity" Icon="List" />
                 <NavigationViewItem Content="Settings" Tag="settings" Icon="Setting" />
             </NavigationView.MenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>
-
         <VisualStateManager.VisualStateGroups>
-            <VisualStateGroup x:Name="WindowWidthStates">
-                <VisualState x:Name="WideWindow" />
+            <VisualStateGroup>
                 <VisualState x:Name="CompactWindow">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="0" />
-                    </VisualState.StateTriggers>
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
                     <VisualState.Setters>
-                        <Setter Target="HeaderRow.Height" Value="124" />
-                        <Setter Target="BrandColumn.Width" Value="170" />
-                        <Setter Target="CompactHeaderRow.Height" Value="Auto" />
-                        <Setter Target="SiteSelector.(Grid.Row)" Value="1" />
-                        <Setter Target="SiteSelector.(Grid.Column)" Value="0" />
-                        <Setter Target="SiteSelector.(Grid.ColumnSpan)" Value="2" />
-                        <Setter Target="EventSelector.(Grid.Row)" Value="1" />
-                        <Setter Target="EventSelector.(Grid.Column)" Value="2" />
-                        <Setter Target="EventSelector.(Grid.ColumnSpan)" Value="2" />
+                        <Setter Target="HeaderRow.Height" Value="184" />
+                        <Setter Target="SiteColumn.Width" Value="*" />
+                        <Setter Target="EventColumn.Width" Value="0" />
+                        <Setter Target="SpacerColumn.Width" Value="0" />
+                        <Setter Target="CompactSiteRow.Height" Value="Auto" />
+                        <Setter Target="CompactEventRow.Height" Value="Auto" />
+                        <Setter Target="SiteControl.(Grid.Row)" Value="1" />
+                        <Setter Target="SiteControl.(Grid.Column)" Value="0" />
+                        <Setter Target="SiteControl.(Grid.ColumnSpan)" Value="5" />
+                        <Setter Target="EventControl.(Grid.Row)" Value="2" />
+                        <Setter Target="EventControl.(Grid.Column)" Value="0" />
+                        <Setter Target="EventControl.(Grid.ColumnSpan)" Value="5" />
                     </VisualState.Setters>
                 </VisualState>
-                <VisualState x:Name="StandardWindow">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="1180" />
-                    </VisualState.StateTriggers>
-                </VisualState>
+                <VisualState x:Name="StandardWindow"><VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="1180" /></VisualState.StateTriggers></VisualState>
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
     </Grid>

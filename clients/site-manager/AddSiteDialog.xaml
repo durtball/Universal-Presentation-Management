@@ -1,0 +1,50 @@
+<ContentDialog
+    x:Class="UPM.SiteManager.AddSiteDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Add UPM Site"
+    PrimaryButtonText="SAVE &amp; CONNECT"
+    SecondaryButtonText="TEST CONNECTION"
+    CloseButtonText="CANCEL"
+    DefaultButton="Primary"
+    PrimaryButtonClick="OnPrimaryButtonClick"
+    SecondaryButtonClick="OnSecondaryButtonClick">
+    <ScrollViewer MaxHeight="560" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel MinWidth="460" Spacing="12">
+            <InfoBar
+                x:Name="ValidationInfo"
+                IsOpen="False"
+                IsClosable="False"
+                Severity="Error" />
+            <TextBox
+                x:Name="DisplayNameBox"
+                Header="DISPLAY NAME"
+                PlaceholderText="Main Show Site"
+                MaxLength="255" />
+            <TextBox
+                x:Name="AddressBox"
+                Header="SITE ADDRESS / HOST"
+                PlaceholderText="site-host, site-host:9080, or https://site.company.local" />
+            <NumberBox
+                x:Name="PortBox"
+                Header="PORT (OPTIONAL)"
+                PlaceholderText="HTTP appliances default to 9080"
+                Minimum="1"
+                Maximum="65535"
+                SpinButtonPlacementMode="Compact" />
+            <TextBox
+                x:Name="UsernameBox"
+                Header="USERNAME"
+                MaxLength="255" />
+            <PasswordBox
+                x:Name="PasswordBox"
+                Header="PASSWORD"
+                PasswordRevealMode="Peek" />
+            <TextBlock
+                Foreground="{StaticResource MutedBrush}"
+                FontSize="12"
+                Text="The password is used only for this login and is never persisted. Session material is protected by Windows Credential Manager."
+                TextWrapping="Wrap" />
+        </StackPanel>
+    </ScrollViewer>
+</ContentDialog>
