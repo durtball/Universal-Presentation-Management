@@ -15,7 +15,8 @@ from upm_shared.contracts.deployments import (
     SiteDeploymentStatus,
 )
 from upm_shared.contracts.sync import SyncEventEnvelope
-from upm_shared.enums import EventDeploymentStatus, SourceSystem, SyncState
+from upm_shared.enums import AuthorityScope, EventDeploymentStatus, SourceSystem, SyncState
+from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import OutboxPayload
 from upm_shared.presentation_media import allocate_presentation_identifier
 from upm_site.persistence.models import (
@@ -623,6 +624,21 @@ def _upsert_snapshot(
     }
 
 
+def event_is_deleted(session: Session, event_id: UUID) -> bool:
+    """Return whether the durable deletion barrier forbids recreating an Event projection."""
+    return (
+        session.scalar(
+            select(OutboxEvent.outbox_event_id).where(
+                OutboxEvent.event_type.in_(
+                    ["site.event_deletion.applied", "site.event_deletion.requested"]
+                ),
+                OutboxEvent.payload["event_id"].as_string() == str(event_id),
+            )
+        )
+        is not None
+    )
+
+
 def apply_snapshot_event(
     session: Session, event: SyncEventEnvelope, *, local_smb_enabled: bool = False
 ) -> str:
@@ -636,6 +652,8 @@ def apply_snapshot_event(
         raise PermissionError("deployment is addressed to another Site")
     if event.entity_id != snapshot.deployment_id:
         raise ValueError("deployment identity does not match event envelope")
+    if event_is_deleted(session, snapshot.event_id):
+        return "deleted"
     deployment = session.get(EventDeploymentProjection, snapshot.deployment_id)
     if deployment is not None and deployment.central_event_id != snapshot.event_id:
         raise ValueError("deployment Event UUID cannot change")
@@ -712,43 +730,236 @@ def apply_revocation_event(session: Session, event: SyncEventEnvelope) -> str:
     return "revoked"
 
 
-def apply_event_deletion(session: Session, event: SyncEventEnvelope) -> str:
-    """Explicitly purge one Central event projection while preserving shared Site resources."""
+def apply_event_deletion(
+    session: Session, event: SyncEventEnvelope, *, publish_acknowledgement: bool = True
+) -> str:
+    """Authoritatively purge an event graph and durably schedule physical garbage collection."""
     event_id = UUID(str(event.payload["event_id"]))
     if event.entity_id != event_id:
         raise ValueError("event identity does not match deletion envelope")
-    # Ordered statements intentionally document ownership instead of relying on FK cascades.
+    site_id = _site_id(session)
+    deletion_operation_id = str(event.payload.get("deletion_operation_id", event.event_id))
     params = {"event_id": event_id}
-    statements = [
+
+    # Persist the deletion barrier before removing the live Event FK. Every future snapshot checks
+    # this durable, event-id-free history row, so an old deployment can never resurrect the Event.
+    queue = SiteQueue(session)
+    if publish_acknowledgement:
+        from upm_site.sync import next_sequence
+
+        acknowledgement_key = f"event-deletion-applied:{deletion_operation_id}:{site_id}"
+        if (
+            session.scalar(
+                select(OutboxEvent.outbox_event_id).where(
+                    OutboxEvent.source_system == SourceSystem.SITE,
+                    OutboxEvent.idempotency_key == acknowledgement_key,
+                )
+            )
+            is None
+        ):
+            queue.enqueue_outbox(
+                site_id=site_id,
+                event_type="site.event_deletion.applied",
+                aggregate_type="event_deletion",
+                aggregate_id=event_id,
+                event_id=None,
+                source_sequence=next_sequence(session),
+                payload=OutboxPayload(
+                    source_system=SourceSystem.SITE,
+                    schema_version=1,
+                    data={
+                        "event_id": str(event_id),
+                        "deletion_operation_id": deletion_operation_id,
+                    },
+                ),
+                idempotency_key=acknowledgement_key,
+            )
+
+    media_rows = (
+        session.execute(
+            text(
+                "SELECT DISTINCT m.media_object_id, m.storage_target_id, m.object_key "
+                "FROM media_objects m LEFT JOIN presentation_assets a ON a.media_object_id=m.media_object_id "
+                "LEFT JOIN presentation_versions v ON v.presentation_version_id=a.presentation_version_id "
+                "LEFT JOIN presentations p ON p.presentation_id=v.presentation_id "
+                "WHERE m.event_id=:event_id OR p.event_id=:event_id"
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
+    media_ids = [row["media_object_id"] for row in media_rows]
+    staging_rows = (
+        session.execute(
+            text(
+                "SELECT storage_target_id, partial_key FROM media_transfer_sessions "
+                "WHERE event_id=:event_id AND storage_target_id IS NOT NULL"
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
+
+    # Quiesce and remove all event-owned durable work first. Historical jobs are identified by
+    # their canonical manifest payload as well as session/media identity, covering legacy rows.
+    session.execute(
+        text(
+            "DELETE FROM transfer_jobs WHERE transfer_job_id IN ("
+            "SELECT transfer_session_id FROM media_transfer_sessions WHERE event_id=:event_id "
+            "UNION SELECT replication_session_id FROM media_replication_sessions WHERE event_id=:event_id) "
+            "OR payload->>'event_id'=CAST(:event_id AS text) "
+            "OR payload->'data'->>'event_id'=CAST(:event_id AS text) "
+            "OR media_object_id = ANY(CAST(:media_ids AS uuid[]))"
+        ),
+        {**params, "media_ids": media_ids},
+    )
+    session.execute(text("DELETE FROM media_transfer_sessions WHERE event_id=:event_id"), params)
+    session.execute(text("DELETE FROM media_replication_sessions WHERE event_id=:event_id"), params)
+    session.execute(
+        text(
+            "DELETE FROM processing_jobs WHERE payload->>'event_id'=CAST(:event_id AS text) "
+            "OR payload->'data'->>'event_id'=CAST(:event_id AS text) "
+            "OR media_object_id = ANY(CAST(:media_ids AS uuid[]))"
+        ),
+        {**params, "media_ids": media_ids},
+    )
+
+    ordered = [
         "DELETE FROM room_assignments WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id)",
-        "DELETE FROM media_transfer_sessions WHERE event_id=:event_id",
-        "DELETE FROM media_replication_sessions WHERE event_id=:event_id",
+        "DELETE FROM presentation_assets WHERE source_asset_id IN (SELECT presentation_asset_id FROM presentation_assets WHERE presentation_version_id IN (SELECT presentation_version_id FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)))",
         "DELETE FROM presentation_assets WHERE presentation_version_id IN (SELECT presentation_version_id FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id))",
         "DELETE FROM presentation_versions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
         "DELETE FROM presentation_presenters WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
         "DELETE FROM presentation_sessions WHERE presentation_id IN (SELECT presentation_id FROM presentations WHERE event_id=:event_id)",
         "DELETE FROM presentations WHERE event_id=:event_id",
-        "DELETE FROM session_participants WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id)",
+        "DELETE FROM session_participants WHERE session_id IN (SELECT session_id FROM sessions WHERE event_id=:event_id) OR event_participation_id IN (SELECT event_participation_id FROM event_participations WHERE event_id=:event_id)",
         "DELETE FROM sessions WHERE event_id=:event_id",
         "DELETE FROM event_participations WHERE event_id=:event_id",
         "DELETE FROM external_identifier_projections WHERE event_id=:event_id",
-        "DELETE FROM program_room_mappings WHERE event_id=:event_id",
         "DELETE FROM event_deployment_revisions WHERE deployment_id IN (SELECT deployment_id FROM event_deployments WHERE central_event_id=:event_id)",
         "DELETE FROM event_deployments WHERE central_event_id=:event_id",
-        # Only explicitly event-owned rooms are eligible; reusable rooms have a NULL/different event.
         "DELETE FROM device_assignments WHERE room_id IN (SELECT room_id FROM rooms WHERE event_id=:event_id)",
-        "DELETE FROM rooms WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM program_room_mappings m WHERE m.room_id=rooms.room_id)",
-        "UPDATE media_objects SET deleted_at=COALESCE(deleted_at, now()) WHERE event_id=:event_id AND NOT EXISTS (SELECT 1 FROM presentation_assets a WHERE a.media_object_id=media_objects.media_object_id)",
-        "UPDATE media_objects SET event_id=NULL WHERE event_id=:event_id",
-        "UPDATE sync_events SET event_id=NULL WHERE event_id=:event_id",
-        "UPDATE outbox_events SET event_id=NULL WHERE event_id=:event_id",
-        "UPDATE audit_records SET event_id=NULL WHERE event_id=:event_id",
-        "DELETE FROM events WHERE event_id=:event_id",
-        "DELETE FROM person_projections p WHERE NOT EXISTS (SELECT 1 FROM event_participations ep WHERE ep.person_id=p.person_id)",
+        "DELETE FROM program_room_mappings WHERE event_id=:event_id OR room_id IN (SELECT room_id FROM rooms WHERE event_id=:event_id)",
+        "DELETE FROM rooms WHERE event_id=:event_id",
     ]
-    for statement in statements:
+    for statement in ordered:
         session.execute(text(statement), params)
+
+    physical = []
+    for row in media_rows:
+        media_id = row["media_object_id"]
+        referenced = session.scalar(
+            text("SELECT EXISTS(SELECT 1 FROM presentation_assets WHERE media_object_id=:id)"),
+            {"id": media_id},
+        )
+        if referenced:
+            session.execute(
+                text("UPDATE media_objects SET event_id=NULL WHERE media_object_id=:id"),
+                {"id": media_id},
+            )
+            continue
+        shared_key = session.scalar(
+            text(
+                "SELECT EXISTS(SELECT 1 FROM media_objects WHERE media_object_id<>:id "
+                "AND storage_target_id=:target AND object_key=:key)"
+            ),
+            {"id": media_id, "target": row["storage_target_id"], "key": row["object_key"]},
+        )
+        session.execute(
+            text(
+                "UPDATE media_objects SET source_media_object_id=NULL WHERE source_media_object_id=:id"
+            ),
+            {"id": media_id},
+        )
+        session.execute(
+            text("DELETE FROM media_objects WHERE media_object_id=:id"), {"id": media_id}
+        )
+        if not shared_key:
+            physical.append(
+                {
+                    "storage_target_id": str(row["storage_target_id"]),
+                    "object_key": row["object_key"],
+                }
+            )
+
+    if physical or staging_rows:
+        queue.enqueue_processing(
+            site_id=site_id,
+            job_type="lifecycle.delete_media_objects",
+            payload={
+                "data": {
+                    "event_id": str(event_id),
+                    "objects": physical,
+                    "staging": [
+                        {
+                            "storage_target_id": str(row["storage_target_id"]),
+                            "object_key": row["partial_key"],
+                        }
+                        for row in staging_rows
+                    ],
+                }
+            },
+            idempotency_key=f"event-media-delete:{deletion_operation_id}",
+            required_capabilities=["storage"],
+        )
+    session.execute(text("UPDATE sync_events SET event_id=NULL WHERE event_id=:event_id"), params)
+    session.execute(text("UPDATE outbox_events SET event_id=NULL WHERE event_id=:event_id"), params)
+    session.execute(text("UPDATE audit_records SET event_id=NULL WHERE event_id=:event_id"), params)
+    session.execute(text("DELETE FROM events WHERE event_id=:event_id"), params)
+    session.execute(
+        text(
+            "DELETE FROM person_projections p WHERE NOT EXISTS (SELECT 1 FROM event_participations ep WHERE ep.person_id=p.person_id)"
+        )
+    )
     return "deleted"
+
+
+def request_site_event_deletion(session: Session, event_id: UUID) -> str:
+    """Durably request global deletion for a Central projection, then purge it locally."""
+    projected = session.scalar(
+        select(EventDeploymentProjection.deployment_id).where(
+            EventDeploymentProjection.central_event_id == event_id
+        )
+    )
+    deletion_operation_id = new_uuid7()
+    if projected is not None:
+        from upm_site.sync import next_sequence
+
+        SiteQueue(session).enqueue_outbox(
+            site_id=_site_id(session),
+            event_type="site.event_deletion.requested",
+            aggregate_type="event_deletion",
+            aggregate_id=event_id,
+            event_id=None,
+            source_sequence=next_sequence(session),
+            payload=OutboxPayload(
+                source_system=SourceSystem.SITE,
+                schema_version=1,
+                data={
+                    "event_id": str(event_id),
+                    "deletion_operation_id": str(deletion_operation_id),
+                },
+            ),
+            idempotency_key=f"event-deletion-requested:{event_id}",
+        )
+    envelope = SyncEventEnvelope(
+        event_id=new_uuid7(),
+        event_type="central.event.deleted",
+        protocol_version=1,
+        source="site-local-deletion",
+        source_sequence=0,
+        authority=AuthorityScope.CENTRAL,
+        entity_type="event",
+        entity_id=event_id,
+        occurred_at=utc_now(),
+        payload={
+            "event_id": str(event_id),
+            "deletion_operation_id": str(deletion_operation_id),
+        },
+    )
+    return apply_event_deletion(session, envelope, publish_acknowledgement=False)
 
 
 def apply_people_deletion(session: Session, event: SyncEventEnvelope) -> str:

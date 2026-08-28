@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from upm_central.persistence.models import (
+    DeletionOperation,
+    Event,
     EventDeployment,
     OutboxEvent,
     Presentation,
@@ -367,6 +369,54 @@ def apply_site_event(
                 event_id=event.event_id,
                 accepted=False,
                 error_code="presentation_version_conflict",
+            )
+    elif event.event_type == "site.event_deletion.applied":
+        try:
+            operation_id = UUID(str(event.payload["deletion_operation_id"]))
+            deleted_event_id = UUID(str(event.payload["event_id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_event_deletion_acknowledgement",
+                detail=str(exc)[:512],
+            )
+        operation = session.get(DeletionOperation, operation_id, with_for_update=True)
+        if operation is None or operation.target_id != deleted_event_id:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="unknown_event_deletion",
+            )
+        statuses = [dict(item) for item in operation.site_statuses]
+        for item in statuses:
+            if item.get("site_id") == str(site.site_id):
+                item["status"] = "completed"
+        operation.site_statuses = statuses
+        if statuses and all(item.get("status") == "completed" for item in statuses):
+            operation.status = "completed"
+            operation.stage = "completed"
+            operation.completed_at = utc_now()
+    elif event.event_type == "site.event_deletion.requested":
+        try:
+            deleted_event_id = UUID(str(event.payload["event_id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="malformed_event_deletion_request",
+                detail=str(exc)[:512],
+            )
+        target = session.get(Event, deleted_event_id)
+        if target is not None:
+            from upm_central.lifecycle import request_deletion
+
+            request_deletion(
+                session,
+                "event",
+                deleted_event_id,
+                target.name,
+                f"site:{site.site_id}",
             )
     else:
         return EventAcknowledgement(

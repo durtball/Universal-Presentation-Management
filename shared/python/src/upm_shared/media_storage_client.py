@@ -148,6 +148,10 @@ class MediaStorageClient:
     def release_staging(self, target_id: UUID | str, key: str) -> None:
         self.request("DELETE", f"/api/v1/storage/staging/{target_id}/{key}")
 
+    def delete_object(self, target_id: UUID | str, key: str) -> None:
+        """Idempotently remove an application-approved, unreferenced canonical object."""
+        self.request("DELETE", f"/api/v1/storage/objects/{target_id}/{key}")
+
     def request_with_json(self, method: str, path: str, payload: dict) -> dict:
         try:
             response = httpx.request(
@@ -237,6 +241,9 @@ class AsyncMediaStorageClient:
 
     async def release_staging(self, target_id: UUID | str, key: str) -> None:
         await self.request("DELETE", f"/api/v1/storage/staging/{target_id}/{key}")
+
+    async def delete_object(self, target_id: UUID | str, key: str) -> None:
+        await self.request("DELETE", f"/api/v1/storage/objects/{target_id}/{key}")
 
     async def stream_staging(
         self, target_id: UUID | str, key: str, offset: int, limit: int

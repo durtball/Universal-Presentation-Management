@@ -36,6 +36,7 @@ from upm_site.event_deployments import (
     apply_revocation_event,
     apply_snapshot_event,
     converge_presentation_version_identity,
+    event_is_deleted,
 )
 from upm_site.persistence.models import (
     CentralRegistration,
@@ -533,7 +534,8 @@ def apply_central_event(
                     accepted=False,
                     error_code="invalid_transfer_destination",
                 )
-            persist_media_transfer_manifest(session, manifest, site_id)
+            if not event_is_deleted(session, manifest.event_id):
+                persist_media_transfer_manifest(session, manifest, site_id)
         except (TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:

@@ -439,6 +439,23 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         log("site_local_smb_job_skipped", work_id=work_id, job_type=work.job_type)
                     elif kind == "processing" and work.job_type == "operational_logs.prune":
                         prune_logs(session, settings.operational_log_retention_days)
+                    elif kind == "processing" and work.job_type == "lifecycle.delete_media_objects":
+                        deleted = 0
+                        for item in work.payload["data"]["objects"]:
+                            storage_client.delete_object(
+                                UUID(item["storage_target_id"]), item["object_key"]
+                            )
+                            deleted += 1
+                        for item in work.payload["data"].get("staging", []):
+                            storage_client.release_staging(
+                                UUID(item["storage_target_id"]), item["object_key"]
+                            )
+                        work.error_metadata = {"physical_objects_deleted": deleted}
+                        log(
+                            "event_media_cleanup_completed",
+                            event_id=work.payload["data"]["event_id"],
+                            deleted=deleted,
+                        )
                     elif kind == "processing" and work.job_type == ASSET_RECONCILIATION_JOB:
                         repaired = backfill_confirmed_original_assets(session, work.site_id)
                         enqueue_asset_reconciliation(

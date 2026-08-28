@@ -195,6 +195,64 @@ def test_queue_rejects_malformed_lifecycle_payload_but_accepts_unrelated_job(
     engine.dispose()
 
 
+def test_event_deletion_publishes_durable_site_tombstone_and_waits_for_ack(
+    lifecycle_database: str,
+) -> None:
+    settings = _settings(lifecycle_database)
+    engine = create_engine(lifecycle_database)
+    with Session(engine) as session, session.begin():
+        site = Site(
+            display_name="Previously Deployed Site",
+            enabled=True,
+            enrollment_state=EnrollmentState.ACTIVE,
+        )
+        event = Event(name="Globally Deleted Event", timezone="UTC")
+        session.add_all([site, event])
+        session.flush()
+        session.add(
+            EventDeployment(
+                event_id=event.event_id,
+                site_id=site.site_id,
+                status=EventDeploymentStatus.DEPLOYED,
+                desired_revision=1,
+                acknowledged_revision=1,
+            )
+        )
+        event_id, site_id = event.event_id, site.site_id
+
+    with TestClient(create_app(settings)) as client:
+        response = client.request(
+            "DELETE",
+            f"/api/v1/admin/events/{event_id}",
+            headers={"X-UPM-Admin-Token": settings.admin_token},
+            json={"confirmation": "Globally Deleted Event"},
+        )
+        assert response.status_code == 202
+        operation_id = UUID(response.json()["deletion_operation_id"])
+
+    _claim_and_execute(engine, "lifecycle.delete_event")
+    with Session(engine) as session:
+        operation = session.get(DeletionOperation, operation_id)
+        assert operation.status == "awaiting_sites"
+        assert operation.stage == "site_deletion_pending"
+        assert operation.site_statuses == [
+            {
+                "site_id": str(site_id),
+                "status": "pending",
+                "deletion_operation_id": str(operation_id),
+            }
+        ]
+        tombstone = session.scalar(
+            select(OutboxEvent).where(OutboxEvent.event_type == "central.event.deleted")
+        )
+        assert tombstone is not None
+        assert tombstone.event_id is None
+        assert tombstone.payload["event_id"] == str(event_id)
+        assert tombstone.payload["deletion_operation_id"] == str(operation_id)
+        assert session.get(Event, event_id) is None
+    engine.dispose()
+
+
 def test_bulk_people_deletion_targets_snapshot_and_preserves_audit(
     lifecycle_database: str,
 ) -> None:

@@ -199,6 +199,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content(), media_type="application/octet-stream", headers={"Content-Length": str(count)}
         )
 
+    @app.delete("/api/v1/storage/objects/{target_id}/{key:path}", dependencies=private)
+    def delete_object(target_id: UUID, key: str) -> dict:
+        """Delete one canonical object after its owning application proves it unreferenced."""
+        storage.path(storage.target(target_id), key).unlink(missing_ok=True)
+        return {"deleted": True}
+
     @app.post("/api/v1/storage/smb/incoming/{relative_path:path}/complete", dependencies=private)
     def complete_incoming(relative_path: str, payload: IncomingCompleteRequest) -> dict:
         path = incoming_path(relative_path)

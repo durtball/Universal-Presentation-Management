@@ -392,9 +392,7 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         capabilities,
                         lease,
                         excluded_job_types=(
-                            PARALLEL_PRESENTATION_MEDIA_JOBS
-                            if media_pool.available == 0
-                            else None
+                            PARALLEL_PRESENTATION_MEDIA_JOBS if media_pool.available == 0 else None
                         ),
                     )
                     kind = "processing"
@@ -419,7 +417,13 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                             and work.job_type != ASSET_RECONCILIATION_JOB
                         )
                         or work.job_type
-                        in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB, SMB_PRESENTATIONS_JOB}
+                        in {
+                            SMB_SCAN_JOB,
+                            SMB_INGEST_JOB,
+                            SMB_RETIRE_JOB,
+                            SMB_PRESENTATIONS_JOB,
+                            "lifecycle.delete_media_objects",
+                        }
                     ):
                         # Commit the durable claim and release this connection before matching or
                         # calling Media Storage. Completion/failure uses a fresh short transaction.
@@ -520,6 +524,19 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         session.expunge(media_work)
                     if media_work.job_type.startswith("presentation_media."):
                         execute_processing_job(None, None, media_work, worker_id, media_processor)
+                    elif media_work.job_type == "lifecycle.delete_media_objects":
+                        for item in media_work.payload["data"]["objects"]:
+                            asyncio.run(
+                                media_processor.storage.delete_object(
+                                    UUID(item["storage_target_id"]), item["object_key"]
+                                )
+                            )
+                        for item in media_work.payload["data"].get("staging", []):
+                            asyncio.run(
+                                media_processor.storage.release_staging(
+                                    UUID(item["storage_target_id"]), item["object_key"]
+                                )
+                            )
                     elif media_work.job_type == SMB_SCAN_JOB:
                         with factory.begin() as smb_session:
                             reconcile_smb(

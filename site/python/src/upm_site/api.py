@@ -52,6 +52,7 @@ from upm_site.auth import (
     rotate_csrf,
 )
 from upm_site.config import SiteSettings
+from upm_site.event_deployments import request_site_event_deletion
 from upm_site.media.ingestion import (
     IngestionConflictError,
     IngestionError,
@@ -69,6 +70,7 @@ from upm_site.operations_api import register_operations_routes
 from upm_site.persistence.database import create_site_engine, create_site_session_factory
 from upm_site.persistence.models import (
     CentralRegistration,
+    Event,
     EventDeploymentProjection,
     LocalSiteIdentity,
     ManagedSetting,
@@ -101,6 +103,10 @@ class HealthResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class EventDeletionRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=255)
 
 
 class MediaResponse(BaseModel):
@@ -800,6 +806,25 @@ def create_app(
                 )
             )
         ]
+
+    @app.delete("/api/v1/events/{event_id}", status_code=202, tags=["events"])
+    def delete_event(
+        event_id: UUID,
+        payload: EventDeletionRequest,
+        session: Annotated[Session, Depends(transaction)],
+    ) -> dict[str, object]:
+        event = session.get(Event, event_id)
+        if event is None:
+            return {"event_id": event_id, "status": "deleted", "idempotent": True}
+        if payload.confirmation != event.name:
+            raise HTTPException(422, "type the exact event name to confirm global deletion")
+        request_site_event_deletion(session, event_id)
+        return {
+            "event_id": event_id,
+            "status": "deletion_requested",
+            "scope": "global",
+            "message": "Central-managed events are deleted from Central and every deployed Site.",
+        }
 
     @app.post("/api/v1/sync/heartbeat", tags=["synchronization"])
     def queue_heartbeat(
