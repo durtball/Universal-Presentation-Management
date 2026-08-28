@@ -3,6 +3,7 @@
 import secrets
 import socket
 from datetime import timedelta
+from uuid import UUID
 
 import httpx
 from sqlalchemy import func, select
@@ -18,9 +19,24 @@ from upm_shared.contracts.sync import (
     SyncBatchRequest,
     SyncBatchResponse,
 )
-from upm_shared.enums import EnrollmentState, JobStatus
+from upm_shared.enums import EnrollmentState, JobStatus, SyncState
 from upm_site.config import SiteSettings
-from upm_site.persistence.models import CentralRegistration, OutboxEvent, Site, SyncCursor, utc_now
+from upm_site.persistence.models import (
+    CentralRegistration,
+    Event,
+    EventParticipation,
+    MediaReplicationSession,
+    OutboxEvent,
+    PersonProjection,
+    Presentation,
+    PresentationVersion,
+    SessionParticipant,
+    Site,
+    SyncCursor,
+    TransferJob,
+    utc_now,
+)
+from upm_site.persistence.models import Session as ProgramSession
 from upm_site.persistence.queue import SiteQueue
 from upm_site.sync import (
     apply_central_event,
@@ -42,6 +58,71 @@ class DeliveryFailure(RuntimeError):
         super().__init__(detail)
         self.code = code
         self.retryable = retryable
+
+
+def _mark_domain_metadata_synchronized(session: Session, event: OutboxEvent) -> None:
+    data = event.payload if isinstance(event.payload, dict) else {}
+    if event.event_type == "site.event_recovery_snapshot.upserted":
+        event_id = data.get("event_id")
+        revision = int(data.get("deployment_revision", 0))
+        local = session.get(Event, UUID(str(event_id))) if event_id else None
+        if local is None or local.revision > revision:
+            return
+        local.sync_state = SyncState.SYNCHRONIZED
+        for model in (EventParticipation, ProgramSession, Presentation):
+            for item in session.scalars(select(model).where(model.event_id == local.event_id)):
+                item.sync_state = SyncState.SYNCHRONIZED
+        presentation_ids = select(Presentation.presentation_id).where(
+            Presentation.event_id == local.event_id
+        )
+        for version in session.scalars(
+            select(PresentationVersion).where(
+                PresentationVersion.presentation_id.in_(presentation_ids)
+            )
+        ):
+            version.sync_state = SyncState.SYNCHRONIZED
+        person_ids = session.scalars(
+            select(EventParticipation.person_id).where(
+                EventParticipation.event_id == local.event_id
+            )
+        ).all()
+        for person in session.scalars(
+            select(PersonProjection).where(PersonProjection.person_id.in_(person_ids))
+        ):
+            person.sync_state = SyncState.SYNCHRONIZED
+        session_ids = select(ProgramSession.session_id).where(
+            ProgramSession.event_id == local.event_id
+        )
+        for link in session.scalars(
+            select(SessionParticipant).where(SessionParticipant.session_id.in_(session_ids))
+        ):
+            link.sync_state = SyncState.SYNCHRONIZED
+        replication_ids = select(MediaReplicationSession.replication_session_id).where(
+            MediaReplicationSession.event_id == local.event_id
+        )
+        for job in session.scalars(
+            select(TransferJob).where(
+                TransferJob.transfer_job_id.in_(replication_ids),
+                TransferJob.required_capabilities.contains(["central-event-synchronized"]),
+            )
+        ):
+            remaining = [
+                capability
+                for capability in job.required_capabilities
+                if capability != "central-event-synchronized"
+            ]
+            job.required_capabilities = remaining or ["transfer"]
+            job.next_attempt_at = utc_now()
+    elif event.event_type == "site.presentation.upserted" and data.get("presentation_id"):
+        item = session.get(Presentation, UUID(str(data["presentation_id"])))
+        if item is not None and item.revision <= int(data.get("revision", 0)):
+            item.sync_state = SyncState.SYNCHRONIZED
+    elif event.event_type == "site.presentation_version.created" and data.get(
+        "presentation_version_id"
+    ):
+        item = session.get(PresentationVersion, UUID(str(data["presentation_version_id"])))
+        if item is not None:
+            item.sync_state = SyncState.SYNCHRONIZED
 
 
 def checked(response: httpx.Response) -> httpx.Response:
@@ -211,6 +292,7 @@ def deliver_site_events(
                 event = session.get(OutboxEvent, event_id)
                 ack = acknowledgements.get(event_id)
                 if ack and ack.accepted:
+                    _mark_domain_metadata_synchronized(session, event)
                     queue.process_outbox(event, worker_id)
                     if event.event_type == "site.heartbeat":
                         registration.last_heartbeat_at = utc_now()

@@ -95,6 +95,7 @@ def reconcile(session, storage, *, site_id, current_job_id=None, interval_second
                 PresentationAsset.presentation_version_id == version.presentation_version_id,
                 PresentationAsset.kind == AssetKind.ORIGINAL,
                 MediaObject.availability == MediaAvailability.AVAILABLE,
+                MediaObject.disposition == "authoritative",
                 MediaObject.deleted_at.is_(None),
             )
         ).first()

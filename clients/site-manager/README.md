@@ -18,6 +18,27 @@ The normal initial window is 1280×800 and remains freely resizable/maximizable.
 
 The default visual system uses Mica, deep graphite panels, illuminated cyan borders, restrained violet secondary accents, and animation only for future active work states.
 
+## Offline show operation
+
+After connecting to Site, the EVENT **+** action creates a Site-owned Event without a Central
+round trip. **Presentations → IMPORT PROGRAM** stages CSV/XLSX source, shows row validation, and
+commits the program locally. One meaningful source row becomes one Presentation Entry unless the
+source explicitly supplies a shared presentation identifier. Rooms created from imported location
+labels and all Presentation Entries are immediately available from Site-local APIs.
+
+Intake is a staged workflow. Explorer drops enter the profile-owned durable transfer queue, upload
+to Site over HTTP, and then appear in the Site intake inspector. **CONFIRM**, **ASSIGN / CHANGE**,
+**CREATE ENTRY**, and **REJECT** call real Site APIs. Confirmation queues managed-media promotion;
+it does not treat client upload completion as authoritative. The queue reports promotion failure
+separately from Central backup. Central outage therefore leaves a successful Site commit usable
+with backup pending.
+
+**OPEN ROOM** navigates to the operational Room Workspace. **OPEN** streams the canonical version
+from Site to a workstation temporary file, while **PUSH** and **PUSH & OPEN** create durable Site
+device-command records for the room's assigned primary Agent. No action connects Site Manager to
+an Agent or Site filesystem path. The optional Site SMB view is materialized by Site after managed
+promotion and is not a Site Manager transport.
+
 ## Build and packaging boundary
 
 `UPM.SiteManager.csproj` produces an unpackaged, self-contained WinUI `WinExe` independently of UPM Agent. The Windows CI workflow restores and builds the executable and every shared Windows project, runs the tests, and verifies there is no Agent project dependency. A signed MSIX is intentionally not emitted yet because publisher identity, signing certificate, and final Store/enterprise visual assets are deployment inputs; adding those packaging inputs does not require changing the executable or Agent boundary.
@@ -58,3 +79,7 @@ In the running application:
 7. Select Settings → **LOGOUT**, reconnect, and confirm a password is required after logout.
 8. Add a second Site profile, queue a file for each profile, switch the selected UI Site, and verify each request reaches its owning profile URL and canonical Site UUID.
 9. Inspect `%LOCALAPPDATA%\UPM\SiteManager\logs` for sanitized startup/connection diagnostics. Passwords, cookies, and CSRF values must not appear.
+10. Stop Central, create a Site Event with EVENT **+**, import a CSV/XLSX program, stage and assign
+    media, and open its Room Workspace; verify local operation remains available.
+11. Restart Central and verify Site outbox health drains, Presentation metadata changes from pending
+    to synchronized, and media replication independently reaches synchronized state.

@@ -504,6 +504,33 @@ class EventDeploymentRevision(CentralBase):
     deployment: Mapped[EventDeployment] = relationship(back_populates="snapshots")
 
 
+class SiteEventRecoverySnapshot(CentralBase):
+    """Latest accepted complete Site-owned Event graph for replacement recovery."""
+
+    __tablename__ = "site_event_recovery_snapshots"
+    __table_args__ = (
+        UniqueConstraint("site_id", "event_id"),
+        CheckConstraint("site_event_revision >= 1", name="site_event_revision_positive"),
+        Index("ix_central_site_event_recovery_event", "event_id", "received_at"),
+    )
+
+    recovery_snapshot_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    site_event_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class EventParticipation(CentralRecordMixin, CentralBase):
     __tablename__ = "event_participations"
     __table_args__ = (

@@ -19,6 +19,7 @@ from upm_site.persistence.models import (
     PresentationVersion,
     RotationAssignment,
 )
+from upm_site.recovery_snapshots import touch_site_recovery_snapshot
 
 
 class RotationOverrideWrite(BaseModel):
@@ -112,6 +113,7 @@ def register_rotation_routes(
         session.add(item)
         session.flush()
         _audit(session, request, item, "site.rotation_override.configured")
+        touch_site_recovery_snapshot(session, event)
         return _view(item)
 
     @app.delete("/api/v1/rotating-slides/overrides/{assignment_id}", tags=["rotating-slides"])
@@ -123,6 +125,7 @@ def register_rotation_routes(
         item.override_state = "cleared"
         item.revision += 1
         _audit(session, request, item, "site.rotation_override.cleared")
+        touch_site_recovery_snapshot(session, session.get(Event, item.event_id))
         return {
             "rotation_assignment_id": assignment_id,
             "active": False,

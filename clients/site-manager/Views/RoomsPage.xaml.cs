@@ -17,6 +17,13 @@ public sealed partial class RoomsPage : Page
   private void OnUnloaded(object sender, RoutedEventArgs e) { if (subscribed) { context.Changed -= OnContextChanged; subscribed = false; } }
   private void OnContextChanged(object? sender, OperatorContextChangedEventArgs e) => DispatcherQueue.TryEnqueue(() => _ = RefreshAsync());
   private void OnRefresh(object sender, RoutedEventArgs e) => _ = RefreshAsync();
+  private void OnOpenRoom(object sender, RoutedEventArgs e)
+  {
+    if (sender is Button { Tag: Guid roomId })
+    {
+      Frame.Navigate(typeof(RoomWorkspacePage), roomId);
+    }
+  }
 
   private async Task RefreshAsync()
   {
@@ -71,6 +78,7 @@ public sealed partial class RoomsPage : Page
         }
         rooms.Add(new RoomRow
         {
+          RoomId = item.Id("room_id") ?? Guid.Empty,
           Label = item.Text("label"), Origin = context.SelectedEventId.HasValue
               ? $"{eventSessions.Count} mapped sessions in selected event"
               : "SITE ROOM", Health = summary.Text("health", "unknown").ToUpperInvariant(),
@@ -92,4 +100,4 @@ public sealed partial class RoomsPage : Page
   private void Show(string message, InfoBarSeverity severity) { StateBar.Title = severity == InfoBarSeverity.Error ? "ROOM API ERROR" : "ROOMS"; StateBar.Message = message; StateBar.Severity = severity; StateBar.IsOpen = true; }
 }
 
-public sealed class RoomRow { public string Label { get; set; } = ""; public string Origin { get; set; } = ""; public string Health { get; set; } = ""; public string Primary { get; set; } = ""; public string Backup { get; set; } = ""; public string Telemetry { get; set; } = ""; public string Readiness { get; set; } = ""; public string Errors { get; set; } = ""; public string NextSession { get; set; } = ""; public string NextTime { get; set; } = ""; public string Rotation { get; set; } = "Effective: —"; }
+public sealed class RoomRow { public Guid RoomId { get; set; } public string Label { get; set; } = ""; public string Origin { get; set; } = ""; public string Health { get; set; } = ""; public string Primary { get; set; } = ""; public string Backup { get; set; } = ""; public string Telemetry { get; set; } = ""; public string Readiness { get; set; } = ""; public string Errors { get; set; } = ""; public string NextSession { get; set; } = ""; public string NextTime { get; set; } = ""; public string Rotation { get; set; } = "Effective: —"; }

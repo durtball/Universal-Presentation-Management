@@ -335,6 +335,44 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public Task<EventDeployment[]> GetEventDeploymentsAsync(CancellationToken cancellationToken) =>
       GetAsync<EventDeployment[]>("api/v1/event-deployments", cancellationToken);
 
+  public async Task<JsonElement> CreateEventAsync(
+      string name,
+      string timeZone,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, "api/v1/events");
+    request.Content = JsonContent.Create(new { name, timezone = timeZone }, options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "local Event creation");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
+  public async Task<JsonElement> UploadProgramImportAsync(
+      Guid eventId,
+      string filename,
+      Stream content,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/events/{eventId}/program-imports");
+    using var multipart = new MultipartFormDataContent();
+    var stream = new StreamContent(content);
+    multipart.Add(stream, "file", filename);
+    request.Content = multipart;
+    using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+    EnsureSiteSuccess(response, "program import staging");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
+  public async Task<JsonElement> CommitProgramImportAsync(
+      Guid batchId,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/program-imports/{batchId}/commit");
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "program import commit");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
   public Task<JsonElement> GetMediaStorageAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/media-storage", cancellationToken);
 
@@ -402,6 +440,47 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     using var response = await http.SendAsync(request, cancellationToken);
     EnsureSiteSuccess(response, "media assignment change");
     return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
+  public async Task<JsonElement> CreatePresentationEntryAsync(
+      Guid eventId,
+      Guid? sessionId,
+      string title,
+      IReadOnlyList<Guid> presenterIds,
+      Guid? mediaObjectId,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/events/{eventId}/presentations");
+    request.Content = JsonContent.Create(
+        new
+        {
+          session_id = sessionId,
+          title,
+          presenter_ids = presenterIds,
+          media_object_id = mediaObjectId,
+        },
+        options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "Presentation Entry creation");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
+  public async Task RejectMediaIntakeAsync(
+      Guid mediaId,
+      string reason,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/rejection");
+    request.Content = JsonContent.Create(new { reason }, options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "intake rejection");
+  }
+
+  public async Task RetryMediaCommitAsync(Guid mediaId, CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/commit-retry");
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "intake commit retry");
   }
 
   public async Task<IReadOnlyList<JsonElement>> GetPresentationOperationsAsync(
@@ -501,6 +580,37 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     return await JsonDocument.ParseAsync(
         await response.Content.ReadAsStreamAsync(cancellationToken),
         cancellationToken: cancellationToken);
+  }
+
+  public async Task CopyPresentationVersionAsync(
+      Guid presentationVersionId,
+      Stream destination,
+      CancellationToken cancellationToken)
+  {
+    using var response = await http.GetAsync(
+        $"api/v1/presentation-versions/{presentationVersionId}/download",
+        HttpCompletionOption.ResponseHeadersRead,
+        cancellationToken);
+    EnsureSiteSuccess(response, "presentation download");
+    await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+    await source.CopyToAsync(destination, cancellationToken);
+  }
+
+  public async Task<JsonElement> UpdatePresentationAssignmentAsync(
+      Guid presentationId,
+      Guid sessionId,
+      int revision,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(
+        HttpMethod.Patch,
+        $"api/v1/presentations/{presentationId}/assignment");
+    request.Content = JsonContent.Create(
+        new { session_id = sessionId, expected_revision = revision },
+        options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "presentation reassignment");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
   }
 
   private async Task<T> GetAsync<T>(string path, CancellationToken cancellationToken)

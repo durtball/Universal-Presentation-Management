@@ -27,3 +27,4 @@ New decisions must not silently weaken Central/Site separation, Site offline aut
 - [ADR-0017: Native Site Manager and durable Agent control plane](ADR-0017-windows-site-manager-agent-control-plane.md) — separates Site Manager and Agent products, requires Site-mediated durable control, heartbeat-derived presence, and conflict-safe Agent saveback.
 
 - [ADR-0018: Row Presentation Entries and Rotating-Slide Inheritance](ADR-0018-row-presentation-entries-and-rotating-slides.md)
+- [ADR-0019: Site-Originated Events and Complete Recovery Snapshots](ADR-0019-site-originated-event-recovery-snapshots.md)

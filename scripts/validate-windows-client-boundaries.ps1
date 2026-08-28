@@ -47,6 +47,26 @@ if ($windowCode -match "_\s*=>\s*typeof\(DashboardPage\)") {
 
 Write-Host "Validated all nine distinct native navigation targets."
 
+$roomWorkspace = Join-Path $PSScriptRoot "../clients/site-manager/Views/RoomWorkspacePage.xaml"
+if (-not (Test-Path $roomWorkspace)) {
+    throw "Room operations must navigate to a real RoomWorkspacePage."
+}
+$roomsXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/Views/RoomsPage.xaml") -Raw
+if ($roomsXaml -notmatch 'Content="OPEN ROOM"[^>]*Click="OnOpenRoom"') {
+    throw "RoomsPage OPEN ROOM action is not wired to navigation."
+}
+$dashboardRoomXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/Views/DashboardPage.xaml") -Raw
+if ($dashboardRoomXaml -notmatch 'Content="OPEN ROOM"[^>]*Click="OnOpenRoom"') {
+    throw "Dashboard OPEN ROOM action is not wired to RoomWorkspace navigation."
+}
+$intakeXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/Views/IntakePage.xaml") -Raw
+foreach ($action in @("ASSIGN / CHANGE", "CREATE ENTRY", "REJECT")) {
+    if ($intakeXaml -notmatch ('Content="' + [regex]::Escape($action) + '"[^>]*Click=')) {
+        throw "Intake action '$action' is not wired to a real handler."
+    }
+}
+Write-Host "Validated operational room navigation and intake actions."
+
 $appXaml = Get-Content (Join-Path $PSScriptRoot "../clients/site-manager/App.xaml") -Raw
 if ($appXaml -notmatch "XamlControlsResources") {
     throw "App.xaml must merge WinUI XamlControlsResources."

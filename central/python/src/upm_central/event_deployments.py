@@ -17,6 +17,7 @@ from upm_central.persistence.models import (
     Presentation,
     RotationAssignment,
     Site,
+    SiteEventRecoverySnapshot,
     SiteRoomMapping,
     utc_now,
 )
@@ -165,6 +166,16 @@ def build_snapshot(
         select(SiteRoomMapping).where(SiteRoomMapping.site_id == deployment.site_id)
     ).all()
     users = session.scalars(select(AdminUser).order_by(AdminUser.admin_user_id)).all()
+    recovery = session.scalar(
+        select(SiteEventRecoverySnapshot).where(
+            SiteEventRecoverySnapshot.site_id == deployment.site_id,
+            SiteEventRecoverySnapshot.event_id == event.event_id,
+        )
+    )
+    recovered_room_configuration = (
+        dict(recovery.snapshot.get("room_configuration") or {}) if recovery else {}
+    )
+    recovered_extensions = dict(recovery.snapshot.get("extensions") or {}) if recovery else {}
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
@@ -177,6 +188,7 @@ def build_snapshot(
         ends_at=event.ends_at,
         timezone=event.timezone,
         room_configuration={
+            **recovered_room_configuration,
             "mappings": [
                 {
                     "imported_label": item.imported_label,
@@ -187,7 +199,9 @@ def build_snapshot(
                 }
                 for item in room_mappings
             ]
+            or recovered_room_configuration.get("mappings", []),
         },
+        extensions=recovered_extensions,
         users=[
             SiteUserSnapshot(
                 user_id=user.admin_user_id,

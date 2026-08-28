@@ -19,6 +19,7 @@ public sealed class Metric
 }
 public sealed class DashboardRoom
 {
+  public Guid RoomId { get; set; }
   public string Label { get; set; } = "—";
   public string Agents { get; set; } = "PRIMARY UNASSIGNED  •  BACKUP UNASSIGNED";
   public string Counts { get; set; } = "— READY  •  — MISSING  •  — REVIEW";
@@ -82,6 +83,7 @@ public sealed partial class DashboardPage : Page
         ready += summary.NumberOrDefault("ready_count"); missing += summary.NumberOrDefault("missing_count"); errors += summary.NumberOrDefault("error_count");
         Rooms.Add(new DashboardRoom
         {
+          RoomId = room.Id("room_id") ?? Guid.Empty,
           Label = room.Text("label"), Agents = $"PRIMARY {Agent(endpoints, "primary")}  •  BACKUP {Agent(endpoints, "backup")}",
           Counts = $"{summary.NumberOrDefault("ready_count")} READY  •  {summary.NumberOrDefault("missing_count")} MISSING  •  — REVIEW",
           Next = next.Text("title", "No upcoming session"), NextTime = JsonProjection.LocalTime(next.Text("starts_at", "")),
@@ -108,6 +110,7 @@ public sealed partial class DashboardPage : Page
   private static string Agent(JsonElement endpoints, string role) { var agent = endpoints.Child(role); return agent.ValueKind == JsonValueKind.Object ? $"{agent.Text("name", "UNASSIGNED")} {agent.Text("status", "UNKNOWN").ToUpperInvariant()}" : "UNASSIGNED UNKNOWN"; }
   private void Add(string label, string value, string detail, Brush brush) => Metrics.Add(new Metric { Label = label, Value = value, Detail = detail, DetailBrush = brush });
   private async void OnRefreshClick(object sender, RoutedEventArgs args) { if (connections.Current?.Profile is not { } profile) return; try { await connections.RefreshAsync(profile.ProfileId, CancellationToken.None); } catch (Exception ex) { DashboardInfo.Message = ex.Message; DashboardInfo.IsOpen = true; } }
+  private void OnOpenRoom(object sender, RoutedEventArgs args) { if (sender is Button { Tag: Guid roomId } && roomId != Guid.Empty) Frame.Navigate(typeof(RoomWorkspacePage), roomId); }
   private void SetDisconnectedMetrics() { Metrics.Clear(); foreach (var label in new[] { "INTAKE QUEUE", "ACTIVE UPLOADS", "FAILED UPLOADS", "PRESENTATIONS READY", "PRESENTATIONS MISSING", "ROOMS READY", "DEVICES ONLINE", "REVIEWS IN PROGRESS" }) Add(label, "—", "UNKNOWN", Gray()); }
   private static SolidColorBrush Cyan()=>new(Colors.Cyan); private static SolidColorBrush Violet()=>new(Colors.Violet); private static SolidColorBrush Green()=>new(Colors.LightGreen); private static SolidColorBrush Amber()=>new(Colors.Goldenrod); private static SolidColorBrush Red()=>new(Colors.OrangeRed); private static SolidColorBrush Gray()=>new(Colors.Gray);
   private void OnUnloaded(object sender, RoutedEventArgs args)=>connections.ConnectionChanged-=OnConnectionChanged;

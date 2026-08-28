@@ -479,6 +479,20 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                                 media.storage_target_id, media.object_key, media.content_hash
                             )
                             media.disposition = "authoritative"
+                            for transfer in session.scalars(
+                                select(TransferJob).where(
+                                    TransferJob.media_object_id == media.media_object_id,
+                                    TransferJob.transfer_type == PUSH_TRANSFER,
+                                )
+                            ):
+                                remaining = [
+                                    capability
+                                    for capability in transfer.required_capabilities
+                                    if capability != "intake-promoted"
+                                ]
+                                transfer.required_capabilities = remaining or ["transfer"]
+                                transfer.next_attempt_at = utc_now()
+                            enqueue_smb_presentations(session, media.site_id, delay_seconds=0)
                         else:
                             result = storage_client.reject_intake(
                                 media.storage_target_id, media.object_key, media.content_hash

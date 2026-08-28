@@ -206,6 +206,47 @@ public sealed class SiteConnectivityTests
     Assert.Contains(profile.ProfileId, vault.Forgotten);
   }
 
+  [Fact]
+  public async Task SiteProgramAndPresentationOperationsUseAuthenticatedSiteRoutes()
+  {
+    var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath switch
+    {
+      "/api/v1/auth/session" => Json(SessionJson),
+      "/api/v1/events" => Json("""{"event_id":"019b4444-4444-7444-8444-444444444444"}"""),
+      "/api/v1/events/019b4444-4444-7444-8444-444444444444/program-imports" =>
+          Json("""{"import_batch_id":"019b5555-5555-7555-8555-555555555555"}"""),
+      "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555/commit" =>
+          Json("""{"status":"committed"}"""),
+      "/api/v1/presentations/019b6666-6666-7666-8666-666666666666/assignment" =>
+          Json("""{"revision":2}"""),
+      _ => throw new InvalidOperationException(request.RequestUri.AbsolutePath),
+    });
+    var api = CreateApi(handler);
+    await api.RestoreSessionAsync(CancellationToken.None);
+    var eventId = Guid.Parse("019b4444-4444-7444-8444-444444444444");
+    var batchId = Guid.Parse("019b5555-5555-7555-8555-555555555555");
+    var presentationId = Guid.Parse("019b6666-6666-7666-8666-666666666666");
+
+    await api.CreateEventAsync("Offline Show", "UTC", CancellationToken.None);
+    await api.UploadProgramImportAsync(
+        eventId,
+        "program.csv",
+        new MemoryStream("Session Title\nOpening"u8.ToArray()),
+        CancellationToken.None);
+    await api.CommitProgramImportAsync(batchId, CancellationToken.None);
+    await api.UpdatePresentationAssignmentAsync(
+        presentationId,
+        Guid.NewGuid(),
+        1,
+        CancellationToken.None);
+
+    Assert.All(
+        handler.Requests.Where(request => request.Method != HttpMethod.Get),
+        request => Assert.Equal(
+            "fresh-csrf",
+            request.Headers.GetValues("X-CSRF-Token").Single()));
+  }
+
   private const string SessionJson = """{"authenticated":true,"user":{"user_id":"019b1111-1111-7111-8111-111111111111","username":"operator","display_name":"Operator","roles":[],"permissions":[]},"csrf_token":"fresh-csrf"}""";
 
   private static RecordingHandler CompleteSiteHandler(HttpStatusCode sessionStatus, Guid? siteId = null)

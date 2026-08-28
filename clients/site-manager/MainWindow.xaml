@@ -38,7 +38,7 @@
                 </StackPanel>
                 <StackPanel x:Name="EventControl" Grid.Column="2" Spacing="2">
                     <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" Text="EVENT" />
-                    <ComboBox x:Name="EventSelector" MinWidth="180" IsEnabled="False" PlaceholderText="Connect to select event" DisplayMemberPath="DisplayLabel" SelectionChanged="OnEventSelectionChanged" />
+                    <Grid ColumnSpacing="5"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ComboBox x:Name="EventSelector" MinWidth="180" IsEnabled="False" PlaceholderText="Connect to select event" DisplayMemberPath="DisplayLabel" SelectionChanged="OnEventSelectionChanged"/><Button x:Name="AddEventButton" Grid.Column="1" Content="+" AutomationProperties.Name="Create local Event" IsEnabled="False" Click="OnAddEventClick"/></Grid>
                 </StackPanel>
                 <Grid x:Name="ConnectionStatus" Grid.Column="4" ColumnSpacing="22" HorizontalAlignment="Right" VerticalAlignment="Center" ToolTipService.ToolTip="Disconnected">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="145"/><ColumnDefinition Width="120"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>

@@ -91,6 +91,31 @@ public sealed partial class MainWindow : Window
   private async void OnAddSiteClick(object sender, RoutedEventArgs args) =>
       await ShowProfileDialogAsync(null);
 
+  private async void OnAddEventClick(object sender, RoutedEventArgs args)
+  {
+    if (SiteSelector.SelectedItem is not SiteProfile profile || operatorContext.ActiveClient is not { } api)
+    {
+      return;
+    }
+    var name = new TextBox { Header = "Event name", PlaceholderText = "Production Event" };
+    var timeZone = new TextBox { Header = "IANA timezone", Text = "UTC" };
+    var panel = new StackPanel { Spacing = 7 }; panel.Children.Add(name); panel.Children.Add(timeZone);
+    var dialog = new ContentDialog { XamlRoot = WindowLayout.XamlRoot, Title = "CREATE SITE EVENT", Content = panel, PrimaryButtonText = "CREATE", CloseButtonText = "CANCEL", DefaultButton = ContentDialogButton.Primary };
+    if (await dialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(name.Text)) return;
+    try
+    {
+      await api.CreateEventAsync(name.Text.Trim(), timeZone.Text.Trim(), CancellationToken.None);
+      await connections.RestoreAsync(profile, CancellationToken.None);
+    }
+    catch (Exception exception)
+    {
+      ConnectionInfoBar.Title = "EVENT CREATION FAILED";
+      ConnectionInfoBar.Message = exception.Message;
+      ConnectionInfoBar.Severity = InfoBarSeverity.Error;
+      ConnectionInfoBar.IsOpen = true;
+    }
+  }
+
   private async void OnConnectClick(object sender, RoutedEventArgs args)
   {
     if (SiteSelector.SelectedItem is not SiteProfile profile)
@@ -262,6 +287,7 @@ public sealed partial class MainWindow : Window
       }
 
       EventSelector.IsEnabled = true;
+      AddEventButton.IsEnabled = true;
       EventSelector.PlaceholderText = events.Count == 0 ? "No deployed events" : "Select event";
       var selectedEvent = events.FirstOrDefault(
           item => item.EventId == status.Profile?.LastSelectedEventId);
@@ -281,6 +307,7 @@ public sealed partial class MainWindow : Window
     {
       operatorContext.SelectEvent(null);
       EventSelector.IsEnabled = false;
+      AddEventButton.IsEnabled = false;
       EventSelector.PlaceholderText = "Connect to select event";
     }
 

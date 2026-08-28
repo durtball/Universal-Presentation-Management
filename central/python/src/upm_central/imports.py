@@ -1,18 +1,12 @@
 """Auditable CSV/XLSX staging, identity reconciliation, and transactional commit."""
 
-import csv
 import hashlib
-import io
-import re
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
-from zipfile import BadZipFile
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -60,13 +54,37 @@ from upm_shared.enums import (
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.presentation_media import allocate_presentation_identifier
+from upm_shared.program_import import (
+    COLUMN_ALIASES as SHARED_COLUMN_ALIASES,
+)
+from upm_shared.program_import import (
+    detect_columns as shared_detect_columns,
+)
+from upm_shared.program_import import (
+    header_key as shared_header_key,
+)
+from upm_shared.program_import import (
+    normalize_row as shared_normalize_row,
+)
+from upm_shared.program_import import (
+    parse_csv as shared_parse_csv,
+)
+from upm_shared.program_import import (
+    parse_source_date as shared_parse_source_date,
+)
+from upm_shared.program_import import (
+    parse_source_time as shared_parse_source_time,
+)
+from upm_shared.program_import import (
+    parse_xlsx as shared_parse_xlsx,
+)
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
 
 def _header_key(value: str) -> str:
     """Normalize source headings without losing the original heading in row evidence."""
-    return re.sub(r"[^a-z0-9]+", "_", value.strip().casefold()).strip("_")
+    return shared_header_key(value)
 
 
 # This is the single importer vocabulary.  More-specific headings intentionally have
@@ -150,6 +168,9 @@ COLUMN_ALIASES = {
     "session_type": "session_format",
     "presentation_type": "session_format",
 }
+# Central and Site intentionally consume one importer vocabulary.  The literal above is retained
+# temporarily as a readable compatibility inventory; the shared definition is authoritative.
+COLUMN_ALIASES = SHARED_COLUMN_ALIASES
 
 
 def _cell(value: object) -> object:
@@ -162,87 +183,25 @@ def _cell(value: object) -> object:
 
 def _parse_csv(content: bytes) -> list[dict[str, object]]:
     try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="CSV must be UTF-8"
-        ) from exc
-    return [
-        {str(k).strip(): _cell(v) for k, v in row.items()}
-        for row in csv.DictReader(io.StringIO(text))
-    ]
+        return shared_parse_csv(content)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _parse_xlsx(content: bytes) -> list[dict[str, object]]:
     try:
-        workbook = load_workbook(
-            io.BytesIO(content), read_only=True, data_only=True, keep_links=False
-        )
-        sheet = workbook.active
-        values = sheet.iter_rows(values_only=True)
-        headers = [str(value).strip() if value is not None else "" for value in next(values)]
-        rows = []
-        for row in values:
-            raw = {
-                header: _cell(value) for header, value in zip(headers, row, strict=False) if header
-            }
-            if any(value not in (None, "") for value in raw.values()):
-                raw["__worksheet"] = sheet.title
-                rows.append(raw)
-        workbook.close()
-        return rows
-    except (
-        BadZipFile,
-        InvalidFileException,
-        KeyError,
-        OSError,
-        TypeError,
-        ValueError,
-        StopIteration,
-    ) as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid XLSX workbook"
-        ) from exc
+        return shared_parse_xlsx(content)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _normalized(raw: dict[str, object]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in raw.items():
-        if key == "__worksheet":
-            result["_source_worksheet"] = value
-            continue
-        key_value = _header_key(key)
-        normalized_key = COLUMN_ALIASES.get(key_value, key_value)
-        if isinstance(value, str):
-            value = " ".join(value.strip().split())
-        if value in (None, "") and result.get(normalized_key) not in (None, ""):
-            continue
-        result[normalized_key] = value
-    if result.get("presenter_email") and not result.get("email"):
-        result["email"] = result["presenter_email"]
-    if result.get("email"):
-        result["normalized_email"] = normalize_text(str(result["email"]))
-    display = (
-        result.get("display_name")
-        or " ".join(str(result.get(key) or "") for key in ("given_name", "family_name")).strip()
-    )
-    if display:
-        result["display_name"] = display
-        result["normalized_name"] = normalize_text(str(display))
-    if result.get("external_id") and not result.get("external_namespace"):
-        result["external_namespace"] = "program_import_presenter"
-    return result
+    return shared_normalize_row(raw)
 
 
 def detect_columns(headers: list[str]) -> dict[str, str]:
     """Return the importer field selected by the existing normalization rules."""
-    result = {}
-    for header in headers:
-        if not header.strip() or header == "__worksheet":
-            continue
-        normalized = _header_key(header)
-        result[header] = COLUMN_ALIASES.get(normalized, normalized)
-    return result
+    return shared_detect_columns(headers)
 
 
 def _entity(values: dict[str, object]) -> ImportEntityType:
@@ -268,51 +227,12 @@ def _entity(values: dict[str, object]) -> ImportEntityType:
 
 def parse_source_date(value: object) -> date:
     """Interpret a source-local calendar date without assigning a timezone."""
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    supplied = str(value).strip()
-    if "T" in supplied or " " in supplied:
-        try:
-            return datetime.fromisoformat(supplied).date()
-        except ValueError:
-            pass
-    try:
-        return date.fromisoformat(supplied)
-    except ValueError:
-        pass
-    for pattern in ("%m/%d/%Y", "%m/%d/%y"):
-        try:
-            return datetime.strptime(supplied, pattern).date()
-        except ValueError:
-            continue
-    raise ValueError(f"invalid source date {supplied!r}")
+    return shared_parse_source_date(value)
 
 
 def parse_source_time(value: object) -> time:
     """Interpret a source-local wall-clock time without assigning a timezone."""
-    if isinstance(value, datetime):
-        return value.time().replace(tzinfo=None)
-    if isinstance(value, time):
-        return value.replace(tzinfo=None)
-    supplied = str(value).strip()
-    if "T" in supplied or " " in supplied and not supplied.upper().endswith(("AM", "PM")):
-        try:
-            return datetime.fromisoformat(supplied).time().replace(tzinfo=None)
-        except ValueError:
-            pass
-    try:
-        parsed = time.fromisoformat(supplied)
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        pass
-    for pattern in ("%I:%M %p", "%I:%M:%S %p"):
-        try:
-            return datetime.strptime(supplied.upper(), pattern).time()
-        except ValueError:
-            continue
-    raise ValueError(f"invalid source time {supplied!r}")
+    return shared_parse_source_time(value)
 
 
 def _event_datetime(local_date: date, local_time: time, event: Event) -> datetime:

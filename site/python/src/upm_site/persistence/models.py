@@ -32,6 +32,10 @@ from upm_shared.enums import (
     EnrollmentState,
     EventDeploymentStatus,
     ExternalEntityType,
+    ImportEntityType,
+    ImportSourceType,
+    ImportStatus,
+    ImportValidationState,
     JobPriority,
     JobStatus,
     MediaAvailability,
@@ -233,6 +237,104 @@ class ManagedSetting(SiteRecordMixin, SiteBase):
     setting_key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     central_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProgramImportSource(SiteBase):
+    """Durable original program spreadsheet retained for audit and deterministic replay."""
+
+    __tablename__ = "program_import_sources"
+    __table_args__ = (enum_check("source_type", ImportSourceType),)
+
+    import_source_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[ImportSourceType] = mapped_column(
+        domain_enum(ImportSourceType, length=8), nullable=False
+    )
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class ProgramImportBatch(SiteRecordMixin, SiteBase):
+    """Site-owned staged import; identical source bytes resolve to the same batch."""
+
+    __tablename__ = "program_import_batches"
+    __table_args__ = (
+        enum_check("status", ImportStatus),
+        UniqueConstraint("event_id", "source_sha256", "importer_type"),
+        Index("ix_site_program_import_batches_event_status", "event_id", "status"),
+    )
+
+    import_batch_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    import_source_id: Mapped[UUID] = mapped_column(
+        ForeignKey("program_import_sources.import_source_id", ondelete="RESTRICT"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    importer_type: Mapped[str] = mapped_column(String(100), default="program", nullable=False)
+    status: Mapped[ImportStatus] = mapped_column(
+        domain_enum(ImportStatus, length=16), default=ImportStatus.UPLOADED, nullable=False
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    valid_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    committed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_summary: Mapped[str | None] = mapped_column(Text)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    rows: Mapped[list["ProgramImportRow"]] = relationship(back_populates="batch")
+
+
+class ProgramImportRow(SiteRecordMixin, SiteBase):
+    """One source row and its durable proposal/commit identity evidence."""
+
+    __tablename__ = "program_import_rows"
+    __table_args__ = (
+        enum_check("entity_type", ImportEntityType),
+        enum_check("validation_state", ImportValidationState),
+        UniqueConstraint("import_batch_id", "source_row_number"),
+        Index("ix_site_program_import_rows_batch_state", "import_batch_id", "validation_state"),
+    )
+
+    import_row_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    import_batch_id: Mapped[UUID] = mapped_column(
+        ForeignKey("program_import_batches.import_batch_id", ondelete="RESTRICT"), nullable=False
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_row_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_values: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    normalized_values: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    corrected_values: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    entity_type: Mapped[ImportEntityType] = mapped_column(
+        domain_enum(ImportEntityType, length=16), nullable=False
+    )
+    validation_state: Mapped[ImportValidationState] = mapped_column(
+        domain_enum(ImportValidationState, length=16), nullable=False
+    )
+    validation_messages: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    committed_entity_ids: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    batch: Mapped[ProgramImportBatch] = relationship(back_populates="rows")
 
 
 class PersonProjection(SiteRecordMixin, SiteBase):

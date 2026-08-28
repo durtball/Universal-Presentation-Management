@@ -29,7 +29,8 @@ from upm_central.persistence.models import (
     utc_now,
 )
 from upm_central.persistence.queue import CentralQueue
-from upm_shared.contracts.deployments import SiteDeploymentStatus
+from upm_central.site_recovery import SiteRecoveryConflict, apply_site_recovery_snapshot
+from upm_shared.contracts.deployments import EventDeploymentSnapshot, SiteDeploymentStatus
 from upm_shared.contracts.media_transfer import MediaTransferProgress
 from upm_shared.contracts.sync import (
     UPM_SYNC_PROTOCOL_VERSION,
@@ -328,6 +329,21 @@ def apply_site_event(
                 media_import.import_state = MediaImportState.FAILED
             else:
                 media_import.import_state = MediaImportState.TRANSFERRING
+        site.last_seen_at = utc_now()
+        site.last_successful_sync_at = utc_now()
+    elif event.event_type == "site.event_recovery_snapshot.upserted":
+        try:
+            snapshot = EventDeploymentSnapshot.model_validate(event.payload)
+            if event.entity_id != snapshot.event_id:
+                raise SiteRecoveryConflict("event envelope identity does not match snapshot")
+            apply_site_recovery_snapshot(session, site, snapshot)
+        except (ValueError, SiteRecoveryConflict) as exc:
+            return EventAcknowledgement(
+                event_id=event.event_id,
+                accepted=False,
+                error_code="site_recovery_snapshot_conflict",
+                detail=str(exc)[:512],
+            )
         site.last_seen_at = utc_now()
         site.last_successful_sync_at = utc_now()
     elif event.event_type == "site.presentation.upserted":

@@ -664,12 +664,14 @@ name = "upm-shared"
 version = "0.1.0"
 source = { editable = "shared/python" }
 dependencies = [
+    { name = "openpyxl" },
     { name = "pydantic" },
     { name = "uuid6" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "openpyxl", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "uuid6", specifier = ">=2025.0.1" },
 ]
@@ -686,6 +688,7 @@ dependencies = [
     { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
+    { name = "python-multipart" },
     { name = "sqlalchemy" },
     { name = "upm-shared" },
     { name = "uvicorn" },
@@ -700,6 +703,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
+    { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "sqlalchemy", specifier = ">=2.0.41,<3" },
     { name = "upm-shared", editable = "shared/python" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
