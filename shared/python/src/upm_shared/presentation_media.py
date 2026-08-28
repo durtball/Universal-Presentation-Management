@@ -11,6 +11,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import PurePath, PurePosixPath
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -29,7 +30,20 @@ _WINDOWS_RESERVED = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
-SUPPORTED_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pdf"})
+POWERPOINT_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pps", ".ppsx"})
+IMAGE_PRESENTATION_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+)
+VIDEO_PRESENTATION_EXTENSIONS = frozenset(
+    {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+)
+DOCUMENT_PRESENTATION_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".txt"})
+SUPPORTED_PRESENTATION_EXTENSIONS = frozenset(
+    POWERPOINT_PRESENTATION_EXTENSIONS
+    | IMAGE_PRESENTATION_EXTENSIONS
+    | VIDEO_PRESENTATION_EXTENSIONS
+    | DOCUMENT_PRESENTATION_EXTENSIONS
+)
 
 
 def normalize_source_relative_path(value: str | None, original_filename: str) -> str | None:
@@ -164,8 +178,18 @@ class MatchResult:
     has_conflict: bool = False
 
 
+@lru_cache(maxsize=32_768)
 def _match_token(value: str | None) -> str:
     return _TOKEN.sub("", unicodedata.normalize("NFKC", value or "").upper())
+
+
+@lru_cache(maxsize=32_768)
+def _meaningful_match_tokens(value: str | None) -> frozenset[str]:
+    return frozenset(
+        part
+        for part in re.split(r"[^A-Z0-9]+", unicodedata.normalize("NFKC", value or "").upper())
+        if len(part) >= 4
+    )
 
 
 def match_presentation(
@@ -219,11 +243,13 @@ def match_presentation(
             return "path"
         return None
 
-    surname_counts: dict[str, int] = {}
+    # Candidate input may contain one row per presenter/session association.  Count and rank
+    # canonical presentations, never joined roster rows.
+    surname_presentations: dict[str, set[UUID]] = {}
     for item in candidates:
         surname = _match_token(item.presenter_family_name)
         if surname and surname in path_tokens:
-            surname_counts[surname] = surname_counts.get(surname, 0) + 1
+            surname_presentations.setdefault(surname, set()).add(item.presentation_id)
 
     identifier_hits: dict[UUID, list[str]] = {}
     ranked: list[tuple[int, MatchCandidate, list[str]]] = []
@@ -266,7 +292,7 @@ def match_presentation(
             evidence.append(f"Presenter {full_name_location} match")
         elif surname and surname in path_tokens:
             location = path_location(item.presenter_family_name) or "path"
-            score += 60 if surname_counts[surname] == 1 else 35
+            score += 60 if len(surname_presentations[surname]) == 1 else 35
             evidence.append(f"Presenter last name {item.presenter_family_name} matched {location}")
             if given and given in path_tokens:
                 score += 20
@@ -321,13 +347,7 @@ def match_presentation(
                 or (label == "Room" and room_location)
             ):
                 continue
-            meaningful = {
-                part
-                for part in re.split(
-                    r"[^A-Z0-9]+", unicodedata.normalize("NFKC", value or "").upper()
-                )
-                if len(part) >= 4
-            }
+            meaningful = _meaningful_match_tokens(value)
             hits = meaningful & path_tokens
             if hits:
                 score += min(points * len(hits), points * 2)
@@ -335,13 +355,52 @@ def match_presentation(
         if score:
             ranked.append((score, item, evidence))
 
-    ranked.sort(key=lambda row: (-row[0], str(row[1].presentation_id)))
+    # Collapse all evidence rows belonging to a canonical presentation.  Use the strongest
+    # complete evidence row (rather than adding scores) so extra roster rows cannot inflate a
+    # presentation's score, while retaining evidence from its aliases for operator display.
+    collapsed: dict[UUID, tuple[int, MatchCandidate, list[str]]] = {}
+    for score, item, evidence in ranked:
+        current = collapsed.get(item.presentation_id)
+        if current is None or score > current[0]:
+            collapsed[item.presentation_id] = (score, item, list(evidence))
+        elif score == current[0]:
+            current[2].extend(value for value in evidence if value not in current[2])
+    ranked = sorted(collapsed.values(), key=lambda row: (-row[0], str(row[1].presentation_id)))
     if not ranked:
         return MatchResult(MediaMatchState.UNMATCHED, None, "No matching identity evidence")
     numeric_tokens = {token for token in path_tokens if token.isdigit()}
     strong_id_candidates = {
         pid for pid, hits in identifier_hits.items() if numeric_tokens & set(hits)
     }
+    exact_presentation_ids = {
+        item.presentation_id
+        for item in candidates
+        if path_location(item.presentation_identifier) is not None
+    }
+    # An exact canonical Presentation ID is authoritative matching evidence when it names one
+    # distinct presentation. Supporting person/session evidence must not manufacture ambiguity.
+    if len(exact_presentation_ids) == 1:
+        winner_id = next(iter(exact_presentation_ids))
+        winner_score, winner, winner_evidence = next(
+            row for row in ranked if row[1].presentation_id == winner_id
+        )
+        views = tuple(
+            {
+                "presentation_id": str(item.presentation_id),
+                "score": score,
+                "confidence": "high" if score >= 90 else "medium" if score >= 50 else "low",
+                "evidence": evidence,
+            }
+            for score, item, evidence in ranked[:10]
+        )
+        return MatchResult(
+            MediaMatchState.SUGGESTED,
+            winner.presentation_id,
+            "; ".join(winner_evidence),
+            tuple(item.presentation_id for _, item, _ in ranked[:10]),
+            views,
+            "high",
+        )
     surname_candidate_ids = {
         item.presentation_id
         for _, item, evidence in ranked

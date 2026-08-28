@@ -30,7 +30,10 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import OutboxPayload
 from upm_shared.media_storage_client import AsyncMediaStorageClient
 from upm_shared.presentation_media import (
-    SUPPORTED_PRESENTATION_EXTENSIONS,
+    DOCUMENT_PRESENTATION_EXTENSIONS,
+    IMAGE_PRESENTATION_EXTENSIONS,
+    POWERPOINT_PRESENTATION_EXTENSIONS,
+    VIDEO_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
     MatchCandidate,
     allocate_presentation_identifier,
@@ -87,13 +90,14 @@ INTAKE_REJECT_JOB = "presentation_media.intake.reject"
 
 def intake_asset_kind(filename: str) -> AssetKind:
     extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-    if f".{extension}" in SUPPORTED_PRESENTATION_EXTENSIONS:
+    suffix = f".{extension}" if extension else ""
+    if suffix in POWERPOINT_PRESENTATION_EXTENSIONS or suffix == ".pdf":
         return AssetKind.ORIGINAL
-    if extension in {"jpg", "jpeg", "png"}:
+    if suffix in IMAGE_PRESENTATION_EXTENSIONS:
         return AssetKind.IMAGE
-    if extension in {"mp4", "mov", "mkv", "webm"}:
+    if suffix in VIDEO_PRESENTATION_EXTENSIONS:
         return AssetKind.VIDEO
-    if extension in {"doc", "docx", "txt"}:
+    if suffix in DOCUMENT_PRESENTATION_EXTENSIONS:
         return AssetKind.DOCUMENT
     return AssetKind.OTHER
 
@@ -172,6 +176,17 @@ def backfill_confirmed_original_assets(session: Session, site_id: UUID) -> int:
             if presentation is not None:
                 presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
             repaired += 1
+        elif existing.media_object_id != media.media_object_id:
+            linked = session.get(MediaObject, existing.media_object_id)
+            if linked is None or (
+                linked.availability is not MediaAvailability.AVAILABLE
+                or not linked.content_hash
+                or linked.size_bytes is None
+                or linked.content_hash == media.content_hash
+            ):
+                existing.media_object_id = media.media_object_id
+                existing.original_filename = media.original_filename
+                repaired += 1
     session.flush()
     return repaired
 

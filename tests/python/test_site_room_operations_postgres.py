@@ -36,6 +36,7 @@ from upm_site.persistence.models import (
     PresentationAsset,
     PresentationVersion,
     ProcessingJob,
+    ProgramRoomMapping,
     Room,
     StorageTarget,
 )
@@ -256,6 +257,7 @@ def room_factory() -> Iterator[tuple[sessionmaker[Session], SiteSettings, dict[s
                 site_id=site.site_id,
                 event_id=event_id,
                 media_id=media_id,
+                target_id=target_id,
                 device_ids=device_ids,
             )
         yield factory, settings, context
@@ -377,3 +379,104 @@ def test_room_program_media_device_dashboard_and_restart_workflow(
             select(DeviceAssignment).where(DeviceAssignment.room_id == room.room_id)
         ).all()
         assert len([item for item in assignments if item.active]) == 2
+
+
+def test_room_readiness_uses_canonical_media_and_counts_presentations_once(
+    room_factory: tuple[sessionmaker[Session], SiteSettings, dict[str, object]],
+) -> None:
+    factory, settings, context = room_factory
+    expected = {
+        "Bellini Ballroom 2102": (14, 5),
+        "Bellini Ballroom 2104": (12, 5),
+        "Delfino Ballroom 4103": (22, 11),
+        "Delfino Ballroom 4104": (27, 19),
+        "Lando Ballroom 4203": (29, 15),
+        "Marcello Ballroom 4403": (25, 15),
+    }
+    now = datetime.now(UTC)
+    with factory.begin() as session:
+        for room_index, (label, (presentation_count, ready_count)) in enumerate(expected.items()):
+            room = Room(
+                site_id=context["site_id"],
+                event_id=context["event_id"],
+                label=label,
+            )
+            session.add(room)
+            session.flush()
+            session.add(
+                ProgramRoomMapping(
+                    site_id=context["site_id"],
+                    event_id=context["event_id"],
+                    imported_label=label,
+                    normalized_imported_label=label.casefold(),
+                    room_id=room.room_id,
+                    confirmed_by="test",
+                )
+            )
+            for item_index in range(presentation_count):
+                session_id, presentation_id = new_uuid7(), new_uuid7()
+                session.add(
+                    ProgramSession(
+                        session_id=session_id,
+                        event_id=context["event_id"],
+                        title=f"{label} Session {item_index}",
+                        starts_at=now + timedelta(minutes=room_index * 60 + item_index),
+                        location_name=label,
+                        status=SessionStatus.SCHEDULED,
+                        active=True,
+                    )
+                )
+                session.add(
+                    Presentation(
+                        presentation_id=presentation_id,
+                        event_id=context["event_id"],
+                        session_id=session_id,
+                        title=f"{label} Presentation {item_index}",
+                        active=True,
+                    )
+                )
+                if item_index >= ready_count:
+                    continue
+                # Two canonical versions prove readiness is counted per
+                # presentation rather than per version or asset.
+                for version_number in (1, 2):
+                    version_id, media_id = new_uuid7(), new_uuid7()
+                    session.add(
+                        PresentationVersion(
+                            presentation_version_id=version_id,
+                            presentation_id=presentation_id,
+                            version_number=version_number,
+                        )
+                    )
+                    session.add(
+                        MediaObject(
+                            media_object_id=media_id,
+                            site_id=context["site_id"],
+                            event_id=context["event_id"],
+                            storage_target_id=context["target_id"],
+                            object_key=f"objects/room-readiness/{media_id}.pptx",
+                            category=MediaCategory.PRESENTATION_VERSION,
+                            original_filename=f"deck-v{version_number}.pptx",
+                            content_hash=f"{media_id.int:064x}"[-64:],
+                            hash_algorithm="sha256",
+                            size_bytes=1024,
+                            availability=MediaAvailability.AVAILABLE,
+                        )
+                    )
+                    session.add(
+                        PresentationAsset(
+                            presentation_version_id=version_id,
+                            media_object_id=media_id,
+                            kind=AssetKind.ORIGINAL,
+                        )
+                    )
+
+    with TestClient(create_app(settings=settings, session_factory=factory)) as client:
+        rooms = {item["label"]: item for item in client.get("/api/v1/rooms").json()}
+        for label, (presentation_count, ready_count) in expected.items():
+            summary = rooms[label]["summary"]
+            assert summary["presentation_count"] == presentation_count
+            assert summary["ready_count"] == ready_count
+            assert summary["missing_count"] == presentation_count - ready_count
+            detail = client.get(f"/api/v1/rooms/{rooms[label]['room_id']}").json()
+            assert detail["summary"] == summary

@@ -35,6 +35,28 @@ def test_source_relative_path_is_safe_provenance_only() -> None:
             normalize_source_relative_path(unsafe, "deck.pptx")
 
 
+@pytest.mark.parametrize(
+    ("filename", "kind"),
+    [("session-graphic.jpg", AssetKind.IMAGE), ("speaker-show.ppsx", AssetKind.ORIGINAL)],
+)
+def test_jpg_and_ppsx_use_canonical_media_policy(filename: str, kind: AssetKind) -> None:
+    canonical = canonical_presentation_filename(
+        CanonicalPresentationMetadata(
+            presentation_identifier="P-100",
+            event_timezone="UTC",
+            starts_at=datetime(2026, 8, 18, 9, tzinfo=UTC),
+            room_label="Room A",
+            presenter_family_name="Speaker",
+            presenter_given_name="Sam",
+            title="Session",
+            version_number=1,
+            original_filename=filename,
+        )
+    )
+    assert canonical.endswith(filename[filename.rfind(".") :])
+    assert intake_asset_kind(filename) is kind
+
+
 def test_source_relative_path_normalizes_windows_separators_without_losing_folders() -> None:
     assert (
         normalize_source_relative_path(r"Wednesday\0930\Ballroom A\final.pptx", "final.pptx")
@@ -118,6 +140,48 @@ def test_presenter_room_time_and_title_folders_rank_a_weak_filename() -> None:
     assert any("Title" in item for item in result.candidates[0]["evidence"])
     # Matching remains suggestion-only even when several exact path signals agree.
     assert result.state is not MediaMatchState.CONFIRMED
+
+
+def test_representative_import_paths_have_no_avoidable_unmatched_files() -> None:
+    candidates = [
+        MatchCandidate(
+            UUID(int=1),
+            "UPM-ONE",
+            title="Clinical Update",
+            presenter_family_name="Shulman",
+            session_title="Clinical Advances",
+            session_external_id="S-101",
+            room="Ballroom A",
+            starts_at=datetime(2026, 8, 19, 13, 30, tzinfo=UTC),
+        ),
+        MatchCandidate(
+            UUID(int=2),
+            "UPM-TWO",
+            title="Future of Imaging",
+            presenter_family_name="Kapoor",
+            session_title="Imaging Forum",
+            session_external_id="S-202",
+            room="Room 204",
+            starts_at=datetime(2026, 8, 20, 15, 0, tzinfo=UTC),
+        ),
+    ]
+    paths = [
+        "Wednesday/0930/Ballroom A/Shulman/Clinical Update/slides.jpg",
+        "Thursday/1100/Room 204/Imaging Forum/Kapoor/video.mp4",
+        "Thursday/S-202/Future of Imaging/handout.pdf",
+    ]
+
+    results = [
+        match_presentation(path, candidates, event_timezone="America/New_York")
+        for path in paths
+    ]
+
+    assert all(result.state is MediaMatchState.SUGGESTED for result in results)
+    assert [result.presentation_id for result in results] == [
+        candidates[0].presentation_id,
+        candidates[1].presentation_id,
+        candidates[1].presentation_id,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -245,6 +309,31 @@ def test_matching_prefers_exact_identity_and_preserves_ambiguity() -> None:
     assert match_presentation("Smith.pptx", [first]).state is MediaMatchState.UNMATCHED
 
 
+def test_matcher_collapses_multiple_roster_rows_for_one_presentation() -> None:
+    presentation_id = UUID(int=1)
+    rows = [
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Shulman"),
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Sponsor"),
+        MatchCandidate(presentation_id, "3373594", presenter_family_name="Moderator"),
+    ]
+
+    result = match_presentation("3373594-Shulman.pptx", rows)
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == presentation_id
+    assert result.candidate_ids == (presentation_id,)
+
+
+def test_exact_presentation_id_wins_over_unrelated_supporting_person_evidence() -> None:
+    identifier = MatchCandidate(UUID(int=1), "3444132", presenter_family_name="Smith")
+    unrelated_person = MatchCandidate(UUID(int=2), "999", presenter_family_name="Johnson")
+
+    result = match_presentation("3444132-Johnson.pdf", [identifier, unrelated_person])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == identifier.presentation_id
+
+
 def test_identifier_and_surname_produce_explained_high_suggestion() -> None:
     lomow = MatchCandidate(
         UUID(int=1),
@@ -294,7 +383,9 @@ def test_unique_surname_suggests_but_ambiguous_surname_does_not() -> None:
 
 
 def test_conflicting_strong_identifier_and_surname_requires_review() -> None:
-    identifier = MatchCandidate(UUID(int=1), "3261629", presenter_family_name="Smith")
+    identifier = MatchCandidate(
+        UUID(int=1), "UPM-1", external_presentation_id="3261629", presenter_family_name="Smith"
+    )
     surname = MatchCandidate(UUID(int=2), "999", presenter_family_name="Lomow")
     result = match_presentation("3261629-Lomow.pptx", [identifier, surname])
     assert result.state is MediaMatchState.AMBIGUOUS

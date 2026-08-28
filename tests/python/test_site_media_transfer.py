@@ -6,13 +6,14 @@ import httpx
 
 from upm_shared.enums import JobStatus, MediaTransferState, SourceSystem
 from upm_site.config import SiteSettings
+from upm_site.media.ingestion import IngestionConflictError
 from upm_site.media.transfer import (
     enqueue_transfer_progress,
     execute_central_pull,
     recover_exhausted_finalizations,
 )
 from upm_site.persistence.models import MediaTransferSession, OutboxEvent
-from upm_site.worker import fail_central_pull
+from upm_site.worker import defer_orphaned_pull, fail_central_pull
 
 
 def test_partial_transfer_reference_is_opaque_and_durable() -> None:
@@ -129,7 +130,7 @@ def test_duplicate_transfer_progress_is_idempotent() -> None:
         source_system=SourceSystem.SITE,
         payload={},
         idempotency_key=(
-            f"media-progress:{transfer.transfer_session_id}:0:{MediaTransferState.RETRY_WAIT}"
+            f"media-progress:{transfer.transfer_session_id}:0:0:{MediaTransferState.RETRY_WAIT}"
         ),
         status=JobStatus.PENDING,
     )
@@ -183,6 +184,62 @@ def test_transient_pull_failure_remains_retryable_and_worker_handler_returns(mon
     assert transfer.retry_count == 1
     assert transfer.error_detail == "temporary DNS failure"
     assert emitted == [transfer]
+
+
+def test_original_asset_identity_conflict_is_not_retried(monkeypatch) -> None:
+    transfer = transfer_session()
+    work = SimpleNamespace(
+        transfer_job_id=transfer.transfer_session_id,
+        status=JobStatus.RUNNING,
+    )
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return transfer
+
+    class Queue:
+        def fail(self, job, _worker_id, **values):
+            assert values["retryable"] is False
+            assert values["error_code"] == "media_pull_identity_conflict"
+            job.status = JobStatus.FAILED
+
+    monkeypatch.setattr("upm_site.worker.enqueue_transfer_progress", lambda *_args: None)
+    fail_central_pull(
+        Session(),
+        Queue(),
+        work,
+        "worker-1",
+        IngestionConflictError("canonical asset identity is corrupt"),
+        SiteSettings(
+            database_url="postgresql+psycopg://u:p@db/site",
+            credential_encryption_key="x" * 32,
+        ),
+    )
+    assert work.status is JobStatus.FAILED
+    assert transfer.state is MediaTransferState.FAILED
+
+
+def test_orphaned_pull_is_deferred_without_burning_a_retry() -> None:
+    work = SimpleNamespace(
+        status=JobStatus.RUNNING,
+        required_capabilities=["transfer"],
+        claimed_by_worker_id="worker-1",
+        lease_expires_at=object(),
+        heartbeat_at=object(),
+        error_code=None,
+        last_error=None,
+        attempt_count=7,
+    )
+
+    defer_orphaned_pull(work)
+
+    assert work.status is JobStatus.PENDING
+    assert work.required_capabilities == ["sync-dependencies"]
+    assert work.claimed_by_worker_id is None
+    assert work.lease_expires_at is None
+    assert work.heartbeat_at is None
+    assert work.error_code == "sync_dependency_materialization_required"
+    assert work.attempt_count == 7
 
 
 def test_site_worker_has_same_central_endpoint_and_egress_networks_as_sync() -> None:

@@ -1,4 +1,6 @@
 from pathlib import Path
+from threading import Event, Lock
+from time import monotonic, sleep
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -6,9 +8,21 @@ import pytest
 from sqlalchemy import Integer
 
 from upm_central.api import create_app
+from upm_central.config import CentralDatabaseSettings
 from upm_central.persistence.models import StorageRoot
-from upm_central.presentation_media import MediaStagingError, _safe_staging_path
-from upm_central.worker import execute_processing_job
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    MediaStagingError,
+    _safe_staging_path,
+)
+from upm_central.worker import (
+    PARALLEL_PRESENTATION_MEDIA_JOBS,
+    PresentationMediaJobPool,
+    execute_processing_job,
+    presentation_media_slot_failure_context,
+)
+from upm_shared.enums import JobStatus, MediaMatchState
+from upm_shared.presentation_media import MatchCandidate, match_presentation
 
 
 def test_staging_key_cannot_escape_configured_root(tmp_path: Path) -> None:
@@ -89,6 +103,138 @@ def test_worker_dispatches_dedicated_presentation_media_rescan_job() -> None:
 
     assert execute_processing_job(None, None, work, "worker-1", processor)
     assert processor.called_with == (job_id, "worker-1")
+
+
+def test_presentation_media_concurrency_setting_defaults_and_validates(monkeypatch) -> None:
+    monkeypatch.setenv("UPM_CENTRAL_DATABASE_URL", "postgresql+psycopg://db/test")
+    monkeypatch.setenv("UPM_CENTRAL_ADMIN_TOKEN", "a" * 32)
+    monkeypatch.setenv("UPM_CENTRAL_CREDENTIAL_ISSUER_KEY", "b" * 32)
+    assert CentralDatabaseSettings().presentation_media_concurrency == 4
+    monkeypatch.setenv("UPM_CENTRAL_PRESENTATION_MEDIA_CONCURRENCY", "16")
+    assert CentralDatabaseSettings().presentation_media_concurrency == 16
+    monkeypatch.setenv("UPM_CENTRAL_PRESENTATION_MEDIA_CONCURRENCY", "17")
+    with pytest.raises(ValueError):
+        CentralDatabaseSettings()
+
+
+def test_media_pool_one_serializes_and_rejects_duplicate_processing() -> None:
+    pool = PresentationMediaJobPool(1)
+    release = Event()
+    started = Event()
+    job_id = uuid4()
+
+    def work() -> None:
+        started.set()
+        release.wait(2)
+
+    try:
+        assert pool.submit(job_id, work)
+        assert started.wait(1)
+        assert pool.available == 0
+        assert not pool.submit(uuid4(), work)
+        assert not pool.submit(job_id, work)
+        release.set()
+        deadline = monotonic() + 2
+        while not pool.reap() and monotonic() < deadline:
+            sleep(0.01)
+        assert pool.available == 1
+    finally:
+        release.set()
+        pool.shutdown()
+
+
+def test_media_pool_four_run_in_parallel_fifth_waits_and_failure_is_isolated() -> None:
+    pool = PresentationMediaJobPool(4)
+    release = Event()
+    four_started = Event()
+    lock = Lock()
+    in_flight = 0
+    peak = 0
+
+    def work(*, fail: bool = False) -> None:
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            if in_flight == 4:
+                four_started.set()
+        release.wait(2)
+        with lock:
+            in_flight -= 1
+        if fail:
+            raise RuntimeError("synthetic failure")
+
+    ids = [uuid4() for _ in range(5)]
+    try:
+        for index, job_id in enumerate(ids[:4]):
+            assert pool.submit(job_id, lambda fail=index == 0: work(fail=fail))
+        assert four_started.wait(1)
+        assert peak == 4
+        assert pool.available == 0
+        assert not pool.submit(ids[4], work)
+        release.set()
+        completed = []
+        deadline = monotonic() + 2
+        while len(completed) < 4 and monotonic() < deadline:
+            completed.extend(pool.reap())
+            sleep(0.01)
+        assert len(completed) == 4
+        assert sum(error is not None for _, error in completed) == 1
+        assert pool.submit(ids[4], lambda: None)
+    finally:
+        release.set()
+        pool.shutdown()
+
+
+def test_promotion_jobs_use_bounded_parallel_media_slots() -> None:
+    assert "presentation_media.promote" in PARALLEL_PRESENTATION_MEDIA_JOBS
+
+
+def test_successful_promotion_never_surfaces_as_slot_failure() -> None:
+    completed = SimpleNamespace(status=JobStatus.SUCCEEDED)
+    assert presentation_media_slot_failure_context(completed, ValueError("late artifact")) is None
+    failure = presentation_media_slot_failure_context(None, ValueError("genuine failure"))
+    assert failure == {"error_type": "ValueError", "safe_message": "genuine failure"}
+
+
+def test_rescan_batch_matches_concurrently_with_deterministic_results() -> None:
+    candidate = MatchCandidate(uuid4(), "MATCH-001", presenter_family_name="Smith")
+    items = [(uuid4(), f"Room A/MATCH-001-Smith-{index}.pptx") for index in range(8)]
+    serial = CentralMediaStagingService(None, None, 1, matching_concurrency=1)
+    expected = serial._match_rescan_batch(items, [candidate], "UTC")
+
+    parallel = CentralMediaStagingService(None, None, 1, matching_concurrency=4)
+    release = Event()
+    four_started = Event()
+    lock = Lock()
+    in_flight = 0
+    peak = 0
+
+    def observed_match(source_path, candidates, event_timezone):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            if in_flight == 4:
+                four_started.set()
+        assert four_started.wait(1)
+        release.set()
+        result = match_presentation(source_path, candidates, event_timezone=event_timezone)
+        with lock:
+            in_flight -= 1
+        return result
+
+    parallel._match_rescan_item = observed_match
+    actual = parallel._match_rescan_batch(items, [candidate], "UTC")
+
+    assert peak == 4
+    assert [media_id for media_id, _ in actual] == [media_id for media_id, _ in expected]
+    assert [result.state for _, result in actual] == [
+        MediaMatchState.SUGGESTED for _ in items
+    ]
+    assert [result.presentation_id for _, result in actual] == [
+        result.presentation_id for _, result in expected
+    ]
 
 
 def test_central_presentation_ingestion_has_no_legacy_data_path_dependency() -> None:

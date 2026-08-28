@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from upm_shared.enums import (
+    AssetKind,
     DeviceRole,
     JobStatus,
     MediaAvailability,
@@ -376,6 +377,15 @@ def _presentation_state(
     processing_jobs: list[ProcessingJob],
     transfer_jobs: list[TransferJob],
 ) -> str:
+    # Room readiness is a Site-local canonical-media fact. Processing, transfer,
+    # and SMB state must not downgrade a presentation whose linked media is here.
+    available = [
+        item
+        for item in media
+        if item.availability == MediaAvailability.AVAILABLE and item.deleted_at is None
+    ]
+    if available:
+        return "ready"
     failed_jobs = {JobStatus.FAILED, JobStatus.EXHAUSTED}
     pending_jobs = {JobStatus.PENDING, JobStatus.RETRY_WAIT}
     if (
@@ -399,13 +409,6 @@ def _presentation_state(
         in {PresentationProcessingStatus.QUEUED, PresentationProcessingStatus.PROCESSING}
     ):
         return "processing"
-    available = [item for item in media if item.availability == MediaAvailability.AVAILABLE]
-    if available:
-        if presentation.processing_status == PresentationProcessingStatus.SUCCEEDED or any(
-            item.status == JobStatus.SUCCEEDED for item in processing_jobs
-        ):
-            return "ready"
-        return "uploaded"
     if presentation.workflow_status in {
         PresentationWorkflowStatus.ARCHIVED,
         PresentationWorkflowStatus.CANCELLED,
@@ -453,7 +456,10 @@ def _presentations_for_sessions(
     version_ids = [item.presentation_version_id for item in versions]
     assets = session.scalars(
         select(PresentationAsset)
-        .where(PresentationAsset.presentation_version_id.in_(version_ids))
+        .where(
+            PresentationAsset.presentation_version_id.in_(version_ids),
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
         .order_by(PresentationAsset.created_at.desc())
     ).all()
     asset_media = {
@@ -603,11 +609,12 @@ def _summary(
     ]
     future_sessions.sort(key=lambda item: item.starts_at)
     primary = endpoints.get(DeviceRole.PRIMARY.value)
+    missing_count = len(unique_presentations) - status_counts["ready"]
     if room.archived_at is not None or not room.enabled:
         health = "disabled"
     elif status_counts["error"] or (primary and primary["status"] == "revoked"):
         health = "error"
-    elif status_counts["missing"] or primary is None:
+    elif missing_count or primary is None:
         health = "warning"
     elif primary and not primary["telemetry_available"]:
         health = "unknown"
@@ -618,7 +625,9 @@ def _summary(
         "session_count": len(program_sessions),
         "presentation_count": len(unique_presentations),
         "ready_count": status_counts["ready"],
-        "missing_count": status_counts["missing"],
+        # Missing is deliberately complementary to canonical readiness so the
+        # operational sub-states cannot make the headline counts inconsistent.
+        "missing_count": missing_count,
         "error_count": status_counts["error"],
         "processing_count": status_counts["processing"],
         "transfer_pending_count": status_counts["transfer_pending"] + status_counts["transferring"],
@@ -634,10 +643,18 @@ def _summary(
     }
 
 
-def room_summaries(session: Session) -> list[dict[str, Any]]:
-    rooms = session.scalars(select(Room).order_by(Room.label)).all()
+def _program_sessions_by_room(
+    session: Session, rooms: list[Room]
+) -> dict[UUID, list[ProgramSession]]:
+    """Resolve deployed program locations through canonical room mappings.
+
+    Active RoomAssignments remain authoritative. ProgramRoomMapping is also read
+    directly so a partially materialized deployment does not hide its sessions.
+    """
     room_ids = [item.room_id for item in rooms]
     sessions_by_room: dict[UUID, list[ProgramSession]] = defaultdict(list)
+    seen: dict[UUID, set[UUID]] = defaultdict(set)
+    assigned_session_ids: set[UUID] = set()
     for assignment, program_session in session.execute(
         select(RoomAssignment, ProgramSession)
         .join(ProgramSession, ProgramSession.session_id == RoomAssignment.session_id)
@@ -649,6 +666,56 @@ def room_summaries(session: Session) -> list[dict[str, Any]]:
         .order_by(ProgramSession.starts_at, ProgramSession.sort_order)
     ):
         sessions_by_room[assignment.room_id].append(program_session)
+        seen[assignment.room_id].add(program_session.session_id)
+        assigned_session_ids.add(program_session.session_id)
+
+    mappings = session.scalars(
+        select(ProgramRoomMapping).where(ProgramRoomMapping.room_id.in_(room_ids))
+    ).all()
+    mapping_by_location = {
+        (item.event_id, item.normalized_imported_label): item.room_id
+        for item in mappings
+        if item.room_id is not None
+    }
+    if mapping_by_location:
+        event_ids = {event_id for event_id, _ in mapping_by_location}
+        for program_session in session.scalars(
+            select(ProgramSession)
+            .where(
+                ProgramSession.event_id.in_(event_ids),
+                ProgramSession.active.is_(True),
+                ProgramSession.location_name.is_not(None),
+            )
+            .order_by(ProgramSession.starts_at, ProgramSession.sort_order)
+        ):
+            room_id = mapping_by_location.get(
+                (
+                    program_session.event_id,
+                    normalize_program_location(program_session.location_name or ""),
+                )
+            )
+            if (
+                room_id is not None
+                and program_session.session_id not in assigned_session_ids
+                and program_session.session_id not in seen[room_id]
+            ):
+                sessions_by_room[room_id].append(program_session)
+                seen[room_id].add(program_session.session_id)
+    for values in sessions_by_room.values():
+        values.sort(
+            key=lambda item: (
+                item.starts_at is None,
+                item.starts_at or datetime.max.replace(tzinfo=UTC),
+                item.sort_order,
+            )
+        )
+    return sessions_by_room
+
+
+def room_summaries(session: Session) -> list[dict[str, Any]]:
+    rooms = session.scalars(select(Room).order_by(Room.label)).all()
+    room_ids = [item.room_id for item in rooms]
+    sessions_by_room = _program_sessions_by_room(session, rooms)
     all_session_ids = [item.session_id for values in sessions_by_room.values() for item in values]
     presentations = _presentations_for_sessions(session, all_session_ids)
     endpoints = _room_endpoint_map(session, room_ids)
@@ -678,19 +745,7 @@ def room_detail(session: Session, room_id: UUID) -> dict[str, Any] | None:
     room = session.get(Room, room_id)
     if room is None:
         return None
-    program_sessions = [
-        item
-        for _, item in session.execute(
-            select(RoomAssignment, ProgramSession)
-            .join(ProgramSession, ProgramSession.session_id == RoomAssignment.session_id)
-            .where(
-                RoomAssignment.room_id == room_id,
-                RoomAssignment.active.is_(True),
-                ProgramSession.active.is_(True),
-            )
-            .order_by(ProgramSession.starts_at, ProgramSession.sort_order)
-        )
-    ]
+    program_sessions = _program_sessions_by_room(session, [room]).get(room_id, [])
     session_ids = [item.session_id for item in program_sessions]
     presentations = _presentations_for_sessions(session, session_ids)
     endpoints = _room_endpoint_map(session, [room_id]).get(room_id, {})

@@ -118,7 +118,7 @@ def enqueue_transfer_progress(
     )
     idempotency_key = (
         f"media-progress:{transfer.transfer_session_id}:"
-        f"{transfer.confirmed_offset}:{transfer.state}"
+        f"{transfer.retry_count}:{transfer.confirmed_offset}:{transfer.state}"
     )
     existing = session.scalar(
         select(OutboxEvent)

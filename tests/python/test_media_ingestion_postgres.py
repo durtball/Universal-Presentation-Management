@@ -204,6 +204,140 @@ def test_adopt_committed_reuses_content_for_distinct_presentation_versions(
         }
 
 
+def test_adopt_committed_finishes_interrupted_media_and_reuses_original_asset(
+    factory: sessionmaker[Session], media_context: dict[str, object]
+) -> None:
+    media_id = new_uuid7()
+    sha256 = "d" * 64
+    key = f"objects/sha256/{sha256}"
+    with factory.begin() as session:
+        session.add(
+            MediaObject(
+                media_object_id=media_id,
+                site_id=media_context["site_id"],
+                event_id=media_context["event_id"],
+                storage_target_id=media_context["target_id"],
+                object_key=key,
+                category=MediaCategory.PRESENTATION_VERSION,
+                original_filename="session.jpg",
+                availability=MediaAvailability.FINALIZING,
+                deleted_at=datetime.now(UTC),
+                ingestion_idempotency_key="transfer:interrupted",
+            )
+        )
+        session.add(
+            PresentationAsset(
+                presentation_version_id=media_context["version_id"],
+                media_object_id=media_id,
+                original_filename="session.jpg",
+                kind=AssetKind.ORIGINAL,
+            )
+        )
+    committed = {
+        "storage_target_id": str(media_context["target_id"]),
+        "storage_key": key,
+        "internal_path": str(media_context["root"]),
+    }
+    ingestion = service(factory)
+    ingest_request = request(
+        media_context,
+        category=MediaCategory.PRESENTATION_VERSION,
+        presentation_version_id=media_context["version_id"],
+        event_id=media_context["event_id"],
+        original_filename="session.jpg",
+        idempotency_key="transfer:interrupted",
+    )
+
+    first = ingestion.adopt_committed(ingest_request, committed, 12, sha256)
+    replay = ingestion.adopt_committed(ingest_request, committed, 12, sha256)
+
+    assert first.media_object_id == replay.media_object_id == media_id
+    with factory() as session:
+        restored = session.scalar(
+            select(MediaObject).where(MediaObject.media_object_id == media_id)
+        )
+        assert restored.availability is MediaAvailability.AVAILABLE
+        assert restored.deleted_at is None
+        assets = session.scalars(
+            select(PresentationAsset).where(
+                PresentationAsset.presentation_version_id == media_context["version_id"]
+            )
+        ).all()
+        assert len(assets) == 1
+        assert assets[0].media_object_id == media_id
+
+
+def test_adopt_committed_repairs_original_asset_linked_to_incomplete_media(
+    factory: sessionmaker[Session], media_context: dict[str, object]
+) -> None:
+    stale_id, canonical_id = new_uuid7(), new_uuid7()
+    sha256 = "e" * 64
+    key = f"objects/sha256/{sha256}"
+    with factory.begin() as session:
+        session.add_all(
+            [
+                MediaObject(
+                    media_object_id=stale_id,
+                    site_id=media_context["site_id"],
+                    event_id=media_context["event_id"],
+                    storage_target_id=media_context["target_id"],
+                    object_key=f"staging/{stale_id}",
+                    category=MediaCategory.PRESENTATION_VERSION,
+                    original_filename="session.jpg",
+                    availability=MediaAvailability.FINALIZING,
+                ),
+                MediaObject(
+                    media_object_id=canonical_id,
+                    site_id=media_context["site_id"],
+                    event_id=media_context["event_id"],
+                    storage_target_id=media_context["target_id"],
+                    object_key=key,
+                    category=MediaCategory.PRESENTATION_VERSION,
+                    original_filename="session.jpg",
+                    availability=MediaAvailability.AVAILABLE,
+                    size_bytes=12,
+                    content_hash=sha256,
+                    hash_algorithm="sha256",
+                ),
+            ]
+        )
+        session.add(
+            PresentationAsset(
+                presentation_version_id=media_context["version_id"],
+                media_object_id=stale_id,
+                original_filename="session.jpg",
+                kind=AssetKind.ORIGINAL,
+            )
+        )
+    committed = {
+        "storage_target_id": str(media_context["target_id"]),
+        "storage_key": key,
+        "internal_path": str(media_context["root"]),
+    }
+    ingestion = service(factory)
+    ingest_request = request(
+        media_context,
+        category=MediaCategory.PRESENTATION_VERSION,
+        presentation_version_id=media_context["version_id"],
+        event_id=media_context["event_id"],
+        original_filename="session.jpg",
+        idempotency_key="transfer:repair",
+    )
+
+    first = ingestion.adopt_committed(ingest_request, committed, 12, sha256)
+    replay = ingestion.adopt_committed(ingest_request, committed, 12, sha256)
+
+    assert first.media_object_id == replay.media_object_id == canonical_id
+    with factory() as session:
+        assets = session.scalars(
+            select(PresentationAsset).where(
+                PresentationAsset.presentation_version_id == media_context["version_id"]
+            )
+        ).all()
+        assert len(assets) == 1
+        assert assets[0].media_object_id == canonical_id
+
+
 @pytest.fixture
 def factory() -> sessionmaker[Session]:
     engine = create_engine(SITE_URL)

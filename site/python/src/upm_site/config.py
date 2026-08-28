@@ -12,6 +12,8 @@ class SiteSettings(BaseSettings):
     database_url: str
     media_storage_url: str = "http://site-media-storage:8080"
     media_storage_token: str = ""
+    # SMB is a Site-local optional edge interface. It is never a Central↔Site transport.
+    smb_enabled: bool = False
     smb_control_url: str = "http://site-smb:8080"
     smb_control_token: str = ""
     smb_intake_scan_interval_seconds: Annotated[float, Field(ge=1, le=300)] = 5

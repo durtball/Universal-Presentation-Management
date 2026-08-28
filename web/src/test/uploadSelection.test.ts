@@ -8,7 +8,7 @@ function file(name: string, path = "", type = "application/octet-stream") {
 }
 
 describe("presentation upload selection", () => {
-  it.each(["Deck.pptx", "DECK.PPTX", "slides.Pdf", "presentation.PPT", "deck with spaces.pptx", "基調講演.pptx"])(
+  it.each(["Deck.pptx", "show.PPSX", "graphic.jpg", "slides.Pdf", "presentation.PPT", "deck with spaces.pptx", "基調講演.pptx"])(
     "accepts one supported file named %s regardless of MIME", (name) => {
       const result = selectPresentationFiles([file(name)]);
       expect(result.accepted.map((item) => item.file.name)).toEqual([name]);
@@ -28,7 +28,7 @@ describe("presentation upload selection", () => {
       "root/day2/notes.txt",
     ]);
     expect(result.skipped).toHaveLength(2);
-    expect(result.accepted.find((item) => item.file.name === "notes.txt")?.recognized).toBe(false);
+    expect(result.accepted.find((item) => item.file.name === "notes.txt")?.recognized).toBe(true);
   });
 
   it("does not collapse duplicate basenames from different folders", () => {

@@ -21,7 +21,7 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 from upm_shared.smb import SmbControlClient
 from upm_site.config import SiteSettings
-from upm_site.media.ingestion import MediaIngestionService
+from upm_site.media.ingestion import IngestionConflictError, MediaIngestionService
 from upm_site.media.replication import execute_central_push
 from upm_site.media.transfer import (
     cleanup_transfer_partials,
@@ -77,6 +77,37 @@ from upm_site.sync_transport import synchronize_once
 
 PULL_TRANSFER = "presentation_media.central_pull"
 PUSH_TRANSFER = "presentation_media.central_push"
+LOCAL_SMB_JOB_TYPES = {
+    SMB_SCAN_JOB,
+    SMB_INGEST_JOB,
+    SMB_RETIRE_JOB,
+    SMB_PRESENTATIONS_JOB,
+    "smb.user.revoke",
+}
+
+
+def disable_local_smb_jobs(session: Session) -> int:
+    """Terminalize queued Site-local SMB work without invoking any SMB boundary."""
+    jobs = session.scalars(
+        select(ProcessingJob).where(
+            ProcessingJob.job_type.in_(LOCAL_SMB_JOB_TYPES),
+            ProcessingJob.status.in_(
+                [JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT, JobStatus.FAILED]
+            ),
+        )
+    ).all()
+    now = utc_now()
+    for job in jobs:
+        job.status = JobStatus.SUCCEEDED
+        job.progress = 100
+        job.completed_at = now
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.heartbeat_at = None
+        job.error_code = None
+        job.last_error = None
+        job.error_metadata = {"disabled_feature": "site_local_smb"}
+    return len(jobs)
 
 
 class TransferExecutors:
@@ -135,6 +166,10 @@ def execute_transfer_work(
         queue = SiteQueue(session)
         completed = True
         if work.transfer_type == PULL_TRANSFER:
+            if session.get(MediaTransferSession, work.transfer_job_id) is None:
+                defer_orphaned_pull(work)
+                log("media_pull_deferred_missing_session", work_id=transfer_job_id)
+                return
             try:
                 with httpx.Client(timeout=30.0) as client:
                     completed = execute_central_pull(session, factory, settings, work, client)
@@ -178,6 +213,17 @@ def execute_transfer_work(
         log("job_completed", worker_id=worker_id, job_kind="transfer", work_id=transfer_job_id)
 
 
+def defer_orphaned_pull(work: TransferJob) -> None:
+    """Fence an invalid pull intent from workers until sync can materialize dependencies."""
+    work.status = JobStatus.PENDING
+    work.required_capabilities = ["sync-dependencies"]
+    work.claimed_by_worker_id = None
+    work.lease_expires_at = None
+    work.heartbeat_at = None
+    work.error_code = "sync_dependency_materialization_required"
+    work.last_error = "transfer session is missing; returned to dependency reconciliation"
+
+
 def fill_transfer_slots(
     factory: sessionmaker[Session],
     settings: SiteSettings,
@@ -215,13 +261,14 @@ def fail_central_pull(
     error: Exception,
     settings: SiteSettings,
 ) -> None:
-    """Persist a retryable pull failure without allowing progress replay to escape."""
+    """Persist pull failure, terminalizing impossible canonical identity conflicts."""
+    retryable = not isinstance(error, IngestionConflictError)
     queue.fail(
         work,
         worker_id,
-        error_code="media_pull_failed",
+        error_code=("media_pull_failed" if retryable else "media_pull_identity_conflict"),
         message=str(error),
-        retryable=True,
+        retryable=retryable,
         base_delay_seconds=settings.worker_retry_base_seconds,
     )
     transfer = session.get(MediaTransferSession, work.transfer_job_id)
@@ -284,7 +331,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         item.strip() for item in settings.worker_capabilities.split(",") if item.strip()
     }
     stop = Event()
-    storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
+    # Rebuilding a large SMB presentation view can legitimately take longer than
+    # the client's short control-plane default even while Media Storage is healthy.
+    storage_client = MediaStorageClient(
+        settings.media_storage_url, settings.media_storage_token, timeout=300
+    )
     ingestion_service = MediaIngestionService(
         factory,
         max_upload_bytes=settings.max_upload_bytes,
@@ -326,8 +377,12 @@ def run(*, sync: bool = False, once: bool = False) -> int:
             site_id=site.site_id,
             retention_days=settings.operational_log_retention_days,
         )
-        enqueue_smb_reconciliation(session, site.site_id)
-        enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
+        if settings.smb_enabled:
+            enqueue_smb_reconciliation(session, site.site_id)
+            enqueue_smb_presentations(session, site.site_id, delay_seconds=0)
+        else:
+            disabled_smb_jobs = disable_local_smb_jobs(session)
+            log("site_local_smb_disabled", terminalized_jobs=disabled_smb_jobs)
         enqueue_asset_reconciliation(session, site.site_id)
         recover_exhausted_finalizations(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
@@ -376,8 +431,32 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
                     completed = True
-                    if kind == "processing" and work.job_type == "operational_logs.prune":
+                    if (
+                        kind == "processing"
+                        and work.job_type in LOCAL_SMB_JOB_TYPES
+                        and not settings.smb_enabled
+                    ):
+                        work.error_metadata = {"disabled_feature": "site_local_smb"}
+                        log("site_local_smb_job_skipped", work_id=work_id, job_type=work.job_type)
+                    elif kind == "processing" and work.job_type == "operational_logs.prune":
                         prune_logs(session, settings.operational_log_retention_days)
+                    elif kind == "processing" and work.job_type == "lifecycle.delete_media_objects":
+                        deleted = 0
+                        for item in work.payload["data"]["objects"]:
+                            storage_client.delete_object(
+                                UUID(item["storage_target_id"]), item["object_key"]
+                            )
+                            deleted += 1
+                        for item in work.payload["data"].get("staging", []):
+                            storage_client.release_staging(
+                                UUID(item["storage_target_id"]), item["object_key"]
+                            )
+                        work.error_metadata = {"physical_objects_deleted": deleted}
+                        log(
+                            "event_media_cleanup_completed",
+                            event_id=work.payload["data"]["event_id"],
+                            deleted=deleted,
+                        )
                     elif kind == "processing" and work.job_type == ASSET_RECONCILIATION_JOB:
                         repaired = backfill_confirmed_original_assets(session, work.site_id)
                         enqueue_asset_reconciliation(

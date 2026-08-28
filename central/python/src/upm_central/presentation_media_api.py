@@ -861,47 +861,16 @@ def register_presentation_media_routes(
         body: MatchConfirmationBatch, request: Request, session: DbSession
     ) -> dict[str, object]:
         actor = getattr(request.state, "admin_actor", "central-admin")
-        results = []
-        for requested in body.items:
-            try:
-                with session.begin_nested():
-                    item = session.get(
-                        PresentationMediaImport, requested.media_import_id, with_for_update=True
-                    )
-                    if item is None:
-                        raise MediaStagingError("media import not found", "not_found")
-                    if item.match_state is MediaMatchState.CONFIRMED:
-                        if item.presentation_id != requested.presentation_id:
-                            raise MediaStagingError(
-                                "media import was confirmed to another presentation",
-                                "already_confirmed",
-                            )
-                    else:
-                        staging_service().queue_promotion(
-                            session,
-                            item,
-                            requested.presentation_id,
-                            actor=actor,
-                        )
-                    results.append(
-                        {
-                            "media_import_id": requested.media_import_id,
-                            "status": "confirmed"
-                            if item.match_state is MediaMatchState.CONFIRMED
-                            else "queued",
-                            "presentation_version_id": item.presentation_version_id,
-                        }
-                    )
-            except MediaStagingError as error:
-                results.append(
-                    {
-                        "media_import_id": requested.media_import_id,
-                        "status": "failed",
-                        "code": error.code,
-                        "message": str(error),
-                    }
-                )
-        return {"results": results}
+        return {
+            "results": staging_service().queue_promotions(
+                session,
+                [
+                    (requested.media_import_id, requested.presentation_id)
+                    for requested in body.items
+                ],
+                actor=actor,
+            )
+        }
 
     @app.post(
         "/api/v1/admin/media-imports/{media_import_id}/retry",

@@ -234,7 +234,7 @@ async def test_migrated_storage_root_can_be_queried_and_upload_staged(tmp_path: 
             persisted = session.get(PresentationMediaImport, result.media_import_id)
             assert active is not None and active.revision == 1
             assert persisted is not None
-            assert persisted.import_state == MediaImportState.STAGED
+            assert persisted.import_state == MediaImportState.UPLOADING
             assert persisted.staging_storage_root_id == root_id
             assert persisted.committed_storage_root_id is None
             assert persisted.committed_storage_key is None
@@ -357,7 +357,7 @@ async def test_generated_500_file_batch_remains_staged_before_confirmation() -> 
             assert {item.source_relative_path for item in imports} == {
                 f"batch/unknown-{index}.pptx" for index in range(500)
             }
-            assert all(item.import_state == MediaImportState.STAGED for item in imports)
+            assert all(item.import_state == MediaImportState.UPLOADING for item in imports)
             assert all(item.staging_key and item.staging_storage_root_id for item in imports)
             assert all(item.committed_storage_key is None for item in imports)
             assert all(item.presentation_version_id is None for item in imports)

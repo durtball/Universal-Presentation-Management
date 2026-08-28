@@ -79,6 +79,8 @@ def register_user_routes(app: FastAPI, get: Callable, tx: Callable, settings: Ca
 
     @app.put("/api/v1/users/{uid}/smb-password")
     def password(uid: UUID, p: Password, s: Annotated[Session, Depends(tx)]):
+        if not settings().smb_enabled:
+            raise HTTPException(409, "Site-local SMB is disabled")
         u = s.get(User, uid)
         if not u:
             raise HTTPException(404, "user not found")
@@ -91,6 +93,8 @@ def register_user_routes(app: FastAPI, get: Callable, tx: Callable, settings: Ca
 
     @app.delete("/api/v1/users/{uid}/smb-access", status_code=204)
     def revoke(uid: UUID, s: Annotated[Session, Depends(tx)]):
+        if not settings().smb_enabled:
+            raise HTTPException(409, "Site-local SMB is disabled")
         u = s.get(User, uid)
         if not u:
             raise HTTPException(404, "user not found")

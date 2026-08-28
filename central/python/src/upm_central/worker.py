@@ -7,9 +7,11 @@ import os
 import signal
 import socket
 import tempfile
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -34,6 +36,9 @@ from upm_central.presentation_media import (
     CentralMediaStagingService,
     backfill_confirmed_original_assets,
     enqueue_asset_reconciliation,
+    enqueue_match_repair_rescans,
+    recover_stranded_intake,
+    retry_extension_policy_failures,
 )
 from upm_central.smb_intake import (
     INGEST_JOB as SMB_INGEST_JOB,
@@ -65,9 +70,67 @@ from upm_shared.identifiers import new_uuid7
 from upm_shared.jobs import BulkPeopleDeletionJobPayload, LifecycleDeletionJobPayload
 from upm_shared.media_storage_client import AsyncMediaStorageClient, MediaStorageClient
 
+PARALLEL_PRESENTATION_MEDIA_JOBS = {
+    INTAKE_PUBLISH_JOB,
+    "presentation_media.process",
+    "presentation_media.promote",
+}
+
+
+class PresentationMediaJobPool:
+    """Bounded, duplicate-safe execution slots for independent durable media jobs."""
+
+    def __init__(self, concurrency: int) -> None:
+        if not 1 <= concurrency <= 16:
+            raise ValueError("presentation media concurrency must be between 1 and 16")
+        self.concurrency = concurrency
+        self._executor = ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="central-presentation-media"
+        )
+        self._futures: dict[UUID, Future[None]] = {}
+        self._lock = Lock()
+
+    @property
+    def available(self) -> int:
+        with self._lock:
+            return self.concurrency - len(self._futures)
+
+    @property
+    def active_ids(self) -> tuple[UUID, ...]:
+        with self._lock:
+            return tuple(self._futures)
+
+    def submit(self, job_id: UUID, execute: Callable[[], None]) -> bool:
+        with self._lock:
+            if job_id in self._futures or len(self._futures) >= self.concurrency:
+                return False
+            self._futures[job_id] = self._executor.submit(execute)
+            return True
+
+    def reap(self) -> list[tuple[UUID, BaseException | None]]:
+        completed: list[tuple[UUID, BaseException | None]] = []
+        with self._lock:
+            done = [(job_id, future) for job_id, future in self._futures.items() if future.done()]
+            for job_id, future in done:
+                del self._futures[job_id]
+                completed.append((job_id, future.exception()))
+        return completed
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
+
 
 def log(event: str, **context: object) -> None:
     print(json.dumps({"event": event, **context}, default=str), flush=True)
+
+
+def presentation_media_slot_failure_context(
+    completed_job: ProcessingJob | None, error: BaseException
+) -> dict[str, str] | None:
+    """Suppress executor artifacts after durable success; describe genuine slot failures."""
+    if completed_job is not None and completed_job.status is JobStatus.SUCCEEDED:
+        return None
+    return {"error_type": type(error).__name__, "safe_message": str(error)[:1024]}
 
 
 def execute_processing_job(
@@ -168,6 +231,71 @@ def deletion_failure_details(exc: Exception) -> dict[str, object]:
     }
 
 
+def run_claimed_presentation_media_job(
+    factory,
+    job_id: UUID,
+    worker_id: str,
+    media_processor: CentralMediaStagingService,
+    retry_base_seconds: float,
+    lease: timedelta,
+) -> None:
+    """Execute and settle one already-committed durable claim in an isolated session."""
+    finished = Event()
+
+    def maintain_lease() -> None:
+        interval = max(1.0, lease.total_seconds() / 3)
+        while not finished.wait(interval):
+            with factory.begin() as session:
+                work = session.get(ProcessingJob, job_id)
+                if work is None or work.claimed_by_worker_id != worker_id:
+                    return
+                CentralQueue(session).heartbeat(work, worker_id, lease)
+
+    heartbeat = Thread(
+        target=maintain_lease,
+        name=f"central-presentation-media-heartbeat-{job_id}",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        with factory() as session:
+            work = session.get(ProcessingJob, job_id)
+            if work is None or work.claimed_by_worker_id != worker_id:
+                return
+            session.expunge(work)
+        execute_processing_job(None, None, work, worker_id, media_processor)
+        with factory.begin() as session:
+            work = session.get(ProcessingJob, job_id, with_for_update=True)
+            if work is not None and work.claimed_by_worker_id == worker_id:
+                CentralQueue(session).complete(work, worker_id)
+        log("job_completed", worker_id=worker_id, job_kind="processing", work_id=job_id)
+    except Exception as exc:
+        with factory.begin() as session:
+            work = session.get(ProcessingJob, job_id, with_for_update=True)
+            if work is None or work.claimed_by_worker_id != worker_id:
+                return
+            CentralQueue(session).fail(
+                work,
+                worker_id,
+                error_code="presentation_media_processing_failed",
+                message=str(exc),
+                retryable=True,
+                base_delay_seconds=retry_base_seconds,
+                metadata={"error_type": type(exc).__name__},
+            )
+        log(
+            "presentation_media_processing_failed",
+            worker_id=worker_id,
+            work_id=job_id,
+            error_type=type(exc).__name__,
+            error_code=getattr(exc, "code", "processing_failed"),
+            safe_message=str(exc)[:1024],
+        )
+    finally:
+        finished.set()
+        heartbeat.join()
+
+
 def run(*, sync: bool = False, once: bool = False) -> int:
     settings = CentralDatabaseSettings()
     engine = create_central_engine(settings)
@@ -181,8 +309,10 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         factory,
         AsyncMediaStorageClient(settings.media_storage_url, settings.media_storage_token),
         settings.max_upload_bytes,
+        settings.presentation_media_concurrency,
     )
     storage_client = MediaStorageClient(settings.media_storage_url, settings.media_storage_token)
+    media_pool = PresentationMediaJobPool(settings.presentation_media_concurrency)
     stop = Event()
 
     def request_stop(_signum: int, _frame: object) -> None:
@@ -223,11 +353,30 @@ def run(*, sync: bool = False, once: bool = False) -> int:
         enqueue_smb_reconciliation(session)
         enqueue_smb_presentations(session, delay_seconds=0)
         enqueue_asset_reconciliation(session)
+        if "cpu" in capabilities:
+            recover_stranded_intake(session)
+            retry_extension_policy_failures(session)
+            enqueue_match_repair_rescans(session)
     log("worker_started", worker_id=worker_id, role=role, capabilities=sorted(capabilities))
     try:
         while not stop.is_set():
             ready_file.touch()
             media_work_id = None
+            parallel_media_work_id = None
+            for completed_id, error in media_pool.reap():
+                if error is not None:
+                    with factory() as status_session:
+                        completed_job = status_session.get(ProcessingJob, completed_id)
+                        failure_context = presentation_media_slot_failure_context(
+                            completed_job, error
+                        )
+                    if failure_context is not None:
+                        log(
+                            "presentation_media_slot_failed",
+                            worker_id=worker_id,
+                            work_id=completed_id,
+                            **failure_context,
+                        )
             with factory.begin() as session:
                 queue = CentralQueue(session)
                 queue.register_worker(
@@ -238,7 +387,14 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     capabilities=capabilities,
                 )
                 if not sync:
-                    work = queue.claim_processing(worker_id, capabilities, lease)
+                    work = queue.claim_processing(
+                        worker_id,
+                        capabilities,
+                        lease,
+                        excluded_job_types=(
+                            PARALLEL_PRESENTATION_MEDIA_JOBS if media_pool.available == 0 else None
+                        ),
+                    )
                     kind = "processing"
                     if work is None:
                         work = queue.claim_transfer(worker_id, capabilities, lease)
@@ -253,13 +409,21 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         work, f"{kind}_event_id" if kind == "outbox" else f"{kind}_job_id"
                     )
                     log(f"{kind}_claimed", worker_id=worker_id, work_id=work_id)
-                    if kind == "processing" and (
+                    if kind == "processing" and work.job_type in PARALLEL_PRESENTATION_MEDIA_JOBS:
+                        parallel_media_work_id = work.processing_job_id
+                    elif kind == "processing" and (
                         (
                             work.job_type.startswith("presentation_media.")
                             and work.job_type != ASSET_RECONCILIATION_JOB
                         )
                         or work.job_type
-                        in {SMB_SCAN_JOB, SMB_INGEST_JOB, SMB_RETIRE_JOB, SMB_PRESENTATIONS_JOB}
+                        in {
+                            SMB_SCAN_JOB,
+                            SMB_INGEST_JOB,
+                            SMB_RETIRE_JOB,
+                            SMB_PRESENTATIONS_JOB,
+                            "lifecycle.delete_media_objects",
+                        }
                     ):
                         # Commit the durable claim and release this connection before matching or
                         # calling Media Storage. Completion/failure uses a fresh short transaction.
@@ -330,7 +494,27 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     if media_work_id is None:
                         queue.complete(work, worker_id)
                         log("job_completed", worker_id=worker_id, job_kind=kind, work_id=work_id)
-            if media_work_id is not None:
+            if parallel_media_work_id is not None:
+                submitted = media_pool.submit(
+                    parallel_media_work_id,
+                    lambda job_id=parallel_media_work_id: run_claimed_presentation_media_job(
+                        factory,
+                        job_id,
+                        worker_id,
+                        media_processor,
+                        settings.worker_retry_base_seconds,
+                        lease,
+                    ),
+                )
+                if not submitted:
+                    # Capacity is checked before claim; this is defensive. The durable claim is
+                    # left leased and therefore safely reclaimable rather than executed twice.
+                    log(
+                        "presentation_media_slot_unavailable",
+                        worker_id=worker_id,
+                        work_id=parallel_media_work_id,
+                    )
+            elif media_work_id is not None:
                 smb_ingested = False
                 smb_ingested_sha256 = None
                 retirement_result = None
@@ -340,6 +524,19 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                         session.expunge(media_work)
                     if media_work.job_type.startswith("presentation_media."):
                         execute_processing_job(None, None, media_work, worker_id, media_processor)
+                    elif media_work.job_type == "lifecycle.delete_media_objects":
+                        for item in media_work.payload["data"]["objects"]:
+                            asyncio.run(
+                                media_processor.storage.delete_object(
+                                    UUID(item["storage_target_id"]), item["object_key"]
+                                )
+                            )
+                        for item in media_work.payload["data"].get("staging", []):
+                            asyncio.run(
+                                media_processor.storage.release_staging(
+                                    UUID(item["storage_target_id"]), item["object_key"]
+                                )
+                            )
                     elif media_work.job_type == SMB_SCAN_JOB:
                         with factory.begin() as smb_session:
                             reconcile_smb(
@@ -475,8 +672,11 @@ def run(*, sync: bool = False, once: bool = False) -> int:
                     )
             if once:
                 break
-            stop.wait(settings.worker_poll_interval_seconds)
+            # Fill free media slots immediately; use the normal poll delay once saturated or idle.
+            if parallel_media_work_id is None:
+                stop.wait(settings.worker_poll_interval_seconds)
     finally:
+        media_pool.shutdown()
         ready_file.unlink(missing_ok=True)
         engine.dispose()
         log("worker_stopped", worker_id=worker_id, role=role)

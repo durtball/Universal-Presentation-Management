@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from upm_central.operational_logs import record_log
@@ -59,20 +63,42 @@ from upm_shared.media_storage_client import (
     MediaStorageUnavailable,
 )
 from upm_shared.presentation_media import (
+    DOCUMENT_PRESENTATION_EXTENSIONS,
+    IMAGE_PRESENTATION_EXTENSIONS,
+    POWERPOINT_PRESENTATION_EXTENSIONS,
     SUPPORTED_PRESENTATION_EXTENSIONS,
+    VIDEO_PRESENTATION_EXTENSIONS,
     CanonicalPresentationMetadata,
     MatchCandidate,
+    MatchResult,
     canonical_presentation_filename,
     match_presentation,
     normalize_source_relative_path,
 )
 
 logger = logging.getLogger(__name__)
+_PROCESS_MATCH_CANDIDATES: list[MatchCandidate] = []
+_PROCESS_MATCH_TIMEZONE = "UTC"
+
+
+def _initialize_rescan_matcher(
+    candidates: list[MatchCandidate], event_timezone: str
+) -> None:
+    global _PROCESS_MATCH_CANDIDATES, _PROCESS_MATCH_TIMEZONE
+    _PROCESS_MATCH_CANDIDATES = candidates
+    _PROCESS_MATCH_TIMEZONE = event_timezone
+
+
+def _match_rescan_process_item(source_path: str) -> MatchResult:
+    return match_presentation(
+        source_path, _PROCESS_MATCH_CANDIDATES, event_timezone=_PROCESS_MATCH_TIMEZONE
+    )
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
 INTAKE_PUBLISH_JOB = "presentation_media.intake.publish"
 INTAKE_REJECT_JOB = "presentation_media.intake.reject"
 RESCAN_JOB = "presentation_media.rescan"
 RESCAN_BATCH_SIZE = 75
+MATCH_ALGORITHM_VERSION = 2
 
 ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.PENDING,
@@ -81,6 +107,188 @@ ACTIVE_DEPLOYMENT_STATUSES = {
     EventDeploymentStatus.UPDATE_PENDING,
     EventDeploymentStatus.FAILED,
 }
+
+
+def recover_stranded_intake(session: Session) -> tuple[int, int]:
+    """Requeue durable staging uploads and clearly fail records whose bytes are unaddressable."""
+    records = list(
+        session.scalars(
+            select(PresentationMediaImport).where(
+                or_(
+                    PresentationMediaImport.import_state == MediaImportState.STAGED,
+                    (
+                        PresentationMediaImport.intake_storage_root_id.is_(None)
+                        & PresentationMediaImport.import_state.in_(
+                            [MediaImportState.UPLOADING, MediaImportState.RETRY_WAIT]
+                        )
+                    ),
+                )
+            )
+        )
+    )
+    existing = {
+        job.idempotency_key: job
+        for job in session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == INTAKE_PUBLISH_JOB,
+                ProcessingJob.idempotency_key.in_(
+                    [f"intake:{record.media_import_id}" for record in records]
+                ),
+            )
+        )
+    }
+    existing_processes = {
+        job.idempotency_key: job
+        for job in session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.process",
+                ProcessingJob.idempotency_key.in_(
+                    [str(record.media_import_id) for record in records]
+                ),
+            )
+        )
+    }
+
+    def revive(job: ProcessingJob) -> bool:
+        if job.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT}:
+            return False
+        job.status = JobStatus.RETRY_WAIT
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.next_attempt_at = utc_now()
+        job.max_attempts = max(job.max_attempts, job.attempt_count + 5)
+        return True
+    requeued = failed = 0
+    for record in records:
+        if (
+            record.intake_storage_root_id
+            and record.intake_storage_key
+            and record.sha256
+            and record.size_bytes is not None
+        ):
+            record.import_state = MediaImportState.NEEDS_REVIEW
+            process_key = str(record.media_import_id)
+            process_job = existing_processes.get(process_key)
+            if process_job is not None:
+                requeued += int(revive(process_job))
+            else:
+                CentralQueue(session).enqueue_processing(
+                    job_type="presentation_media.process",
+                    payload={"data": {"media_import_id": str(record.media_import_id)}},
+                    idempotency_key=process_key,
+                    required_capabilities=["cpu"],
+                    max_attempts=5,
+                )
+                requeued += 1
+            continue
+        complete_staging = bool(
+            record.staging_storage_root_id
+            and record.staging_key
+            and record.sha256
+            and record.size_bytes is not None
+        )
+        if not complete_staging:
+            record.import_state = MediaImportState.FAILED
+            record.error_code = "stranded_staging_state"
+            record.error_detail = "Staging metadata is incomplete; operator retry is required."
+            failed += 1
+            continue
+        record.import_state = MediaImportState.UPLOADING
+        key = f"intake:{record.media_import_id}"
+        intake_job = existing.get(key)
+        if intake_job is not None:
+            requeued += int(revive(intake_job))
+        else:
+            CentralQueue(session).enqueue_processing(
+                job_type=INTAKE_PUBLISH_JOB,
+                payload={"data": {"media_import_id": str(record.media_import_id)}},
+                idempotency_key=key,
+                required_capabilities=["cpu"],
+                max_attempts=5,
+            )
+            requeued += 1
+    return requeued, failed
+
+
+def retry_extension_policy_failures(session: Session) -> int:
+    """Make jobs failed by the former downstream extension whitelist retryable in place."""
+    jobs = [
+        *session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.promote",
+                ProcessingJob.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED]),
+                ProcessingJob.last_error.ilike("%unsupported presentation media extension%"),
+            )
+        ),
+        *session.scalars(
+            select(TransferJob).where(
+                TransferJob.status.in_([JobStatus.FAILED, JobStatus.EXHAUSTED]),
+                TransferJob.last_error.ilike("%unsupported presentation media extension%"),
+            )
+        ),
+    ]
+    for job in jobs:
+        job.status = JobStatus.RETRY_WAIT
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.next_attempt_at = utc_now()
+        job.max_attempts = max(job.max_attempts, job.attempt_count + 5)
+        job.error_metadata = {
+            **(job.error_metadata or {}),
+            "recovered_by": "presentation_media_extension_policy",
+        }
+    return len(jobs)
+
+
+def enqueue_match_repair_rescans(session: Session) -> int:
+    """Queue one deployment repair pass for existing review rows under this matcher version."""
+    event_ids = session.scalars(
+        select(PresentationMediaImport.event_id)
+        .where(
+            PresentationMediaImport.presentation_id.is_(None),
+            PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+            PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+        )
+        .distinct()
+    ).all()
+    queued = 0
+    for event_id in event_ids:
+        key = f"match-repair-v{MATCH_ALGORITHM_VERSION}:{event_id}"
+        if session.scalar(select(ProcessingJob).where(ProcessingJob.idempotency_key == key)):
+            continue
+        ids = list(
+            session.scalars(
+                select(PresentationMediaImport.media_import_id)
+                .where(
+                    PresentationMediaImport.event_id == event_id,
+                    PresentationMediaImport.presentation_id.is_(None),
+                    PresentationMediaImport.match_state != MediaMatchState.CONFIRMED,
+                    PresentationMediaImport.import_state == MediaImportState.NEEDS_REVIEW,
+                )
+                .order_by(PresentationMediaImport.media_import_id)
+            )
+        )
+        operation_id = new_uuid7()
+        CentralQueue(session).enqueue_processing(
+            job_type=RESCAN_JOB,
+            payload={
+                "data": {
+                    "operation_id": str(operation_id),
+                    "event_id": str(event_id),
+                    "media_import_ids": [str(value) for value in ids],
+                    "total": len(ids),
+                    "processed": 0,
+                    "suggested": 0,
+                    "unmatched": 0,
+                    "failed": 0,
+                }
+            },
+            idempotency_key=key,
+            required_capabilities=["cpu"],
+            max_attempts=5,
+        )
+        queued += 1
+    return queued
 
 
 def enqueue_asset_reconciliation(session: Session, *, current_job_id=None):
@@ -149,13 +357,13 @@ def ensure_confirmed_original_asset(
     extension = Path(record.original_filename).suffix.lower()
     kind = (
         AssetKind.ORIGINAL
-        if extension in SUPPORTED_PRESENTATION_EXTENSIONS
+        if extension in POWERPOINT_PRESENTATION_EXTENSIONS or extension == ".pdf"
         else AssetKind.IMAGE
-        if extension in {".jpg", ".jpeg", ".png"}
+        if extension in IMAGE_PRESENTATION_EXTENSIONS
         else AssetKind.VIDEO
-        if extension in {".mp4", ".mov", ".mkv", ".webm"}
+        if extension in VIDEO_PRESENTATION_EXTENSIONS
         else AssetKind.DOCUMENT
-        if extension in {".doc", ".docx", ".txt"}
+        if extension in DOCUMENT_PRESENTATION_EXTENSIONS
         else AssetKind.OTHER
     )
     existing = session.scalar(
@@ -198,7 +406,10 @@ def backfill_confirmed_original_assets(session: Session) -> int:
     )
     version_counts = Counter(record.presentation_version_id for record in records)
     for record in records:
-        if Path(record.original_filename).suffix.lower() not in SUPPORTED_PRESENTATION_EXTENSIONS:
+        if (
+            Path(record.original_filename).suffix.lower()
+            not in POWERPOINT_PRESENTATION_EXTENSIONS | {".pdf"}
+        ):
             continue
         if version_counts[record.presentation_version_id] != 1:
             continue
@@ -215,6 +426,36 @@ def backfill_confirmed_original_assets(session: Session) -> int:
     return repaired
 
 
+def _supersede_central_transfer(
+    session: Session, transfer: TransferJob, *, desired_media_import_id: UUID
+) -> None:
+    transfer.status = JobStatus.CANCELLED
+    transfer.required_capabilities = []
+    transfer.claimed_by_worker_id = None
+    transfer.lease_expires_at = None
+    transfer.heartbeat_at = None
+    transfer.completed_at = utc_now()
+    transfer.error_code = "superseded_original"
+    transfer.last_error = f"Superseded by desired media {desired_media_import_id}."
+    session.execute(
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.aggregate_id == transfer.transfer_job_id,
+            OutboxEvent.event_type == "central.media_transfer.available",
+            OutboxEvent.status.in_([JobStatus.PENDING, JobStatus.RETRY_WAIT]),
+        )
+        .values(
+            status=JobStatus.CANCELLED,
+            claimed_by_worker_id=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            processed_at=utc_now(),
+            error_code="superseded_original",
+            last_error=f"Superseded by desired media {desired_media_import_id}.",
+        )
+    )
+
+
 def queue_central_to_site_transfer(
     session: Session, record: PresentationMediaImport
 ) -> TransferJob:
@@ -225,7 +466,40 @@ def queue_central_to_site_transfer(
         or not record.presentation_version_id
     ):
         raise MediaStagingError("confirmed media has no Site destination", "missing_destination")
-    presentation = session.get(Presentation, record.presentation_id)
+    canonical_original_id = session.scalar(
+        select(PresentationAsset.media_object_id).where(
+            PresentationAsset.presentation_version_id == record.presentation_version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
+    )
+    if canonical_original_id is not None and canonical_original_id != record.media_import_id:
+        desired = session.get(PresentationMediaImport, canonical_original_id)
+        if desired is None:
+            raise MediaStagingError(
+                "canonical original media import is missing", "invalid_confirmation"
+            )
+        desired.destination_site_id = record.destination_site_id
+        if desired.transfer_job_id is None:
+            return queue_central_to_site_transfer(session, desired)
+        transfer = session.get(TransferJob, desired.transfer_job_id)
+        if transfer is None:
+            desired.transfer_job_id = None
+            return queue_central_to_site_transfer(session, desired)
+        return transfer
+    conflicting = session.scalars(
+        select(PresentationMediaImport).where(
+            PresentationMediaImport.presentation_version_id == record.presentation_version_id,
+            PresentationMediaImport.media_import_id != record.media_import_id,
+            PresentationMediaImport.transfer_job_id.is_not(None),
+        )
+    ).all()
+    for previous in conflicting:
+        previous_transfer = session.get(TransferJob, previous.transfer_job_id)
+        if previous_transfer is None or previous_transfer.status is JobStatus.CANCELLED:
+            continue
+        _supersede_central_transfer(
+            session, previous_transfer, desired_media_import_id=record.media_import_id
+        )
     payload = {
         "media_import_id": str(record.media_import_id),
         "presentation_id": str(record.presentation_id),
@@ -259,43 +533,13 @@ def queue_central_to_site_transfer(
     record.transfer_job_id = transfer.transfer_job_id
     record.import_state = MediaImportState.TRANSFER_QUEUED
     record.sync_state = SyncState.PENDING
-    manifest = MediaTransferManifest(
-        transfer_session_id=transfer.transfer_job_id,
-        origin_system=SourceSystem.CENTRAL,
-        destination_site_id=record.destination_site_id,
-        event_id=record.event_id,
-        presentation_id=record.presentation_id,
-        presentation_version_id=record.presentation_version_id,
-        presentation_version_number=session.get(
-            PresentationVersion, record.presentation_version_id
-        ).version_number,
-        presentation_identifier=presentation.presentation_identifier,
-        original_filename=record.original_filename,
-        canonical_filename=record.canonical_filename,
-        expected_size=record.size_bytes or 0,
-        sha256=record.sha256 or "",
-        media_type=record.mime_type,
-        created_at=record.created_at,
-        state=MediaTransferState.AVAILABLE,
-    )
+    manifest = _media_transfer_manifest(session, record, transfer)
     outbox_key = f"media-transfer-available:{transfer.transfer_job_id}"
     existing_event = session.scalar(
         select(OutboxEvent).where(OutboxEvent.idempotency_key == outbox_key)
     )
     if existing_event is None:
-        CentralQueue(session).enqueue_outbox(
-            event_type="central.media_transfer.available",
-            aggregate_type="media_transfer",
-            aggregate_id=transfer.transfer_job_id,
-            owning_site_id=record.destination_site_id,
-            source_sequence=next_sequence(session, record.destination_site_id),
-            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-            idempotency_key=outbox_key,
-            payload=OutboxPayload(
-                source_system=SourceSystem.CENTRAL,
-                data=manifest.model_dump(mode="json"),
-            ),
-        )
+        _publish_media_transfer_manifest(session, record, transfer, manifest, outbox_key)
     elif existing_event.status is JobStatus.PENDING:
         existing_event.payload = manifest.model_dump(mode="json")
     else:
@@ -305,29 +549,181 @@ def queue_central_to_site_transfer(
     return transfer
 
 
-def target_confirmed_event_media(session: Session, event_id: UUID, site_id: UUID) -> int:
-    """Target confirmed canonical event media and create any missing transfer manifests."""
-    records = session.scalars(
-        select(PresentationMediaImport).where(
+def _media_transfer_manifest(
+    session: Session, record: PresentationMediaImport, transfer: TransferJob
+) -> MediaTransferManifest:
+    presentation = session.get(Presentation, record.presentation_id)
+    version = session.get(PresentationVersion, record.presentation_version_id)
+    if presentation is None or version is None or version.presentation_id != record.presentation_id:
+        raise MediaStagingError("confirmed media identity is incomplete", "invalid_confirmation")
+    return MediaTransferManifest(
+        transfer_session_id=transfer.transfer_job_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=record.destination_site_id,
+        event_id=record.event_id,
+        presentation_id=record.presentation_id,
+        presentation_version_id=record.presentation_version_id,
+        presentation_version_number=version.version_number,
+        presentation_identifier=presentation.presentation_identifier,
+        original_filename=record.original_filename,
+        canonical_filename=record.canonical_filename,
+        expected_size=record.size_bytes or 0,
+        sha256=record.sha256 or "",
+        media_type=record.mime_type,
+        created_at=record.created_at,
+        state=MediaTransferState.AVAILABLE,
+    )
+
+
+def _publish_media_transfer_manifest(
+    session: Session,
+    record: PresentationMediaImport,
+    transfer: TransferJob,
+    manifest: MediaTransferManifest,
+    idempotency_key: str,
+) -> OutboxEvent:
+    return CentralQueue(session).enqueue_outbox(
+        event_type="central.media_transfer.available",
+        aggregate_type="media_transfer",
+        aggregate_id=transfer.transfer_job_id,
+        owning_site_id=record.destination_site_id,
+        source_sequence=next_sequence(session, record.destination_site_id),
+        protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+        idempotency_key=idempotency_key,
+        payload=OutboxPayload(
+            source_system=SourceSystem.CENTRAL,
+            data=manifest.model_dump(mode="json"),
+        ),
+    )
+
+
+def target_confirmed_event_media(
+    session: Session,
+    event_id: UUID,
+    site_id: UUID,
+    *,
+    deployment_id: UUID,
+    deployment_revision: int,
+) -> int:
+    """Publish the complete desired media state for one deployment generation."""
+    eligible_records = session.scalars(
+        select(PresentationMediaImport)
+        .where(
             PresentationMediaImport.event_id == event_id,
             PresentationMediaImport.match_state == MediaMatchState.CONFIRMED,
-            PresentationMediaImport.import_state.in_(
-                [MediaImportState.ASSIGNED, MediaImportState.TRANSFER_QUEUED]
+            PresentationMediaImport.import_state.notin_(
+                [MediaImportState.CANCELLED, MediaImportState.REJECTED]
             ),
-            PresentationMediaImport.transfer_job_id.is_(None),
             PresentationMediaImport.presentation_id.is_not(None),
             PresentationMediaImport.presentation_version_id.is_not(None),
             PresentationMediaImport.committed_storage_key.is_not(None),
+            PresentationMediaImport.sha256.is_not(None),
+            PresentationMediaImport.size_bytes.is_not(None),
         )
+        .order_by(PresentationMediaImport.media_import_id)
     ).all()
-    queued = 0
+    assets_by_media_id = {
+        asset.media_object_id: asset
+        for asset in session.scalars(
+            select(PresentationAsset).where(
+                PresentationAsset.presentation_version_id.in_(
+                    {record.presentation_version_id for record in eligible_records}
+                )
+            )
+        )
+    }
+    records_by_version: dict[UUID, list[PresentationMediaImport]] = defaultdict(list)
+    for record in eligible_records:
+        records_by_version[record.presentation_version_id].append(record)
+    records: list[PresentationMediaImport] = []
+    for version_records in records_by_version.values():
+        canonical = [
+            record for record in version_records if record.media_import_id in assets_by_media_id
+        ]
+        original = [
+            record
+            for record in canonical
+            if assets_by_media_id[record.media_import_id].kind is AssetKind.ORIGINAL
+        ]
+        records.append(
+            max(
+                original or canonical or version_records,
+                key=lambda record: (
+                    record.confirmed_at or record.created_at,
+                    record.created_at,
+                    str(record.media_import_id),
+                ),
+            )
+        )
+    records.sort(key=lambda record: str(record.presentation_version_id))
+    desired_by_version = {record.presentation_version_id: record for record in records}
+    for stale in eligible_records:
+        desired = desired_by_version.get(stale.presentation_version_id)
+        if desired is None or stale is desired or stale.transfer_job_id is None:
+            continue
+        stale_transfer = session.get(TransferJob, stale.transfer_job_id)
+        if stale_transfer is not None and stale_transfer.status is not JobStatus.CANCELLED:
+            _supersede_central_transfer(
+                session,
+                stale_transfer,
+                desired_media_import_id=desired.media_import_id,
+            )
+    published = 0
+    skipped_no_media = 0
     for record in records:
         if record.destination_site_id not in (None, site_id):
             continue
         record.destination_site_id = site_id
-        queue_central_to_site_transfer(session, record)
-        queued += 1
-    return queued
+        if record.transfer_job_id is None:
+            queue_central_to_site_transfer(session, record)
+            published += 1
+            continue
+        transfer = session.get(TransferJob, record.transfer_job_id)
+        if transfer is None:
+            record.transfer_job_id = None
+            queue_central_to_site_transfer(session, record)
+            published += 1
+            continue
+        try:
+            manifest = _media_transfer_manifest(session, record, transfer)
+        except MediaStagingError:
+            skipped_no_media += 1
+            continue
+        generation_key = (
+            f"media-transfer-desired:{transfer.transfer_job_id}:"
+            f"{deployment_id}:{deployment_revision}"
+        )
+        existing = session.scalar(
+            select(OutboxEvent).where(OutboxEvent.idempotency_key == generation_key)
+        )
+        if existing is None:
+            _publish_media_transfer_manifest(session, record, transfer, manifest, generation_key)
+            published += 1
+    record_log(
+        session,
+        service="central.event_deployment",
+        event_type="event_media_redeployment_planned",
+        message="Planned desired presentation media manifests for event deployment.",
+        event_id=event_id,
+        context={
+            "site_id": str(site_id),
+            "deployment_id": str(deployment_id),
+            "deployment_revision": deployment_revision,
+            "desired": len(records),
+            "manifests_published": published,
+            "skipped_no_media": skipped_no_media,
+        },
+    )
+    logging.getLogger(__name__).info(
+        "event_media_redeployment_planned event_id=%s site_id=%s desired=%d "
+        "manifests_published=%d skipped_no_media=%d",
+        event_id,
+        site_id,
+        len(records),
+        published,
+        skipped_no_media,
+    )
+    return published
 
 
 def _complete_batch_if_accounted(session: Session, batch_id: UUID | None) -> None:
@@ -395,11 +791,16 @@ class CentralMediaStagingService:
         factory: sessionmaker[Session],
         storage: AsyncMediaStorageClient,
         max_upload_bytes: int,
+        matching_concurrency: int = 1,
     ) -> None:
         self.factory = factory
         self.storage = storage
         self.max_upload_bytes = max_upload_bytes
+        if not 1 <= matching_concurrency <= 16:
+            raise ValueError("matching concurrency must be between 1 and 16")
+        self.matching_concurrency = matching_concurrency
         self._candidate_cache: dict[UUID, tuple[int, list[MatchCandidate]]] = {}
+        self._candidate_cache_lock = Lock()
 
     @staticmethod
     def _storage_root(session: Session, target: dict, role: str) -> StorageRoot:
@@ -587,8 +988,8 @@ class CentralMediaStagingService:
                 record = session.get(PresentationMediaImport, import_id)
                 record.size_bytes = staged["size_bytes"]
                 record.sha256 = staged["sha256"]
-                record.import_state = MediaImportState.STAGED
-                record.match_reason = "Durably staged; downstream processing is queued"
+                record.import_state = MediaImportState.UPLOADING
+                record.match_reason = "Durably uploaded; Intake publication is queued"
                 CentralQueue(session).enqueue_processing(
                     job_type=INTAKE_PUBLISH_JOB,
                     payload={"data": {"media_import_id": str(import_id)}},
@@ -658,8 +1059,10 @@ class CentralMediaStagingService:
                 record.size_bytes = total
                 record.sha256 = staged["sha256"]
                 record.match_state = MediaMatchState.UNMATCHED
-                record.match_reason = "Post-upload processing failed; file preserved for review"
-                record.import_state = MediaImportState.NEEDS_REVIEW
+                record.match_reason = (
+                    "Post-upload Intake publication failed; staged bytes are preserved for retry"
+                )
+                record.import_state = MediaImportState.RETRY_WAIT
                 record.error_code = (
                     error.code if isinstance(error, MediaStagingError) else "processing_failed"
                 )
@@ -797,6 +1200,67 @@ class CentralMediaStagingService:
         """Refresh metadata-only suggestions without assigning or touching stored media."""
         self._automatic_match_and_assign(session, record)
 
+    @staticmethod
+    def _match_rescan_item(
+        source_path: str,
+        candidates: list[MatchCandidate],
+        event_timezone: str,
+    ) -> MatchResult:
+        return match_presentation(source_path, candidates, event_timezone=event_timezone)
+
+    def _match_rescan_batch(
+        self,
+        items: list[tuple[UUID, str]],
+        candidates: list[MatchCandidate],
+        event_timezone: str,
+        executor: Executor | None = None,
+    ) -> list[tuple[UUID, MatchResult | Exception]]:
+        """CPU-match a bounded snapshot without sharing ORM state across workers."""
+        if self.matching_concurrency == 1:
+            output = []
+            for media_import_id, source_path in items:
+                try:
+                    output.append(
+                        (
+                            media_import_id,
+                            self._match_rescan_item(source_path, candidates, event_timezone),
+                        )
+                    )
+                except Exception as exc:
+                    output.append((media_import_id, exc))
+            return output
+        owned_executor = (
+            ThreadPoolExecutor(
+                max_workers=self.matching_concurrency,
+                thread_name_prefix="central-media-rescan",
+            )
+            if executor is None
+            else None
+        )
+        active_executor = executor or owned_executor
+        try:
+            futures = [
+                (
+                    media_import_id,
+                    active_executor.submit(
+                        self._match_rescan_item, source_path, candidates, event_timezone
+                    )
+                    if owned_executor is not None
+                    else active_executor.submit(_match_rescan_process_item, source_path),
+                )
+                for media_import_id, source_path in items
+            ]
+            output = []
+            for media_import_id, future in futures:
+                try:
+                    output.append((media_import_id, future.result()))
+                except Exception as exc:
+                    output.append((media_import_id, exc))
+            return output
+        finally:
+            if owned_executor is not None:
+                owned_executor.shutdown()
+
     def rescan(
         self,
         processing_job_id: UUID,
@@ -805,10 +1269,49 @@ class CentralMediaStagingService:
         lease_seconds: int = 60,
         batch_size: int = RESCAN_BATCH_SIZE,
     ) -> dict[str, int]:
-        """Resume a durable metadata-only event rescan, committing after bounded batches."""
+        """Run a resumable rescan with one bounded process pool for all CPU batches."""
+        if self.matching_concurrency == 1:
+            return self._rescan_batches(
+                processing_job_id,
+                worker_id,
+                lease_seconds=lease_seconds,
+                batch_size=batch_size,
+            )
+        # Spawn is safe even when independent Intake jobs are active in worker threads. Candidate
+        # metadata is serialized once per process and then reused for every bounded rescan batch.
+        executors: list[ProcessPoolExecutor] = []
+        try:
+            return self._rescan_batches(
+                processing_job_id,
+                worker_id,
+                lease_seconds=lease_seconds,
+                batch_size=batch_size,
+                executor_holder=executors,
+            )
+        finally:
+            for executor in executors:
+                executor.shutdown()
+
+    def _rescan_batches(
+        self,
+        processing_job_id: UUID,
+        worker_id: str,
+        *,
+        lease_seconds: int = 60,
+        batch_size: int = RESCAN_BATCH_SIZE,
+        executor_holder: list[ProcessPoolExecutor] | None = None,
+    ) -> dict[str, int]:
+        """Resume a durable metadata-only rescan with bounded parallel CPU matching."""
+        batch_candidates: list[MatchCandidate] | None = None
+        unmaterialized_session_codes: dict[str, str] = {}
+        batch_event_id: UUID | None = None
+        batch_timezone = "UTC"
+        executor: Executor | None = None
         while True:
-            with self.factory.begin() as session:
-                job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
+            # Snapshot one bounded batch without row locks. Matching below is persistence-free and
+            # may run for a while; authoritative eligibility is checked again under lock on write.
+            with self.factory() as session:
+                job = session.get(ProcessingJob, processing_job_id)
                 if job is None or job.job_type != RESCAN_JOB:
                     raise MediaStagingError("media rescan job not found", "not_found")
                 if job.status is not JobStatus.RUNNING or job.claimed_by_worker_id != worker_id:
@@ -822,41 +1325,138 @@ class CentralMediaStagingService:
                         for key in ("total", "processed", "suggested", "unmatched", "failed")
                     }
                 current_ids = media_import_ids[processed : processed + batch_size]
-                counts = {
-                    "suggested": int(data.get("suggested", 0)),
-                    "unmatched": int(data.get("unmatched", 0)),
-                    "failed": int(data.get("failed", 0)),
+                event_id = UUID(str(data["event_id"]))
+                if batch_candidates is None or batch_event_id != event_id:
+                    batch_timezone = (
+                        session.scalar(select(Event.timezone).where(Event.event_id == event_id))
+                        or "UTC"
+                    )
+                    batch_candidates = self._load_match_candidates(session, event_id)
+                    if executor_holder is not None:
+                        executor = ProcessPoolExecutor(
+                            max_workers=self.matching_concurrency,
+                            mp_context=multiprocessing.get_context("spawn"),
+                            initializer=_initialize_rescan_matcher,
+                            initargs=(batch_candidates, batch_timezone),
+                        )
+                        executor_holder.append(executor)
+                    unmaterialized_session_codes = {
+                        code.casefold(): code
+                        for code in session.scalars(
+                            select(ProgramSession.session_code).where(
+                                ProgramSession.event_id == event_id,
+                                ProgramSession.session_code.is_not(None),
+                                ~ProgramSession.session_id.in_(
+                                    select(Presentation.session_id).where(
+                                        Presentation.event_id == event_id,
+                                        Presentation.session_id.is_not(None),
+                                    )
+                                ),
+                            )
+                        )
+                    }
+                    batch_event_id = event_id
+                records = list(
+                    session.scalars(
+                        select(PresentationMediaImport).where(
+                            PresentationMediaImport.media_import_id.in_(
+                                [UUID(str(value)) for value in current_ids]
+                            )
+                        )
+                    )
+                )
+                snapshots = [
+                    (
+                        record.media_import_id,
+                        record.source_relative_path or record.original_filename,
+                    )
+                    for record in records
+                    if record.event_id == event_id
+                    and record.presentation_id is None
+                    and record.match_state is not MediaMatchState.CONFIRMED
+                    and record.import_state is MediaImportState.NEEDS_REVIEW
+                ]
+
+            results = self._match_rescan_batch(
+                snapshots, batch_candidates, batch_timezone, executor
+            )
+
+            with self.factory.begin() as session:
+                job = session.get(ProcessingJob, processing_job_id, with_for_update=True)
+                if (
+                    job is None
+                    or job.status is not JobStatus.RUNNING
+                    or job.claimed_by_worker_id != worker_id
+                ):
+                    raise MediaStagingError("media rescan lease is no longer owned", "lease_lost")
+                latest_data = dict(job.payload.get("data", {}))
+                if int(latest_data.get("processed", 0)) != processed:
+                    raise MediaStagingError(
+                        "media rescan progress changed concurrently", "lease_lost"
+                    )
+                result_ids = [media_import_id for media_import_id, _ in results]
+                writable = {
+                    record.media_import_id: record
+                    for record in session.scalars(
+                        select(PresentationMediaImport)
+                        .where(PresentationMediaImport.media_import_id.in_(result_ids))
+                        .with_for_update()
+                    )
                 }
-                for value in current_ids:
-                    try:
-                        with session.begin_nested():
-                            record = session.get(
-                                PresentationMediaImport, UUID(str(value)), with_for_update=True
-                            )
-                            eligible = bool(
-                                record
-                                and record.event_id == UUID(str(data["event_id"]))
-                                and record.presentation_id is None
-                                and record.match_state is not MediaMatchState.CONFIRMED
-                                and record.import_state is MediaImportState.NEEDS_REVIEW
-                            )
-                            if not eligible:
-                                continue
-                            self.refresh_match_suggestion(session, record)
-                            if record.match_state is MediaMatchState.SUGGESTED:
-                                counts["suggested"] += 1
-                            else:
-                                counts["unmatched"] += 1
-                    except Exception:
-                        logger.exception(
+                counts = {
+                    "suggested": int(latest_data.get("suggested", 0)),
+                    "unmatched": int(latest_data.get("unmatched", 0)),
+                    "failed": int(latest_data.get("failed", 0)),
+                }
+                for media_import_id, result in results:
+                    if isinstance(result, Exception):
+                        logger.error(
                             "presentation_media_rescan_item_failed",
-                            extra={"media_import_id": str(value)},
+                            extra={
+                                "media_import_id": str(media_import_id),
+                                "exception_type": type(result).__name__,
+                            },
                         )
                         counts["failed"] += 1
+                        continue
+                    record = writable.get(media_import_id)
+                    if not (
+                        record
+                        and record.event_id == event_id
+                        and record.presentation_id is None
+                        and record.match_state is not MediaMatchState.CONFIRMED
+                        and record.import_state is MediaImportState.NEEDS_REVIEW
+                    ):
+                        continue
+                    record.match_state = result.state
+                    record.match_reason = result.reason
+                    record.match_candidates = list(result.candidates)
+                    if result.state is MediaMatchState.UNMATCHED:
+                        session_code = next(
+                            (
+                                unmaterialized_session_codes[token.casefold()]
+                                for token in re.split(
+                                    r"[^A-Za-z0-9]+", Path(record.original_filename).stem
+                                )
+                                if token.casefold() in unmaterialized_session_codes
+                            ),
+                            None,
+                        )
+                        if session_code:
+                            record.match_reason = (
+                                f"Session {session_code} found, but no assignable Presentation "
+                                "record is materialized. Re-run matching to repair imported "
+                                "program data."
+                            )
+                    record.import_state = MediaImportState.NEEDS_REVIEW
+                    if record.match_state is MediaMatchState.SUGGESTED:
+                        counts["suggested"] += 1
+                    else:
+                        counts["unmatched"] += 1
                 processed += len(current_ids)
-                data.update(counts)
-                data["processed"] = processed
-                job.payload = {**job.payload, "data": data}
+                latest_data.update(counts)
+                latest_data["processed"] = processed
+                job.payload = {**job.payload, "data": latest_data}
                 job.progress = Decimal(processed * 100 / max(len(media_import_ids), 1)).quantize(
                     Decimal("0.01")
                 )
@@ -888,10 +1488,16 @@ class CentralMediaStagingService:
         existing = session.scalar(
             select(ProcessingJob).where(
                 ProcessingJob.job_type == "presentation_media.promote",
-                ProcessingJob.idempotency_key == idempotency_key,
+                ProcessingJob.payload["data"]["media_import_id"].astext
+                == str(record.media_import_id),
             )
         )
         if existing is not None:
+            if UUID(str(existing.payload["data"]["presentation_id"])) != presentation_id:
+                raise MediaStagingError(
+                    "media import already has a promotion queued for another presentation",
+                    "already_confirmed",
+                )
             return
         CentralQueue(session).enqueue_processing(
             job_type="presentation_media.promote",
@@ -917,6 +1523,163 @@ class CentralMediaStagingService:
             presentation_id=presentation_id,
             context={"processing_job_id": idempotency_key},
         )
+
+    def queue_promotions(
+        self,
+        session: Session,
+        requests: list[tuple[UUID, UUID]],
+        *,
+        actor: str,
+    ) -> list[dict[str, object]]:
+        """Validate and durably enqueue a confirmation batch with bounded query count."""
+        media_ids = {media_import_id for media_import_id, _ in requests}
+        presentation_ids = {presentation_id for _, presentation_id in requests}
+        records = {
+            record.media_import_id: record
+            for record in session.scalars(
+                select(PresentationMediaImport)
+                .where(PresentationMediaImport.media_import_id.in_(media_ids))
+                .with_for_update()
+            )
+        }
+        presentations = {
+            presentation.presentation_id: presentation
+            for presentation in session.scalars(
+                select(Presentation).where(Presentation.presentation_id.in_(presentation_ids))
+            )
+        }
+        requested_keys = {
+            f"{media_import_id}:{presentation_id}"
+            for media_import_id, presentation_id in requests
+        }
+        existing_promotions = session.execute(
+            select(ProcessingJob.idempotency_key, ProcessingJob.payload).where(
+                    ProcessingJob.job_type == "presentation_media.promote",
+                    ProcessingJob.payload["data"]["media_import_id"].astext.in_(
+                        [str(value) for value in media_ids]
+                    ),
+                )
+        ).all()
+        existing_keys = {key for key, _ in existing_promotions if key in requested_keys}
+        existing_targets: dict[UUID, set[UUID]] = {}
+        for _, payload in existing_promotions:
+            existing_targets.setdefault(
+                UUID(str(payload["data"]["media_import_id"])), set()
+            ).add(UUID(str(payload["data"]["presentation_id"])))
+        queued_keys = set(existing_keys)
+        selected_targets: dict[UUID, UUID] = {}
+        job_rows: list[dict[str, object]] = []
+        log_context: dict[str, tuple[PresentationMediaImport, UUID]] = {}
+        results: list[dict[str, object]] = []
+
+        for media_import_id, presentation_id in requests:
+            record = records.get(media_import_id)
+            presentation = presentations.get(presentation_id)
+            error: MediaStagingError | None = None
+            previous_target = selected_targets.setdefault(media_import_id, presentation_id)
+            if previous_target != presentation_id:
+                error = MediaStagingError(
+                    "media import was requested for multiple presentations", "invalid_match"
+                )
+            elif (
+                media_import_id in existing_targets
+                and existing_targets[media_import_id] != {presentation_id}
+            ):
+                error = MediaStagingError(
+                    "media import already has a promotion queued for another presentation",
+                    "already_confirmed",
+                )
+            elif record is None:
+                error = MediaStagingError("media import not found", "not_found")
+            elif presentation is None or presentation.event_id != record.event_id:
+                error = MediaStagingError(
+                    "presentation is not in the import event", "invalid_match"
+                )
+            elif record.match_state is MediaMatchState.CONFIRMED:
+                if record.presentation_id != presentation_id:
+                    error = MediaStagingError(
+                        "media import was confirmed to another presentation",
+                        "already_confirmed",
+                    )
+            elif record.import_state is MediaImportState.REJECTED or record.rejected_at:
+                error = MediaStagingError("rejected media cannot be confirmed", "rejected")
+            elif (
+                not record.sha256
+                or record.size_bytes is None
+                or not record.intake_storage_root_id
+            ):
+                error = MediaStagingError("media import is not in durable Intake", "not_in_intake")
+
+            if error is not None:
+                results.append(
+                    {
+                        "media_import_id": media_import_id,
+                        "status": "failed",
+                        "code": error.code,
+                        "message": str(error),
+                    }
+                )
+                continue
+            if record.match_state is MediaMatchState.CONFIRMED:
+                results.append(
+                    {
+                        "media_import_id": media_import_id,
+                        "status": "confirmed",
+                        "presentation_version_id": record.presentation_version_id,
+                    }
+                )
+                continue
+
+            idempotency_key = f"{media_import_id}:{presentation_id}"
+            if idempotency_key not in queued_keys:
+                job_rows.append(
+                    {
+                        "processing_job_id": new_uuid7(),
+                        "job_type": "presentation_media.promote",
+                        "payload": {
+                            "schema_version": 1,
+                            "data": {
+                                "media_import_id": str(media_import_id),
+                                "presentation_id": str(presentation_id),
+                                "actor": actor,
+                            },
+                        },
+                        "idempotency_key": idempotency_key,
+                        "required_capabilities": ["cpu"],
+                        "max_attempts": 5,
+                    }
+                )
+                queued_keys.add(idempotency_key)
+                log_context[idempotency_key] = (record, presentation_id)
+
+            results.append({"media_import_id": media_import_id, "status": "queued"})
+
+        inserted_keys: set[str] = set()
+        if job_rows:
+            inserted_keys = set(
+                session.scalars(
+                    insert(ProcessingJob)
+                    .values(job_rows)
+                    .on_conflict_do_nothing(index_elements=["job_type", "idempotency_key"])
+                    .returning(ProcessingJob.idempotency_key)
+                )
+            )
+        for idempotency_key in inserted_keys:
+            record, presentation_id = log_context[idempotency_key]
+            record_log(
+                session,
+                service="central-api",
+                event_type="confirmation.requested",
+                message="Presentation confirmation queued",
+                batch_id=record.batch_id,
+                media_import_id=record.media_import_id,
+                event_id=record.event_id,
+                presentation_id=presentation_id,
+                context={"processing_job_id": idempotency_key},
+                flush=False,
+            )
+        session.flush()
+        return results
 
     async def promote_and_assign(
         self, media_import_id: UUID, presentation_id: UUID, *, actor: str
@@ -990,20 +1753,25 @@ class CentralMediaStagingService:
             return record
 
     def _automatic_match_and_assign(
-        self, session: Session, record: PresentationMediaImport
+        self,
+        session: Session,
+        record: PresentationMediaImport,
+        *,
+        candidates: list[MatchCandidate] | None = None,
+        event_timezone: str | None = None,
     ) -> None:
-        event_revision = (
-            session.scalar(select(Event.revision).where(Event.event_id == record.event_id)) or 1
-        )
-        cached = self._candidate_cache.get(record.event_id)
-        if cached and cached[0] == event_revision:
-            candidates = cached[1]
-        else:
-            candidates = self._load_match_candidates(session, record.event_id)
-            self._candidate_cache[record.event_id] = (event_revision, candidates)
-        event_timezone = (
-            session.scalar(select(Event.timezone).where(Event.event_id == record.event_id)) or "UTC"
-        )
+        if candidates is None:
+            event_revision, event_timezone = session.execute(
+                select(Event.revision, Event.timezone).where(Event.event_id == record.event_id)
+            ).one_or_none() or (1, "UTC")
+            with self._candidate_cache_lock:
+                cached = self._candidate_cache.get(record.event_id)
+                if cached and cached[0] == event_revision:
+                    candidates = cached[1]
+                else:
+                    candidates = self._load_match_candidates(session, record.event_id)
+                    self._candidate_cache[record.event_id] = (event_revision, candidates)
+        event_timezone = event_timezone or "UTC"
         result = match_presentation(
             record.source_relative_path or record.original_filename,
             candidates,
@@ -1039,11 +1807,9 @@ class CentralMediaStagingService:
             )
         ).all()
         candidates = []
-        seen: set[UUID] = set()
         for item, program_session, presenter in rows:
-            if item.presentation_id in seen:
-                continue
-            seen.add(item.presentation_id)
+            # Keep every presenter alias as evidence. The persistence-free matcher collapses
+            # these joined rows by canonical presentation_id before ranking or ambiguity.
             candidates.append(
                 MatchCandidate(
                     item.presentation_id,
@@ -1130,7 +1896,8 @@ class CentralMediaStagingService:
             )
         )
         primary_asset = (
-            Path(record.original_filename).suffix.lower() in SUPPORTED_PRESENTATION_EXTENSIONS
+            Path(record.original_filename).suffix.lower()
+            in POWERPOINT_PRESENTATION_EXTENSIONS | {".pdf"}
         )
         if latest is None or (latest_assigned and primary_asset):
             latest = PresentationVersion(

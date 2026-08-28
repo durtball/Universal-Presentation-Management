@@ -29,10 +29,16 @@ from upm_central.persistence.models import (
     ProcessingJob,
     SessionParticipant,
     Site,
+    StorageRoot,
+    TransferJob,
 )
 from upm_central.persistence.models import Session as ProgramSession
 from upm_central.persistence.queue import CentralQueue
-from upm_central.presentation_media import CentralMediaStagingService
+from upm_central.presentation_media import (
+    CentralMediaStagingService,
+    recover_stranded_intake,
+    retry_extension_policy_failures,
+)
 from upm_shared.enums import (
     EnrollmentState,
     JobStatus,
@@ -663,7 +669,7 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
                     import_state=MediaImportState.NEEDS_REVIEW,
                     sync_state=SyncState.LOCAL,
                 )
-                for index in range(220)
+                for index in range(420)
             ]
             session.add_all(records)
 
@@ -671,7 +677,7 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
             f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
         )
         assert started.status_code == 200
-        assert started.json()["total"] == 220
+        assert started.json()["total"] == 420
         operation_id = started.json()["operation_id"]
         duplicate = client.post(
             f"/api/v1/admin/events/{event_id}/media-imports/rescan", headers=headers
@@ -721,18 +727,18 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
 
         monkeypatch.setattr(CentralMediaStagingService, "_load_match_candidates", counted_load)
         interrupted_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
-        original_refresh = interrupted_service.refresh_match_suggestion
+        original_match = interrupted_service._match_rescan_item
         refreshes = 0
 
-        def interrupt_after_first_batch(session, record):
+        def interrupt_after_first_batch(source_path, candidates, event_timezone):
             nonlocal refreshes
             refreshes += 1
             if refreshes == 76:
                 raise KeyboardInterrupt("simulated worker interruption")
-            original_refresh(session, record)
+            return original_match(source_path, candidates, event_timezone)
 
         monkeypatch.setattr(
-            interrupted_service, "refresh_match_suggestion", interrupt_after_first_batch
+            interrupted_service, "_match_rescan_item", interrupt_after_first_batch
         )
         with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
             interrupted_service.rescan(job_id, "rescan-test-worker")
@@ -742,12 +748,14 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
             assert interrupted.payload["data"]["processed"] == 75
             assert interrupted.progress > 0
 
-        resumed_service = CentralMediaStagingService(factory, StorageMustNotBeUsed(), 1)
+        resumed_service = CentralMediaStagingService(
+            factory, StorageMustNotBeUsed(), 1, matching_concurrency=4
+        )
         result = resumed_service.rescan(job_id, "rescan-test-worker")
         assert result == {
-            "total": 220,
-            "processed": 220,
-            "suggested": 219,
+            "total": 420,
+            "processed": 420,
+            "suggested": 419,
             "unmatched": 0,
             "failed": 0,
         }
@@ -761,9 +769,202 @@ def test_event_media_rescan_uses_one_resumable_metadata_only_job(
 
         progress = client.get(f"/api/v1/admin/media-rescans/{operation_id}", headers=headers)
         assert progress.status_code == 200
-        assert progress.json()["processed"] == progress.json()["total"] == 220
-        assert progress.json()["suggested"] == 219
+        assert progress.json()["processed"] == progress.json()["total"] == 420
+        assert progress.json()["suggested"] == 419
         assert progress.json()["failed"] == 0
         assert progress.json()["status"] == "succeeded"
         assert progress.json()["finished"] is True
+    engine.dispose()
+
+
+def test_bulk_media_confirmation_queues_large_mixed_batch_idempotently(
+    program_database: str,
+) -> None:
+    token = "test-administrator-token-at-least-32-characters"
+    settings = CentralDatabaseSettings(
+        database_url=program_database,
+        admin_token=token,
+        credential_issuer_key="test-credential-issuer-key-at-least-32-characters",
+    )
+    headers = {"X-UPM-Admin-Token": token}
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id, other_event_id, root_id = uuid4(), uuid4(), uuid4()
+    with factory.begin() as session:
+        session.add_all(
+            [
+                Event(event_id=event_id, name="Bulk confirmations", timezone="UTC"),
+                Event(event_id=other_event_id, name="Other event", timezone="UTC"),
+                StorageRoot(
+                    storage_root_id=root_id,
+                    role="media",
+                    display_name="Bulk confirmation Intake",
+                    backend_type="filesystem",
+                    path="/storage/media",
+                    enabled=False,
+                ),
+            ]
+        )
+        presentation = Presentation(
+            event_id=event_id,
+            title="Bulk target",
+            presentation_identifier="BULK-001",
+        )
+        other_presentation = Presentation(
+            event_id=other_event_id,
+            title="Wrong event",
+            presentation_identifier="OTHER-001",
+        )
+        session.add_all([presentation, other_presentation])
+        session.flush()
+        imports = [
+            PresentationMediaImport(
+                event_id=event_id,
+                original_filename=f"BULK-001-{index}.pptx",
+                staging_key=f"bulk/{index}",
+                intake_storage_root_id=root_id,
+                intake_storage_key=f"intake/{index}",
+                sha256=f"{index:064x}",
+                size_bytes=100 + index,
+                match_state=MediaMatchState.SUGGESTED,
+                import_state=MediaImportState.NEEDS_REVIEW,
+                sync_state=SyncState.LOCAL,
+            )
+            for index in range(250)
+        ]
+        session.add_all(imports)
+        session.flush()
+        requests = [
+            {
+                "media_import_id": str(item.media_import_id),
+                "presentation_id": str(presentation.presentation_id),
+            }
+            for item in imports
+        ]
+        requests.extend(
+            [
+                {
+                    "media_import_id": str(uuid4()),
+                    "presentation_id": str(presentation.presentation_id),
+                },
+                {
+                    "media_import_id": str(imports[0].media_import_id),
+                    "presentation_id": str(other_presentation.presentation_id),
+                },
+            ]
+        )
+
+    with TestClient(create_app(settings)) as client:
+        first = client.post(
+            "/api/v1/admin/media-imports/confirmations",
+            headers=headers,
+            json={"items": requests},
+        )
+        assert first.status_code == 200
+        assert [item["status"] for item in first.json()["results"]].count("queued") == 250
+        assert [item["status"] for item in first.json()["results"]].count("failed") == 2
+        retry = client.post(
+            "/api/v1/admin/media-imports/confirmations",
+            headers=headers,
+            json={"items": requests[:250]},
+        )
+        assert retry.status_code == 200
+        assert {item["status"] for item in retry.json()["results"]} == {"queued"}
+
+    with factory() as session:
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.job_type == "presentation_media.promote"
+                )
+            )
+        )
+        assert len(jobs) == 250
+        assert len({job.idempotency_key for job in jobs}) == 250
+    engine.dispose()
+
+
+def test_stranded_staging_is_requeued_or_clearly_failed(program_database: str) -> None:
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id, root_id = uuid4(), uuid4()
+    with factory.begin() as session:
+        session.add(Event(event_id=event_id, name="Stranded Intake", timezone="UTC"))
+        session.add(
+            StorageRoot(
+                storage_root_id=root_id,
+                role="staging",
+                display_name="Staging",
+                backend_type="filesystem",
+                path="/storage/staging",
+                enabled=False,
+            )
+        )
+        recoverable = PresentationMediaImport(
+            event_id=event_id,
+            original_filename="recoverable.pptx",
+            staging_key="staging/recoverable",
+            staging_storage_root_id=root_id,
+            sha256="a" * 64,
+            size_bytes=100,
+            match_state=MediaMatchState.UNMATCHED,
+            import_state=MediaImportState.STAGED,
+            sync_state=SyncState.LOCAL,
+        )
+        impossible = PresentationMediaImport(
+            event_id=event_id,
+            original_filename="impossible.pptx",
+            staging_key="staging/impossible",
+            match_state=MediaMatchState.UNMATCHED,
+            import_state=MediaImportState.STAGED,
+            sync_state=SyncState.LOCAL,
+        )
+        session.add_all([recoverable, impossible])
+        session.flush()
+        existing_job = ProcessingJob(
+            job_type="presentation_media.intake.publish",
+            payload={"data": {"media_import_id": str(recoverable.media_import_id)}},
+            idempotency_key=f"intake:{recoverable.media_import_id}",
+            required_capabilities=["cpu"],
+            status=JobStatus.FAILED,
+            attempt_count=5,
+            max_attempts=5,
+        )
+        session.add(existing_job)
+        session.flush()
+        requeued, failed = recover_stranded_intake(session)
+        assert (requeued, failed) == (1, 1)
+        assert recoverable.import_state is MediaImportState.UPLOADING
+        assert impossible.import_state is MediaImportState.FAILED
+        assert impossible.error_code == "stranded_staging_state"
+        assert existing_job.status is JobStatus.RETRY_WAIT
+        assert existing_job.max_attempts == 10
+    with factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(ProcessingJob).where(
+                ProcessingJob.job_type == "presentation_media.intake.publish"
+            )
+        ) == 1
+    engine.dispose()
+
+
+def test_extension_policy_transfer_failure_becomes_retryable(program_database: str) -> None:
+    engine = create_engine(program_database)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory.begin() as session:
+        job = TransferJob(
+            transfer_type="presentation_media.central_to_site",
+            payload={"data": {}},
+            idempotency_key=f"extension-policy-{uuid4()}",
+            status=JobStatus.EXHAUSTED,
+            attempt_count=5,
+            max_attempts=5,
+            last_error="unsupported presentation media extension",
+        )
+        session.add(job)
+        session.flush()
+        assert retry_extension_policy_failures(session) == 1
+        assert job.status is JobStatus.RETRY_WAIT
+        assert job.max_attempts == 10
+        assert job.error_metadata["recovered_by"] == "presentation_media_extension_policy"
     engine.dispose()

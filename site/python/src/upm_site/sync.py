@@ -3,11 +3,12 @@
 import base64
 import hashlib
 import hmac
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from upm_shared.contracts.deployments import EVENT_DEPLOYMENT_SCHEMA_VERSION, SiteDeploymentStatus
@@ -18,10 +19,12 @@ from upm_shared.contracts.sync import (
     SyncEventEnvelope,
 )
 from upm_shared.enums import (
+    AssetKind,
     AuthorityScope,
     EnrollmentState,
     EventDeploymentStatus,
     JobStatus,
+    MediaAvailability,
     MediaTransferState,
     SourceSystem,
 )
@@ -33,21 +36,25 @@ from upm_site.event_deployments import (
     apply_revocation_event,
     apply_snapshot_event,
     converge_presentation_version_identity,
+    event_is_deleted,
 )
 from upm_site.persistence.models import (
     CentralRegistration,
     Event,
     LocalSiteIdentity,
     ManagedSetting,
+    MediaObject,
     MediaTransferSession,
     OutboxEvent,
     Presentation,
+    PresentationAsset,
     PresentationVersion,
     Site,
     SyncCursor,
     SyncReceipt,
     SyncSequence,
     TransferJob,
+    utc_now,
 )
 from upm_site.persistence.queue import SiteQueue
 
@@ -56,6 +63,30 @@ from upm_site.persistence.queue import SiteQueue
 # permanent identity without relying on exception handling after a uniqueness violation.
 SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
 DEFERRED_TRANSFER_CAPABILITY = "sync-dependencies"
+logger = logging.getLogger(__name__)
+
+
+def _manifest_is_satisfied(session: Session, manifest: MediaTransferManifest) -> bool:
+    """Return whether the desired original asset is live and usable on this Site."""
+    row = session.execute(
+        select(PresentationAsset, MediaObject)
+        .join(MediaObject, MediaObject.media_object_id == PresentationAsset.media_object_id)
+        .where(
+            PresentationAsset.presentation_version_id == manifest.presentation_version_id,
+            PresentationAsset.kind == AssetKind.ORIGINAL,
+        )
+        .with_for_update()
+    ).first()
+    if row is None:
+        return False
+    _asset, media = row
+    return bool(
+        media.deleted_at is None
+        and media.availability is MediaAvailability.AVAILABLE
+        and media.content_hash == manifest.sha256
+        and media.size_bytes == manifest.expected_size
+        and media.object_key
+    )
 
 
 def _materialize_media_transfer(
@@ -84,47 +115,229 @@ def _materialize_media_transfer(
 
         local_session = session.get(MediaTransferSession, manifest.transfer_session_id)
         if local_session is None:
-            session.add(
-                MediaTransferSession(
-                    transfer_session_id=manifest.transfer_session_id,
-                    site_id=transfer.site_id,
-                    event_id=manifest.event_id,
-                    presentation_id=manifest.presentation_id,
-                    presentation_version_id=manifest.presentation_version_id,
-                    original_filename=manifest.original_filename,
-                    canonical_filename=manifest.canonical_filename,
-                    expected_size=manifest.expected_size,
-                    sha256=manifest.sha256,
-                    media_type=manifest.media_type,
-                    partial_key=f"transfers/{manifest.transfer_session_id}.partial",
-                    state=MediaTransferState.AVAILABLE,
-                )
+            local_session = MediaTransferSession(
+                transfer_session_id=manifest.transfer_session_id,
+                site_id=transfer.site_id,
+                event_id=manifest.event_id,
+                presentation_id=manifest.presentation_id,
+                presentation_version_id=manifest.presentation_version_id,
+                original_filename=manifest.original_filename,
+                canonical_filename=manifest.canonical_filename,
+                expected_size=manifest.expected_size,
+                sha256=manifest.sha256,
+                media_type=manifest.media_type,
+                partial_key=f"transfers/{manifest.transfer_session_id}.partial",
+                state=MediaTransferState.AVAILABLE,
             )
+            session.add(local_session)
+            session.flush([local_session])
         elif (
             local_session.expected_size != manifest.expected_size
             or local_session.sha256 != manifest.sha256
             or local_session.presentation_version_id != manifest.presentation_version_id
         ):
             raise ValueError("transfer manifest conflicts with existing transfer state")
-        transfer.required_capabilities = ["transfer"]
+        elif local_session.state is MediaTransferState.COMPLETED:
+            # A completed historical transfer is only evidence of a past state.
+            # Desired-vs-actual reconciliation has already found the canonical
+            # asset unsatisfied, so make the same durable intent runnable again.
+            local_session.storage_target_id = None
+            local_session.confirmed_offset = 0
+            local_session.state = MediaTransferState.AVAILABLE
+            local_session.retry_count += 1
+            local_session.last_progress_at = None
+            local_session.error_detail = None
+            local_session.media_object_id = None
         return True
 
 
-def reconcile_deferred_media_transfers(session: Session) -> None:
+def _defer_media_transfer(transfer: TransferJob) -> None:
+    transfer.required_capabilities = [DEFERRED_TRANSFER_CAPABILITY]
+
+
+def _activate_media_transfer(transfer: TransferJob) -> None:
+    transfer.required_capabilities = ["transfer"]
+    revived = False
+    if transfer.status in {
+        JobStatus.SUCCEEDED,
+        JobStatus.FAILED,
+        JobStatus.EXHAUSTED,
+        JobStatus.CANCELLED,
+    }:
+        transfer.status = JobStatus.PENDING
+        transfer.progress = 0
+        transfer.attempt_count = 0
+        transfer.next_attempt_at = utc_now()
+        transfer.completed_at = None
+        revived = True
+    if revived:
+        transfer.claimed_by_worker_id = None
+        transfer.lease_expires_at = None
+        transfer.heartbeat_at = None
+    transfer.error_code = None
+    transfer.last_error = None
+
+
+def _supersede_transfer_intent(
+    transfer: TransferJob, transfer_session: MediaTransferSession | None, *, desired_id: UUID
+) -> None:
+    """Terminalize one historical original-media intent without deleting its audit row."""
+    transfer.status = JobStatus.CANCELLED
+    transfer.required_capabilities = []
+    transfer.claimed_by_worker_id = None
+    transfer.lease_expires_at = None
+    transfer.heartbeat_at = None
+    transfer.completed_at = utc_now()
+    transfer.error_code = "superseded_original"
+    transfer.last_error = f"Superseded by desired transfer {desired_id}."
+    if transfer_session is not None:
+        transfer_session.state = MediaTransferState.CANCELLED
+        transfer_session.error_detail = f"Superseded by desired transfer {desired_id}."
+        transfer_session.last_progress_at = utc_now()
+
+
+def _supersede_other_original_intents(session: Session, manifest: MediaTransferManifest) -> int:
+    """Enforce one current Central ORIGINAL transfer per presentation version."""
+    older_sessions = session.scalars(
+        select(MediaTransferSession)
+        .where(
+            MediaTransferSession.presentation_version_id == manifest.presentation_version_id,
+            MediaTransferSession.transfer_session_id != manifest.transfer_session_id,
+            MediaTransferSession.state != MediaTransferState.CANCELLED,
+        )
+        .with_for_update()
+    ).all()
+    superseded = 0
+    for older in older_sessions:
+        job = session.get(TransferJob, older.transfer_session_id, with_for_update=True)
+        if job is None:
+            older.state = MediaTransferState.CANCELLED
+            older.error_detail = f"Superseded by desired transfer {manifest.transfer_session_id}."
+            older.last_progress_at = utc_now()
+        else:
+            _supersede_transfer_intent(job, older, desired_id=manifest.transfer_session_id)
+        superseded += 1
+    if superseded:
+        session.flush()
+    return superseded
+
+
+def reconcile_conflicting_original_transfers(session: Session) -> dict[str, int]:
+    """Repair historical duplicate active sessions before workers can claim them."""
+    sessions = session.scalars(
+        select(MediaTransferSession).order_by(
+            MediaTransferSession.presentation_version_id,
+            MediaTransferSession.created_at.desc(),
+            MediaTransferSession.transfer_session_id.desc(),
+        )
+    ).all()
+    by_version: dict[UUID, list[MediaTransferSession]] = {}
+    for item in sessions:
+        if item.state in {
+            MediaTransferState.CANCELLED,
+            MediaTransferState.EXPIRED,
+            MediaTransferState.FAILED,
+        }:
+            continue
+        by_version.setdefault(item.presentation_version_id, []).append(item)
+    superseded = 0
+    conflicts = 0
+    for version_sessions in by_version.values():
+        if len(version_sessions) < 2:
+            continue
+        conflicts += 1
+        winner = version_sessions[0]
+        for stale in version_sessions[1:]:
+            job = session.get(TransferJob, stale.transfer_session_id, with_for_update=True)
+            if job is None:
+                stale.state = MediaTransferState.CANCELLED
+                stale.error_detail = f"Superseded by desired transfer {winner.transfer_session_id}."
+            else:
+                _supersede_transfer_intent(job, stale, desired_id=winner.transfer_session_id)
+            superseded += 1
+    return {"conflicting_versions": conflicts, "superseded": superseded}
+
+
+def reconcile_deferred_media_transfers(session: Session) -> dict[str, int]:
+    conflict_summary = reconcile_conflicting_original_transfers(session)
+    orphan = (
+        ~select(MediaTransferSession.transfer_session_id)
+        .where(MediaTransferSession.transfer_session_id == TransferJob.transfer_job_id)
+        .exists()
+    )
     transfers = session.scalars(
         select(TransferJob).where(
             TransferJob.transfer_type == "presentation_media.central_pull",
-            TransferJob.required_capabilities == [DEFERRED_TRANSFER_CAPABILITY],
+            or_(
+                TransferJob.required_capabilities == [DEFERRED_TRANSFER_CAPABILITY],
+                (TransferJob.required_capabilities == ["transfer"]) & orphan,
+            ),
         )
     ).all()
+    already_valid = (
+        session.scalar(
+            select(func.count())
+            .select_from(TransferJob)
+            .where(
+                TransferJob.transfer_type == "presentation_media.central_pull",
+                TransferJob.required_capabilities == ["transfer"],
+                ~orphan,
+            )
+        )
+        or 0
+    )
+    summary = {
+        "total": len(transfers) + already_valid,
+        "materialized": 0,
+        "deferred": 0,
+        "orphan_jobs_repaired": 0,
+        "already_valid": already_valid,
+        "invalid": 0,
+        **conflict_summary,
+    }
     for transfer in transfers:
+        was_orphan = transfer.required_capabilities == ["transfer"]
+        _defer_media_transfer(transfer)
+        if was_orphan:
+            summary["orphan_jobs_repaired"] += 1
+            if transfer.status is JobStatus.RUNNING:
+                transfer.status = JobStatus.PENDING
+                transfer.next_attempt_at = utc_now()
+            transfer.claimed_by_worker_id = None
+            transfer.lease_expires_at = None
+            transfer.heartbeat_at = None
         try:
             manifest = MediaTransferManifest.model_validate(transfer.payload)
-            _materialize_media_transfer(session, transfer, manifest)
-        except (TypeError, ValueError):
-            # A malformed/conflicting deferred manifest remains unclaimable without preventing
-            # later ordered sync events from applying.
+            materialized = _materialize_media_transfer(session, transfer, manifest)
+        except (TypeError, ValueError) as error:
+            transfer.error_code = "sync_dependency_materialization_failed"
+            transfer.last_error = str(error)[:2048]
+            summary["invalid"] += 1
             continue
+        if not materialized:
+            summary["deferred"] += 1
+            continue
+        if session.get(MediaTransferSession, transfer.transfer_job_id) is None:
+            transfer.error_code = "sync_dependency_materialization_failed"
+            transfer.last_error = "materialization completed without a transfer session"
+            summary["invalid"] += 1
+            continue
+        _activate_media_transfer(transfer)
+        summary["materialized"] += 1
+    logger.info(
+        "presentation_media_transfer_dependencies_reconciled "
+        "total=%d materialized=%d deferred=%d orphan_jobs_repaired=%d "
+        "already_valid=%d invalid=%d conflicting_versions=%d superseded=%d",
+        summary["total"],
+        summary["materialized"],
+        summary["deferred"],
+        summary["orphan_jobs_repaired"],
+        summary["already_valid"],
+        summary["invalid"],
+        summary["conflicting_versions"],
+        summary["superseded"],
+    )
+    return summary
 
 
 def persist_media_transfer_manifest(
@@ -132,6 +345,7 @@ def persist_media_transfer_manifest(
 ) -> TransferJob:
     """Durably retain a valid manifest before attempting dependency materialization."""
     payload = manifest.model_dump(mode="json")
+    _supersede_other_original_intents(session, manifest)
     transfer = session.get(TransferJob, manifest.transfer_session_id)
     if transfer is not None:
         if transfer.payload != payload:
@@ -148,8 +362,13 @@ def persist_media_transfer_manifest(
             }:
                 raise ValueError("transfer manifest conflicts with durable transfer intent")
             transfer.payload = payload
-        if transfer.status is JobStatus.SUCCEEDED:
+        if _manifest_is_satisfied(session, manifest):
+            transfer.status = JobStatus.SUCCEEDED
+            transfer.progress = 100
+            transfer.error_code = None
+            transfer.last_error = None
             return transfer
+        _defer_media_transfer(transfer)
     else:
         transfer = TransferJob(
             transfer_job_id=manifest.transfer_session_id,
@@ -163,9 +382,13 @@ def persist_media_transfer_manifest(
         session.flush([transfer])
     try:
         with session.begin_nested():
-            _materialize_media_transfer(session, transfer, manifest)
+            materialized = _materialize_media_transfer(session, transfer, manifest)
+        if materialized and session.get(MediaTransferSession, transfer.transfer_job_id) is not None:
+            _activate_media_transfer(transfer)
+        else:
+            _defer_media_transfer(transfer)
     except Exception as error:
-        transfer.required_capabilities = [DEFERRED_TRANSFER_CAPABILITY]
+        _defer_media_transfer(transfer)
         transfer.error_code = "sync_dependency_materialization_failed"
         transfer.last_error = str(error)[:2048]
     return transfer
@@ -175,17 +398,55 @@ def recover_media_transfer_manifests(session: Session, manifests: list[dict]) ->
     """Restore missing Site transfer intent from Central's authoritative manifest inventory."""
     site_id = _local_site_id(session)
     recovered = 0
+    received = satisfied = revived = runnable = invalid = 0
+    desired_by_version: dict[UUID, MediaTransferManifest] = {}
     for payload in manifests:
+        received += 1
         try:
             manifest = MediaTransferManifest.model_validate(payload)
             if manifest.destination_site_id != site_id:
                 continue
-            existed = session.get(TransferJob, manifest.transfer_session_id) is not None
-            persist_media_transfer_manifest(session, manifest, site_id)
         except (TypeError, ValueError):
+            invalid += 1
+            continue
+        previous = desired_by_version.get(manifest.presentation_version_id)
+        if previous is None or (manifest.created_at, str(manifest.transfer_session_id)) > (
+            previous.created_at,
+            str(previous.transfer_session_id),
+        ):
+            desired_by_version[manifest.presentation_version_id] = manifest
+    for manifest in desired_by_version.values():
+        try:
+            before = session.get(TransferJob, manifest.transfer_session_id)
+            existed = before is not None
+            before_status = before.status if before is not None else None
+            transfer = persist_media_transfer_manifest(session, manifest, site_id)
+        except (TypeError, ValueError):
+            invalid += 1
             continue
         else:
             recovered += int(not existed)
+            if transfer.status is JobStatus.SUCCEEDED:
+                satisfied += 1
+            elif existed and before_status in {
+                JobStatus.SUCCEEDED,
+                JobStatus.FAILED,
+                JobStatus.EXHAUSTED,
+                JobStatus.CANCELLED,
+            }:
+                revived += 1
+            else:
+                runnable += 1
+    logger.info(
+        "presentation_media_manifests_reconciled site_id=%s received=%d satisfied=%d "
+        "revived=%d runnable=%d invalid=%d",
+        site_id,
+        received,
+        satisfied,
+        revived,
+        runnable,
+        invalid,
+    )
     return recovered
 
 
@@ -290,7 +551,9 @@ def envelope(event: OutboxEvent) -> SyncEventEnvelope:
     )
 
 
-def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAcknowledgement:
+def apply_central_event(
+    session: Session, event: SyncEventEnvelope, *, local_smb_enabled: bool = False
+) -> EventAcknowledgement:
     if event.protocol_version != UPM_SYNC_PROTOCOL_VERSION:
         return EventAcknowledgement(
             event_id=event.event_id, accepted=False, error_code="incompatible_protocol"
@@ -335,7 +598,7 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
         "central.event_deployment.updated",
     }:
         try:
-            apply_snapshot_event(session, event)
+            apply_snapshot_event(session, event, local_smb_enabled=local_smb_enabled)
         except PermissionError:
             return EventAcknowledgement(
                 event_id=event.event_id, accepted=False, error_code="invalid_authority"
@@ -373,7 +636,8 @@ def apply_central_event(session: Session, event: SyncEventEnvelope) -> EventAckn
                     accepted=False,
                     error_code="invalid_transfer_destination",
                 )
-            persist_media_transfer_manifest(session, manifest, site_id)
+            if not event_is_deleted(session, manifest.event_id):
+                persist_media_transfer_manifest(session, manifest, site_id)
         except (TypeError, ValueError) as exc:
             application_error = str(exc)[:2048]
     else:

@@ -1,5 +1,14 @@
 # Deployment Documentation
 
+## Site-local SMB boundary
+
+**SMB is a Site-local optional edge interface. It is never a Central↔Site transport.** Central and
+Site exchange synchronization data and canonical media only through their authenticated HTTP/HTTPS
+APIs. Set `UPM_SITE_SMB_ENABLED=false` (the default) when a Site does not provide local SMB intake
+or a local Windows-compatible presentation share. Enable the Compose `smb` profile and set
+`UPM_SITE_SMB_ENABLED=true` only for that optional local edge functionality; the setting does not
+change event deployment, media transfer or replication, synchronization, recovery, or readiness.
+
 ## Media storage targets
 
 Central and each Site run their own `*-media-storage` service on the private deployment network.

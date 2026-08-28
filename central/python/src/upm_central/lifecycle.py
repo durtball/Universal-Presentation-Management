@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from upm_central.event_deployments import push_deployment
 from upm_central.persistence.models import (
@@ -356,9 +356,13 @@ def run_deletion(session: Session, operation: DeletionOperation) -> None:
         operation.site_statuses = _publish_people_deletion(
             session, operation, [operation.target_id], affected_event_ids
         )
-    operation.status = "completed"
-    operation.stage = "completed"
-    operation.completed_at = utc_now()
+    if operation.target_type == "event" and operation.site_statuses:
+        operation.status = "awaiting_sites"
+        operation.stage = "site_deletion_pending"
+    else:
+        operation.status = "completed"
+        operation.stage = "completed"
+        operation.completed_at = utc_now()
     session.add(
         AuditRecord(
             actor_id=operation.initiated_by,
@@ -372,7 +376,7 @@ def run_deletion(session: Session, operation: DeletionOperation) -> None:
                 "counts": operation.dependency_counts,
                 "sites": operation.site_statuses,
                 "media": operation.media_results,
-                "state": "completed",
+                "state": operation.status,
             },
         )
     )
@@ -505,6 +509,7 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
     deployment_rows = session.scalars(
         select(EventDeployment).where(EventDeployment.event_id == event.event_id)
     ).all()
+    site_statuses: list[dict[str, object]] = []
     for deployment in deployment_rows:
         CentralQueue(session).enqueue_outbox(
             event_type="central.event.deleted",
@@ -523,6 +528,14 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
                 },
             ),
         )
+        site_statuses.append(
+            {
+                "site_id": str(deployment.site_id),
+                "status": "pending",
+                "deletion_operation_id": str(op.deletion_operation_id),
+            }
+        )
+    op.site_statuses = site_statuses
     pids = select(Presentation.presentation_id).where(Presentation.event_id == event.event_id)
     vids = select(PresentationVersion.presentation_version_id).where(
         PresentationVersion.presentation_id.in_(pids)
@@ -549,6 +562,78 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
             )
         )
     )
+    shared_import = aliased(PresentationMediaImport)
+    shared_replica = aliased(MediaObjectReplica)
+    physical_objects = [
+        {
+            "storage_target_id": str(root_id),
+            "object_key": key,
+        }
+        for root_id, key in session.execute(
+            select(
+                PresentationMediaImport.committed_storage_root_id,
+                PresentationMediaImport.committed_storage_key,
+            ).where(
+                PresentationMediaImport.event_id == event.event_id,
+                PresentationMediaImport.committed_storage_root_id.is_not(None),
+                PresentationMediaImport.committed_storage_key.is_not(None),
+                ~select(shared_import.media_import_id)
+                .where(
+                    shared_import.event_id != event.event_id,
+                    shared_import.committed_storage_root_id
+                    == PresentationMediaImport.committed_storage_root_id,
+                    shared_import.committed_storage_key
+                    == PresentationMediaImport.committed_storage_key,
+                )
+                .exists(),
+                ~select(shared_replica.media_object_id)
+                .where(
+                    shared_replica.event_id != event.event_id,
+                    shared_replica.object_key == PresentationMediaImport.committed_storage_key,
+                )
+                .exists(),
+            )
+        )
+    ]
+    disposition_objects = [
+        {"storage_target_id": str(root_id), "object_key": key}
+        for root_id, key in session.execute(
+            select(
+                PresentationMediaImport.intake_storage_root_id,
+                PresentationMediaImport.intake_storage_key,
+            ).where(
+                PresentationMediaImport.event_id == event.event_id,
+                PresentationMediaImport.intake_storage_root_id.is_not(None),
+                PresentationMediaImport.intake_storage_key.is_not(None),
+            )
+        )
+    ]
+    disposition_objects.extend(
+        {"storage_target_id": str(root_id), "object_key": key}
+        for root_id, key in session.execute(
+            select(
+                PresentationMediaImport.rejected_storage_root_id,
+                PresentationMediaImport.rejected_storage_key,
+            ).where(
+                PresentationMediaImport.event_id == event.event_id,
+                PresentationMediaImport.rejected_storage_root_id.is_not(None),
+                PresentationMediaImport.rejected_storage_key.is_not(None),
+            )
+        )
+    )
+    staging_objects = [
+        {"storage_target_id": str(root_id), "object_key": key}
+        for root_id, key in session.execute(
+            select(
+                PresentationMediaImport.staging_storage_root_id,
+                PresentationMediaImport.staging_key,
+            ).where(
+                PresentationMediaImport.event_id == event.event_id,
+                PresentationMediaImport.staging_storage_root_id.is_not(None),
+            )
+        )
+    ]
+    physical_objects.extend(disposition_objects)
     # Imports and receive sessions can reference presentations, versions, transfer
     # jobs, and replicas.  Remove these subordinate operational rows first,
     # including failed/unmatched imports which have no Presentation relationship.
@@ -558,6 +643,18 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
     session.execute(
         delete(MediaReplicationReceiveSession).where(
             MediaReplicationReceiveSession.event_id == event.event_id
+        )
+    )
+    session.execute(
+        delete(ProcessingJob).where(
+            (ProcessingJob.payload["event_id"].as_string() == str(event.event_id))
+            | (ProcessingJob.payload["data"]["event_id"].as_string() == str(event.event_id))
+        )
+    )
+    session.execute(
+        delete(TransferJob).where(
+            (TransferJob.payload["event_id"].as_string() == str(event.event_id))
+            | (TransferJob.payload["data"]["event_id"].as_string() == str(event.event_id))
         )
     )
     if import_transfer_ids:
@@ -652,7 +749,24 @@ def _delete_event(session: Session, op: DeletionOperation) -> None:
     op.media_results = {
         "eligible_removed": deleted_media,
         "shared_preserved": len(media_ids) - deleted_media,
+        "physical_cleanup_queued": len(physical_objects),
+        "staging_cleanup_queued": len(staging_objects),
     }
+    if physical_objects or staging_objects:
+        CentralQueue(session).enqueue_processing(
+            job_type="lifecycle.delete_media_objects",
+            payload={
+                "data": {
+                    "event_id": str(event.event_id),
+                    "deletion_operation_id": str(op.deletion_operation_id),
+                    "objects": physical_objects,
+                    "staging": staging_objects,
+                }
+            },
+            idempotency_key=f"event-media-delete:{op.deletion_operation_id}",
+            max_attempts=10,
+            required_capabilities=["storage"],
+        )
     session.delete(event)
 
 

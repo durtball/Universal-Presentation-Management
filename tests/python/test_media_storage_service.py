@@ -137,6 +137,12 @@ def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
         ).content
         == payload
     )
+    object_url = (
+        f"/api/v1/storage/objects/{committed['storage_target_id']}/{committed['storage_key']}"
+    )
+    assert client.delete(object_url).json() == {"deleted": True}
+    assert client.delete(object_url).json() == {"deleted": True}
+    assert client.get(object_url).status_code == 404
     assert client.get(f"/api/v1/storage/staging/{STAGING_ID}/../escape").status_code in {404, 422}
 
 

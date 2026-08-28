@@ -13,6 +13,7 @@ class CentralDatabaseSettings(BaseSettings):
     worker_poll_interval_seconds: Annotated[float, Field(gt=0)] = 1.0
     worker_lease_seconds: Annotated[int, Field(ge=5)] = 60
     worker_retry_base_seconds: Annotated[float, Field(gt=0)] = 5.0
+    presentation_media_concurrency: Annotated[int, Field(ge=1, le=16)] = 4
     worker_capabilities: str = "cpu,pdf-conversion,transfer"
     worker_ready_file: str = "/tmp/upm-central-worker-ready"
     admin_token: Annotated[str, Field(min_length=32)]

@@ -907,6 +907,14 @@ class MediaTransferSession(SiteRecordMixin, SiteBase):
         ),
         Index("ix_site_media_transfer_state_progress", "state", "last_progress_at"),
         Index("ix_site_media_transfer_presentation_version", "presentation_version_id"),
+        Index(
+            "uq_site_media_transfer_active_original_version",
+            "presentation_version_id",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('queued','available','transferring','retry_wait','verifying')"
+            ),
+        ),
     )
 
     transfer_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)

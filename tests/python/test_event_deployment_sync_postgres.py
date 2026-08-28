@@ -8,7 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -40,7 +40,9 @@ from upm_shared.enums import (
     EnrollmentState,
     EventDeploymentStatus,
     JobStatus,
+    MediaAvailability,
     MediaCategory,
+    MediaTransferState,
     ParticipantStatus,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
@@ -739,8 +741,225 @@ def test_acknowledged_manifest_retains_intent_and_inventory_repairs_missing_job(
         assert recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")]) == 0
     with site_factory() as session:
         completed = session.get(TransferJob, transfer_id)
-        assert completed.status is JobStatus.SUCCEEDED
+        assert completed.status is JobStatus.PENDING
         assert completed.required_capabilities == ["transfer"]
+
+    target_id, media_id = new_uuid7(), new_uuid7()
+    with site_factory.begin() as session:
+        session.add(
+            StorageTarget(
+                storage_target_id=target_id,
+                site_id=site_id,
+                display_name="Redeployment media",
+                storage_type=StorageType.LOCAL_FILESYSTEM,
+                root_path="/tmp/redeployment-media",
+                enabled=True,
+            )
+        )
+        session.add(
+            MediaObject(
+                media_object_id=media_id,
+                site_id=site_id,
+                event_id=event_id,
+                storage_target_id=target_id,
+                object_key=f"objects/sha256/{manifest.sha256}",
+                category=MediaCategory.PRESENTATION_VERSION,
+                original_filename=manifest.original_filename,
+                availability=MediaAvailability.AVAILABLE,
+                content_hash=manifest.sha256,
+                hash_algorithm="sha256",
+                size_bytes=manifest.expected_size,
+            )
+        )
+        session.add(
+            PresentationAsset(
+                presentation_version_id=version_id,
+                media_object_id=media_id,
+                original_filename=manifest.original_filename,
+                kind=AssetKind.ORIGINAL,
+            )
+        )
+        completed = session.get(TransferJob, transfer_id)
+        completed.status = JobStatus.SUCCEEDED
+        local = session.get(MediaTransferSession, transfer_id)
+        local.state = MediaTransferState.COMPLETED
+        local.confirmed_offset = manifest.expected_size
+        local.media_object_id = media_id
+
+    with site_factory.begin() as session:
+        recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")])
+        assert session.get(TransferJob, transfer_id).status is JobStatus.SUCCEEDED
+
+    with site_factory.begin() as session:
+        session.get(MediaObject, media_id).content_hash = "0" * 64
+    with site_factory.begin() as session:
+        recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")])
+        assert session.get(TransferJob, transfer_id).status is JobStatus.PENDING
+        local = session.get(MediaTransferSession, transfer_id)
+        assert local.state is MediaTransferState.AVAILABLE
+        assert local.confirmed_offset == 0
+
+    # Simulate the authoritative retry completing, then verify a later soft
+    # deletion independently causes the same durable intent to be revived.
+    with site_factory.begin() as session:
+        session.get(MediaObject, media_id).content_hash = manifest.sha256
+        completed = session.get(TransferJob, transfer_id)
+        completed.status = JobStatus.SUCCEEDED
+        local = session.get(MediaTransferSession, transfer_id)
+        local.state = MediaTransferState.COMPLETED
+        local.confirmed_offset = manifest.expected_size
+        local.media_object_id = media_id
+    with site_factory.begin() as session:
+        session.get(MediaObject, media_id).deleted_at = datetime.now(UTC)
+    with site_factory.begin() as session:
+        recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")])
+        assert session.get(TransferJob, transfer_id).status is JobStatus.PENDING
+        local = session.get(MediaTransferSession, transfer_id)
+        assert local.state is MediaTransferState.AVAILABLE
+        assert local.confirmed_offset == 0
+        assert local.media_object_id is None
+
+    # A worker restart/failure during the replacement transfer preserves its
+    # resumable offset while making terminal work claimable again.
+    partial_target = new_uuid7()
+    with site_factory.begin() as session:
+        transfer = session.get(TransferJob, transfer_id)
+        transfer.status = JobStatus.FAILED
+        local = session.get(MediaTransferSession, transfer_id)
+        local.state = MediaTransferState.TRANSFERRING
+        local.storage_target_id = partial_target
+        local.confirmed_offset = 5
+    with site_factory.begin() as session:
+        recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")])
+        assert session.get(TransferJob, transfer_id).status is JobStatus.PENDING
+        local = session.get(MediaTransferSession, transfer_id)
+        assert local.state is MediaTransferState.TRANSFERRING
+        assert local.storage_target_id == partial_target
+        assert local.confirmed_offset == 5
+
+
+def test_manifest_waits_for_snapshot_dependencies_before_becoming_runnable(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    event_id, presentation_id, version_id, transfer_id = [new_uuid7() for _ in range(4)]
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+    manifest = MediaTransferManifest(
+        transfer_session_id=transfer_id,
+        origin_system=SourceSystem.CENTRAL,
+        destination_site_id=site_id,
+        event_id=event_id,
+        presentation_id=presentation_id,
+        presentation_version_id=version_id,
+        presentation_version_number=1,
+        presentation_identifier="UPM-DEFERRED-1",
+        original_filename="deferred.pptx",
+        canonical_filename="UPM-DEFERRED-1_v01.pptx",
+        expected_size=12,
+        sha256="f" * 64,
+        created_at=datetime.now(UTC),
+    )
+
+    with site_factory.begin() as session:
+        assert recover_media_transfer_manifests(session, [manifest.model_dump(mode="json")]) == 1
+    with site_factory() as session:
+        transfer = session.get(TransferJob, transfer_id)
+        assert transfer.status is JobStatus.PENDING
+        assert transfer.required_capabilities == ["sync-dependencies"]
+        assert session.get(MediaTransferSession, transfer_id) is None
+
+    with site_factory.begin() as session:
+        session.add(SiteEvent(event_id=event_id, site_id=site_id, name="Deferred event"))
+        session.flush()
+        session.add(
+            Presentation(
+                presentation_id=presentation_id,
+                event_id=event_id,
+                title="Deferred presentation",
+            )
+        )
+        session.flush()
+        session.add(
+            PresentationVersion(
+                presentation_version_id=version_id,
+                presentation_id=presentation_id,
+                version_number=1,
+            )
+        )
+        summary = reconcile_deferred_media_transfers(session)
+        assert summary["materialized"] == 1
+    with site_factory() as session:
+        transfer = session.get(TransferJob, transfer_id)
+        assert transfer.required_capabilities == ["transfer"]
+        assert session.get(MediaTransferSession, transfer_id) is not None
+        assert (
+            len(
+                session.scalars(
+                    select(TransferJob).where(TransferJob.transfer_job_id == transfer_id)
+                ).all()
+            )
+            == 1
+        )
+
+
+def test_bulk_orphan_transfers_are_fenced_from_workers(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+        for index in range(501):
+            transfer_id = new_uuid7()
+            manifest = MediaTransferManifest(
+                transfer_session_id=transfer_id,
+                origin_system=SourceSystem.CENTRAL,
+                destination_site_id=site_id,
+                event_id=new_uuid7(),
+                presentation_id=new_uuid7(),
+                presentation_version_id=new_uuid7(),
+                presentation_version_number=1,
+                presentation_identifier=f"UPM-ORPHAN-{index}",
+                original_filename=f"orphan-{index}.pptx",
+                canonical_filename=f"UPM-ORPHAN-{index}_v01.pptx",
+                expected_size=12,
+                sha256=f"{index:064x}",
+                created_at=datetime.now(UTC),
+            )
+            session.add(
+                TransferJob(
+                    transfer_job_id=transfer_id,
+                    site_id=site_id,
+                    transfer_type="presentation_media.central_pull",
+                    payload=manifest.model_dump(mode="json"),
+                    status=JobStatus.PENDING,
+                    required_capabilities=["transfer"],
+                    idempotency_key=f"central-pull:{transfer_id}",
+                )
+            )
+        session.flush()
+        summary = reconcile_deferred_media_transfers(session)
+        assert summary["orphan_jobs_repaired"] == 501
+        assert summary["deferred"] == 501
+    with site_factory() as session:
+        jobs = session.scalars(
+            select(TransferJob).where(
+                TransferJob.transfer_type == "presentation_media.central_pull"
+            )
+        ).all()
+        assert len(jobs) == 501
+        assert all(job.required_capabilities == ["sync-dependencies"] for job in jobs)
+        assert session.scalars(select(MediaTransferSession)).all() == []
 
 
 def test_deployment_materializes_unmapped_rooms_and_preserves_site_overrides(
@@ -968,3 +1187,94 @@ def test_complete_program_projection_replaces_removed_relationships(
         assert not session.get(SessionParticipant, session_participant_id).active
         assert not session.get(PresentationSession, presentation_session_id).active
         assert not session.get(PresentationPresenter, presentation_presenter_id).active
+
+
+def test_conflicting_original_manifests_supersede_to_one_current_intent(
+    deployment_databases: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, site_factory = deployment_databases
+    settings = SiteSettings(
+        database_url=SITE_URL,
+        credential_encryption_key="test-only-encryption-key-with-32-characters",
+    )
+    event_id, presentation_id, version_id = new_uuid7(), new_uuid7(), new_uuid7()
+    with site_factory.begin() as session:
+        site, _ = bootstrap_identity(session, settings)
+        site_id = site.site_id
+        session.add(SiteEvent(event_id=event_id, site_id=site_id, name="Desired media event"))
+        session.add(
+            Presentation(
+                presentation_id=presentation_id,
+                event_id=event_id,
+                title="One desired original",
+            )
+        )
+        session.add(
+            PresentationVersion(
+                presentation_version_id=version_id,
+                presentation_id=presentation_id,
+                version_number=1,
+            )
+        )
+    manifests = [
+        MediaTransferManifest(
+            transfer_session_id=new_uuid7(),
+            origin_system=SourceSystem.CENTRAL,
+            destination_site_id=site_id,
+            event_id=event_id,
+            presentation_id=presentation_id,
+            presentation_version_id=version_id,
+            presentation_version_number=1,
+            presentation_identifier="UPM-DESIRED-1",
+            original_filename=f"desired-{suffix}.pptx",
+            canonical_filename=f"UPM-DESIRED-1_v01-{suffix}.pptx",
+            expected_size=12,
+            sha256=suffix * 64,
+            created_at=datetime.now(UTC),
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    with site_factory.begin() as session:
+        for manifest in manifests:
+            site_sync_module.persist_media_transfer_manifest(session, manifest, site_id)
+    active_states = {
+        MediaTransferState.QUEUED,
+        MediaTransferState.AVAILABLE,
+        MediaTransferState.TRANSFERRING,
+        MediaTransferState.RETRY_WAIT,
+        MediaTransferState.VERIFYING,
+    }
+    with site_factory() as session:
+        sessions = session.scalars(
+            select(MediaTransferSession).where(
+                MediaTransferSession.presentation_version_id == version_id
+            )
+        ).all()
+        current = [item for item in sessions if item.state in active_states]
+        assert len(current) == 1
+        assert current[0].transfer_session_id == manifests[-1].transfer_session_id
+        assert current[0].sha256 == "c" * 64
+        assert {item.state for item in sessions if item not in current} == {
+            MediaTransferState.CANCELLED
+        }
+        jobs = session.scalars(
+            select(TransferJob).where(
+                TransferJob.transfer_job_id.in_(
+                    [manifest.transfer_session_id for manifest in manifests]
+                )
+            )
+        ).all()
+        assert sum(job.status in {JobStatus.PENDING, JobStatus.RETRY_WAIT} for job in jobs) == 1
+        assert sum(job.status is JobStatus.CANCELLED for job in jobs) == 2
+
+    with site_factory.begin() as session:
+        site_sync_module.persist_media_transfer_manifest(session, manifests[-1], site_id)
+    with site_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(MediaTransferSession)
+                .where(MediaTransferSession.presentation_version_id == version_id)
+            )
+            == 3
+        )
