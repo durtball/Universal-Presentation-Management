@@ -27,6 +27,7 @@ from upm_site.persistence.models import (
     PersonProjection,
     Presentation,
     PresentationAsset,
+    PresentationPresenter,
     PresentationSession,
     PresentationVersion,
     ProcessingJob,
@@ -382,7 +383,9 @@ def _presentation_state(
     available = [
         item
         for item in media
-        if item.availability == MediaAvailability.AVAILABLE and item.deleted_at is None
+        if item.availability == MediaAvailability.AVAILABLE
+        and item.disposition == "authoritative"
+        and item.deleted_at is None
     ]
     if available:
         return "ready"
@@ -445,6 +448,30 @@ def _presentations_for_sessions(
             )
         )
     }
+    presenter_rows = session.execute(
+        select(
+            PresentationPresenter.presentation_id,
+            EventParticipation.display_name,
+            PersonProjection.display_name,
+        )
+        .join(
+            EventParticipation,
+            EventParticipation.event_participation_id
+            == PresentationPresenter.event_participation_id,
+        )
+        .join(PersonProjection, PersonProjection.person_id == EventParticipation.person_id)
+        .where(
+            PresentationPresenter.presentation_id.in_(presentation_ids),
+            PresentationPresenter.active.is_(True),
+        )
+        .order_by(
+            PresentationPresenter.primary_presenter.desc(),
+            PresentationPresenter.presenter_order,
+        )
+    ).all()
+    presentation_presenters: dict[UUID, list[str]] = defaultdict(list)
+    for presentation_id, event_name, person_name in presenter_rows:
+        presentation_presenters[presentation_id].append(event_name or person_name)
     versions = session.scalars(
         select(PresentationVersion)
         .where(PresentationVersion.presentation_id.in_(presentation_ids))
@@ -544,6 +571,7 @@ def _presentations_for_sessions(
             "scheduled_at": presentation.scheduled_at,
             "workflow_status": presentation.workflow_status,
             "processing_status": presentation.processing_status,
+            "presenters": presentation_presenters.get(presentation_id, []),
             "operational_status": _presentation_state(
                 presentation,
                 presentation_media,

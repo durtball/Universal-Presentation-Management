@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Shared UPM server domain concepts and language-neutral contracts"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+  "openpyxl>=3.1,<4",
   "pydantic>=2.11,<3",
   "uuid6>=2025.0.1",
 ]

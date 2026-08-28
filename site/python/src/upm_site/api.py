@@ -42,6 +42,7 @@ from upm_shared.media_storage_client import (
     MediaStorageClient,
     MediaStorageUnavailable,
 )
+from upm_site.agent_control import register_agent_control_routes
 from upm_site.auth import (
     authenticate,
     bootstrap,
@@ -84,6 +85,8 @@ from upm_site.persistence.models import (
 )
 from upm_site.presentation_media_api import register_presentation_media_routes
 from upm_site.program_api import register_program_routes
+from upm_site.program_imports import register_program_import_routes
+from upm_site.rotation_api import register_rotation_routes
 from upm_site.sync import (
     apply_central_event,
     bootstrap_identity,
@@ -283,6 +286,7 @@ def create_app(
     async def site_authentication(request: Request, call_next):
         if (
             request.url.path in {"/health", "/api/v1/auth/login"}
+            or request.url.path.startswith("/api/v1/agent/")
             or not get_settings().auth_required
         ):
             return await call_next(request)
@@ -380,7 +384,7 @@ def create_app(
     @app.get("/api/v1/auth/session", tags=["authentication"])
     def current_session(
         upm_site_session: Annotated[str | None, Cookie()] = None,
-        session: Annotated[Session, Depends(get_session)] = None,
+        session: Annotated[Session, Depends(transaction)] = None,
     ):
         _item, user = resolve(session, upm_site_session)
         if not user:
@@ -792,7 +796,7 @@ def create_app(
             and registration.last_connection_at
             and utc_now() - registration.last_connection_at < timedelta(seconds=90)
         )
-        return [
+        deployed = [
             {
                 "deployment_id": item.deployment_id,
                 "central_event_id": item.central_event_id,
@@ -813,6 +817,33 @@ def create_app(
                 )
             )
         ]
+        deployed_event_ids = {item["central_event_id"] for item in deployed}
+        local = [
+            {
+                # The selector contract historically calls this central_event_id.  Site-created
+                # Events already carry the eventual canonical UUID, so both names are supplied.
+                "deployment_id": item.event_id,
+                "central_event_id": item.event_id,
+                "event_id": item.event_id,
+                "site_id": item.site_id,
+                "event_name": item.name,
+                "status": "local" if item.sync_state != "synchronized" else "synchronized",
+                "desired_revision": item.revision,
+                "applied_revision": item.revision,
+                "last_central_synchronization_at": None,
+                "applied_at": item.created_at,
+                "failure_reason": None,
+                "summary_counts": {},
+                "central_connected": connected,
+                "origin": "site",
+            }
+            for item in session.scalars(
+                select(Event).where(
+                    Event.archived_at.is_(None), Event.event_id.notin_(deployed_event_ids)
+                )
+            )
+        ]
+        return deployed + local
 
     @app.delete("/api/v1/events/{event_id}", status_code=202, tags=["events"])
     def delete_event(
@@ -896,8 +927,11 @@ const rows=await r.json(),out=document.querySelector('#o');out.replaceChildren()
 for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
+    register_agent_control_routes(app, get_session, transaction)
     register_program_routes(app, get_session)
+    register_program_import_routes(app, get_session, transaction)
     register_operations_routes(app, get_session, transaction)
+    register_rotation_routes(app, get_session, transaction)
     register_presentation_media_routes(app, get_session, transaction, get_settings)
     register_log_routes(app, get_session)
     register_user_routes(app, get_session, transaction, get_settings)

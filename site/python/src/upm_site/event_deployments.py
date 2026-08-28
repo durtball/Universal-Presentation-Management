@@ -1,7 +1,7 @@
 """Transactional application of Central event deployment snapshots at a Site."""
 # ruff: noqa: E501
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -38,6 +38,7 @@ from upm_site.persistence.models import (
     PresentationVersion,
     Room,
     RoomAssignment,
+    RotationAssignment,
     SessionParticipant,
     User,
     utc_now,
@@ -386,6 +387,36 @@ def _upsert_snapshot(
             local.revision = max(local.revision, item.central_revision)
             local.sync_state = SyncState.SYNCHRONIZED
     session.flush()
+    for room_data in snapshot.room_configuration.get("rooms", []):
+        if not isinstance(room_data, dict):
+            continue
+        try:
+            room_id = UUID(str(room_data["room_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        room = session.get(Room, room_id)
+        label = str(room_data.get("label") or "").strip()
+        if not label:
+            continue
+        if room is None:
+            label_conflict = session.scalar(
+                select(Room).where(Room.site_id == snapshot.site_id, Room.label == label)
+            )
+            if label_conflict is not None:
+                # Existing physical-room UUID remains authoritative; the recovered mapping below
+                # will surface unresolved rather than silently replacing it.
+                continue
+            room = Room(
+                room_id=room_id,
+                site_id=snapshot.site_id,
+                event_id=snapshot.event_id,
+                label=label,
+                enabled=bool(room_data.get("enabled", True)),
+                revision=max(1, int(room_data.get("revision") or 1)),
+                sync_state=SyncState.SYNCHRONIZED,
+            )
+            session.add(room)
+    session.flush()
     room_mappings = {
         str(mapping.get("normalized_imported_label") or ""): mapping
         for mapping in snapshot.room_configuration.get("mappings", [])
@@ -604,6 +635,93 @@ def _upsert_snapshot(
             local.external_id = item.external_id
             local.active = True
             local.revision = max(local.revision, item.central_revision)
+    deployed_rotation_ids = {item.rotation_assignment_id for item in snapshot.rotation_assignments}
+    for existing in session.scalars(
+        select(RotationAssignment).where(
+            RotationAssignment.event_id == snapshot.event_id,
+            RotationAssignment.source_authority == "central",
+        )
+    ):
+        if existing.central_assignment_id not in deployed_rotation_ids:
+            existing.active = False
+            existing.override_state = "cleared"
+    for item in snapshot.rotation_assignments:
+        local = session.scalar(
+            select(RotationAssignment).where(
+                RotationAssignment.central_assignment_id == item.rotation_assignment_id
+            )
+        )
+        if local is None:
+            local = RotationAssignment(
+                central_assignment_id=item.rotation_assignment_id,
+                event_id=snapshot.event_id,
+                event_day=item.event_day,
+                scope=item.scope,
+                room_id=item.room_id,
+                session_id=item.session_id,
+                presentation_version_id=item.presentation_version_id,
+                source_authority="central",
+                override_state="configured",
+                active=item.active,
+                revision=item.central_revision,
+                sync_state=SyncState.SYNCHRONIZED,
+            )
+            session.add(local)
+        else:
+            local.event_day = item.event_day
+            local.scope = item.scope
+            local.room_id = item.room_id
+            local.session_id = item.session_id
+            local.presentation_version_id = item.presentation_version_id
+            local.override_state = "configured"
+            local.active = item.active
+            local.revision = max(local.revision, item.central_revision)
+            local.sync_state = SyncState.SYNCHRONIZED
+    for recovered in snapshot.extensions.get("site_rotation_overrides", []):
+        if not isinstance(recovered, dict):
+            continue
+        try:
+            assignment_id = UUID(str(recovered["rotation_assignment_id"]))
+            event_day = date.fromisoformat(str(recovered["event_day"]))
+            room_id = UUID(str(recovered["room_id"])) if recovered.get("room_id") else None
+            session_id = UUID(str(recovered["session_id"])) if recovered.get("session_id") else None
+            version_id = (
+                UUID(str(recovered["presentation_version_id"]))
+                if recovered.get("presentation_version_id")
+                else None
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        local = session.get(RotationAssignment, assignment_id)
+        if local is None:
+            local = RotationAssignment(
+                rotation_assignment_id=assignment_id,
+                event_id=snapshot.event_id,
+                event_day=event_day,
+                scope=str(recovered["scope"]),
+                room_id=room_id,
+                session_id=session_id,
+                presentation_version_id=version_id,
+                source_authority="site",
+                override_state="configured" if recovered.get("active", True) else "cleared",
+                active=bool(recovered.get("active", True)),
+                revision=max(1, int(recovered.get("revision") or 1)),
+                sync_state=SyncState.SYNCHRONIZED,
+            )
+            session.add(local)
+        elif (
+            local.source_authority == "site"
+            and int(recovered.get("revision") or 1) > local.revision
+        ):
+            local.event_day = event_day
+            local.scope = str(recovered["scope"])
+            local.room_id = room_id
+            local.session_id = session_id
+            local.presentation_version_id = version_id
+            local.active = bool(recovered.get("active", True))
+            local.override_state = "configured" if local.active else "cleared"
+            local.revision = int(recovered.get("revision") or 1)
+            local.sync_state = SyncState.SYNCHRONIZED
     return {
         "people": len(snapshot.people),
         "participants": len(snapshot.participations),
@@ -613,6 +731,7 @@ def _upsert_snapshot(
         "presentations": len(snapshot.presentations),
         "presentation_sessions": sum(len(item.sessions) for item in snapshot.presentations),
         "presentation_presenters": sum(len(item.presenters) for item in snapshot.presentations),
+        "rotation_assignments": len(snapshot.rotation_assignments),
         "external_identifiers": len(snapshot.external_identifiers),
         "rooms": mapped_rooms,
         "unresolved_rooms": unresolved_rooms,

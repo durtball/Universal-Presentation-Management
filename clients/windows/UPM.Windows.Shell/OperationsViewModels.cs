@@ -1,0 +1,12 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using UPM.Windows.Core;
+namespace UPM.Windows.Shell;
+
+public abstract class ViewModel : INotifyPropertyChanged { public event PropertyChangedEventHandler? PropertyChanged; protected void Changed([CallerMemberName] string? n = null) => PropertyChanged?.Invoke(this, new(n)); }
+public sealed class DashboardViewModel : ViewModel { public string SiteName { get; set; } = "No Site selected"; public string Connectivity { get; set; } = "UNKNOWN"; public ObservableCollection<RoomReadiness> Rooms { get; } = []; }
+public sealed record RoomReadiness(Guid RoomId, string Label, string Primary, string PrimaryState, string Backup, string BackupState, int Ready, int Missing, int Reviews, string? NextTitle, DateTimeOffset? NextStart);
+public sealed class TransferSummaryViewModel : ViewModel { public ObservableCollection<TransferItem> Items { get; } = []; public int Active => Items.Count(x => x.State is TransferState.Hashing or TransferState.Uploading or TransferState.Verifying); public int Queued => Items.Count(x => x.State == TransferState.Queued); public int Failed => Items.Count(x => x.State == TransferState.Failed); }
+public sealed record NavigationArea(string Label, string Glyph, string PageType);
+public static class Navigation { public static IReadOnlyList<NavigationArea> Areas => [new("Dashboard", "\uE80F", "Dashboard"), new("Intake", "\uE8B7", "Intake"), new("Presentations", "\uE8A5", "Presentations"), new("Rooms", "\uE7F4", "Rooms"), new("Transfers", "\uE898", "Transfers"), new("Review Sessions", "\uE890", "Reviews"), new("Devices", "\uE975", "Devices"), new("Activity", "\uE9D9", "Activity"), new("Settings", "\uE713", "Settings")]; }

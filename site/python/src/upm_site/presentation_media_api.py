@@ -9,7 +9,7 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -64,6 +64,8 @@ from upm_site.persistence.models import (
 )
 from upm_site.persistence.models import Session as ProgramSession
 from upm_site.persistence.queue import SiteQueue
+from upm_site.recovery_snapshots import enqueue_site_recovery_snapshot
+from upm_site.smb_presentations import enqueue as enqueue_smb_reconciliation
 from upm_site.sync import next_sequence
 
 
@@ -72,6 +74,8 @@ class SitePresentationCreate(BaseModel):
     session_id: UUID | None = None
     title: Annotated[str, Field(min_length=1, max_length=255)]
     source_presentation_id: Annotated[str | None, Field(max_length=512)] = None
+    presenter_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    media_object_id: UUID | None = None
 
 
 class SiteMediaConfirmation(BaseModel):
@@ -86,9 +90,31 @@ class SiteMediaRejection(BaseModel):
     reason: str | None = Field(default=None, max_length=2048)
 
 
+class SiteMediaReassignment(BaseModel):
+    presentation_id: UUID
+    idempotency_key: Annotated[str, Field(min_length=8, max_length=255)]
+
+
+class SitePresentationAssignmentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: UUID
+    presenter_ids: list[UUID] | None = Field(default=None, max_length=50)
+    expected_revision: Annotated[int | None, Field(ge=1)] = None
+
+
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
 INTAKE_PROMOTE_JOB = "presentation_media.intake.promote"
 INTAKE_REJECT_JOB = "presentation_media.intake.reject"
+
+
+def _enqueue_operational_reconciliation(session: Session, event: Event) -> bool:
+    event.revision += 1
+    event.sync_state = SyncState.PENDING
+    session.flush()
+    recovery_queued = enqueue_site_recovery_snapshot(session, event)
+    enqueue_smb_reconciliation(session, event.site_id, delay_seconds=0)
+    return recovery_queued
 
 
 def intake_asset_kind(filename: str) -> AssetKind:
@@ -348,6 +374,7 @@ def register_presentation_media_routes(
                 PresentationAsset.presentation_version_id == presentation_version_id,
                 PresentationAsset.kind == AssetKind.ORIGINAL,
                 MediaObject.availability == MediaAvailability.AVAILABLE,
+                MediaObject.disposition == "authoritative",
                 MediaObject.deleted_at.is_(None),
             )
         )
@@ -400,34 +427,72 @@ def register_presentation_media_routes(
         )
         session.add(item)
         session.flush()
-        SiteQueue(session).enqueue_outbox(
-            event_type="site.presentation.upserted",
-            aggregate_type="presentation",
-            aggregate_id=item.presentation_id,
-            site_id=event.site_id,
-            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-            source_sequence=next_sequence(session),
-            idempotency_key=f"presentation:{item.presentation_id}:{item.revision}",
-            payload=OutboxPayload(
-                source_system=SourceSystem.SITE,
-                data={
-                    "presentation_id": str(item.presentation_id),
-                    "event_id": str(item.event_id),
-                    "session_id": str(item.session_id) if item.session_id else None,
-                    "title": item.title,
-                    "presentation_identifier": item.presentation_identifier,
-                    "presentation_identifier_source": item.presentation_identifier_source,
-                    "external_presentation_id": item.external_presentation_id,
-                    "revision": item.revision,
-                },
-            ),
-        )
-        return {
+        for order, participant_id in enumerate(payload.presenter_ids):
+            participant = session.get(EventParticipation, participant_id)
+            if participant is None or participant.event_id != event_id:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "presenter is not an Event participant",
+                )
+            session.add(
+                PresentationPresenter(
+                    presentation_presenter_id=new_uuid7(),
+                    presentation_id=item.presentation_id,
+                    event_participation_id=participant_id,
+                    role="presenter",
+                    presenter_order=order,
+                    primary_presenter=order == 0,
+                    active=True,
+                )
+            )
+        if payload.session_id:
+            session.add(
+                PresentationSession(
+                    presentation_session_id=new_uuid7(),
+                    presentation_id=item.presentation_id,
+                    session_id=payload.session_id,
+                    association_type="scheduled",
+                    sort_order=0,
+                    primary_session=True,
+                    active=True,
+                )
+            )
+        session.flush()
+        recovery_queued = _enqueue_operational_reconciliation(session, event)
+        if not recovery_queued:
+            SiteQueue(session).enqueue_outbox(
+                event_type="site.presentation.upserted",
+                aggregate_type="presentation",
+                aggregate_id=item.presentation_id,
+                site_id=event.site_id,
+                protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+                source_sequence=next_sequence(session),
+                idempotency_key=f"presentation:{item.presentation_id}:{item.revision}",
+                payload=OutboxPayload(
+                    source_system=SourceSystem.SITE,
+                    data={
+                        "presentation_id": str(item.presentation_id),
+                        "event_id": str(item.event_id),
+                        "session_id": str(item.session_id) if item.session_id else None,
+                        "title": item.title,
+                        "presentation_identifier": item.presentation_identifier,
+                        "presentation_identifier_source": item.presentation_identifier_source,
+                        "external_presentation_id": item.external_presentation_id,
+                        "revision": item.revision,
+                    },
+                ),
+            )
+        result = {
             "presentation_id": item.presentation_id,
             "presentation_identifier": item.presentation_identifier,
             "presentation_identifier_source": item.presentation_identifier_source,
             "sync_state": item.sync_state,
         }
+        if payload.media_object_id:
+            result["media_assignment"] = confirm_one(
+                session, payload.media_object_id, item.presentation_id
+            )
+        return result
 
     @app.post("/api/v1/presentations/{presentation_id}/versions", status_code=201, tags=["media"])
     def create_local_version(presentation_id: UUID, session: WriteSession) -> dict[str, object]:
@@ -458,29 +523,173 @@ def register_presentation_media_routes(
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         presentation.sync_state = SyncState.PENDING
         session.flush()
-        SiteQueue(session).enqueue_outbox(
-            event_type="site.presentation_version.created",
-            aggregate_type="presentation_version",
-            aggregate_id=version.presentation_version_id,
-            site_id=session.get(Event, presentation.event_id).site_id,
-            protocol_version=UPM_SYNC_PROTOCOL_VERSION,
-            source_sequence=next_sequence(session),
-            idempotency_key=f"presentation-version:{version.presentation_version_id}",
-            payload=OutboxPayload(
-                source_system=SourceSystem.SITE,
-                data={
-                    "presentation_version_id": str(version.presentation_version_id),
-                    "presentation_id": str(presentation_id),
-                    "version_number": number,
-                    "created_at": version.created_at.isoformat(),
-                },
-            ),
+        recovery_queued = _enqueue_operational_reconciliation(
+            session, session.get(Event, presentation.event_id)
         )
+        if not recovery_queued:
+            SiteQueue(session).enqueue_outbox(
+                event_type="site.presentation_version.created",
+                aggregate_type="presentation_version",
+                aggregate_id=version.presentation_version_id,
+                site_id=session.get(Event, presentation.event_id).site_id,
+                protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+                source_sequence=next_sequence(session),
+                idempotency_key=f"presentation-version:{version.presentation_version_id}",
+                payload=OutboxPayload(
+                    source_system=SourceSystem.SITE,
+                    data={
+                        "presentation_version_id": str(version.presentation_version_id),
+                        "presentation_id": str(presentation_id),
+                        "version_number": number,
+                        "created_at": version.created_at.isoformat(),
+                    },
+                ),
+            )
         return {
             "presentation_version_id": version.presentation_version_id,
             "presentation_id": presentation_id,
             "version_number": number,
             "sync_state": version.sync_state,
+        }
+
+    @app.patch("/api/v1/presentations/{presentation_id}/assignment", tags=["media"])
+    def update_presentation_assignment(
+        presentation_id: UUID,
+        payload: SitePresentationAssignmentUpdate,
+        request: Request,
+        session: WriteSession,
+    ) -> dict[str, object]:
+        item = session.get(Presentation, presentation_id, with_for_update=True)
+        target_session = session.get(ProgramSession, payload.session_id)
+        if item is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "presentation not found")
+        if target_session is None or target_session.event_id != item.event_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "session is not in Event")
+        if payload.expected_revision is not None and payload.expected_revision != item.revision:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "presentation changed since it was loaded; refresh and retry",
+            )
+        before = {"session_id": str(item.session_id) if item.session_id else None}
+        item.session_id = target_session.session_id
+        item.scheduled_at = target_session.starts_at
+        item.revision += 1
+        item.sync_state = SyncState.PENDING
+        for link in session.scalars(
+            select(PresentationSession).where(
+                PresentationSession.presentation_id == presentation_id,
+                PresentationSession.active.is_(True),
+            )
+        ):
+            link.primary_session = link.session_id == target_session.session_id
+            if link.session_id != target_session.session_id:
+                link.active = False
+                link.revision += 1
+        target_link = session.scalar(
+            select(PresentationSession).where(
+                PresentationSession.presentation_id == presentation_id,
+                PresentationSession.session_id == target_session.session_id,
+            )
+        )
+        if target_link is None:
+            session.add(
+                PresentationSession(
+                    presentation_session_id=new_uuid7(),
+                    presentation_id=presentation_id,
+                    session_id=target_session.session_id,
+                    association_type="scheduled",
+                    sort_order=0,
+                    primary_session=True,
+                    active=True,
+                )
+            )
+        else:
+            target_link.active = True
+            target_link.primary_session = True
+            target_link.revision += 1
+        if payload.presenter_ids is not None:
+            wanted = set(payload.presenter_ids)
+            for participant_id in wanted:
+                participant = session.get(EventParticipation, participant_id)
+                if participant is None or participant.event_id != item.event_id:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "presenter is not an Event participant",
+                    )
+            existing_presenters = session.scalars(
+                select(PresentationPresenter).where(
+                    PresentationPresenter.presentation_id == presentation_id
+                )
+            ).all()
+            by_participant = {link.event_participation_id: link for link in existing_presenters}
+            for link in existing_presenters:
+                link.active = link.event_participation_id in wanted
+                link.revision += 1
+            for order, participant_id in enumerate(payload.presenter_ids):
+                link = by_participant.get(participant_id)
+                if link is None:
+                    session.add(
+                        PresentationPresenter(
+                            presentation_presenter_id=new_uuid7(),
+                            presentation_id=presentation_id,
+                            event_participation_id=participant_id,
+                            role="presenter",
+                            presenter_order=order,
+                            primary_presenter=order == 0,
+                            active=True,
+                        )
+                    )
+                else:
+                    link.presenter_order = order
+                    link.primary_presenter = order == 0
+        event = session.get(Event, item.event_id)
+        session.flush()
+        recovery_queued = _enqueue_operational_reconciliation(session, event)
+        if not recovery_queued:
+            SiteQueue(session).enqueue_outbox(
+                event_type="site.presentation.upserted",
+                aggregate_type="presentation",
+                aggregate_id=item.presentation_id,
+                site_id=event.site_id,
+                protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+                source_sequence=next_sequence(session),
+                idempotency_key=f"presentation:{item.presentation_id}:{item.revision}",
+                payload=OutboxPayload(
+                    source_system=SourceSystem.SITE,
+                    data={
+                        "presentation_id": str(item.presentation_id),
+                        "event_id": str(item.event_id),
+                        "session_id": str(item.session_id),
+                        "title": item.title,
+                        "presentation_identifier": item.presentation_identifier,
+                        "presentation_identifier_source": item.presentation_identifier_source,
+                        "external_presentation_id": item.external_presentation_id,
+                        "revision": item.revision,
+                    },
+                ),
+            )
+        session.add(
+            AuditRecord(
+                site_id=event.site_id,
+                event_id=event.event_id,
+                actor_id=getattr(request.state, "site_user_id", "site-operator"),
+                action="site.presentation.assignment_changed",
+                target_type="presentation",
+                target_id=item.presentation_id,
+                before_context=before,
+                after_context={
+                    "session_id": str(item.session_id),
+                    "presenter_ids": [str(value) for value in payload.presenter_ids or []],
+                },
+            )
+        )
+        return {
+            "presentation_id": item.presentation_id,
+            "session_id": item.session_id,
+            "scheduled_at": item.scheduled_at,
+            "revision": item.revision,
+            "sync_state": item.sync_state,
+            "smb_reconciliation": "queued",
         }
 
     @app.get("/api/v1/events/{event_id}/media/intake", tags=["media"])
@@ -492,18 +701,11 @@ def register_presentation_media_routes(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> dict[str, object]:
-        unassigned = (
-            ~select(PresentationAsset.presentation_asset_id)
-            .where(PresentationAsset.media_object_id == MediaObject.media_object_id)
-            .exists()
-        )
         conditions = [
             MediaObject.event_id == event_id,
             MediaObject.deleted_at.is_(None),
             MediaObject.disposition == disposition,
         ]
-        if disposition == "intake":
-            conditions.append(unassigned)
         if search:
             term = f"%{search.strip()}%"
             conditions.append(
@@ -522,6 +724,22 @@ def register_presentation_media_routes(
             .offset(offset)
             .limit(limit)
         ).all()
+        media_ids = [item.media_object_id for item in media]
+        assigned_assets = {
+            asset.media_object_id: asset
+            for asset in session.scalars(
+                select(PresentationAsset).where(PresentationAsset.media_object_id.in_(media_ids))
+            )
+        }
+        promotion_jobs = {
+            job.media_object_id: job
+            for job in session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.media_object_id.in_(media_ids),
+                    ProcessingJob.job_type == INTAKE_PROMOTE_JOB,
+                )
+            )
+        }
         # Candidate discovery is bounded to tokens present in this page; no Event-wide ORM graph is loaded.
         tokens = sorted(
             {
@@ -563,16 +781,29 @@ def register_presentation_media_routes(
         candidate_by_id = {str(item["presentation_id"]): item for item in candidates}
         items = []
         for item in media:
+            assigned_asset = assigned_assets.get(item.media_object_id)
+            assigned_version = (
+                session.get(PresentationVersion, assigned_asset.presentation_version_id)
+                if assigned_asset
+                else None
+            )
+            promotion = promotion_jobs.get(item.media_object_id)
             event_timezone = (
                 session.scalar(select(Event.timezone).where(Event.event_id == event_id)) or "UTC"
             )
-            match = match_presentation(
-                item.source_relative_path or item.original_filename,
-                match_candidates,
-                event_timezone=event_timezone,
+            match = (
+                match_presentation(
+                    item.source_relative_path or item.original_filename,
+                    match_candidates,
+                    event_timezone=event_timezone,
+                )
+                if assigned_version is None
+                else None
             )
             suggestion = (
-                candidate_by_id.get(str(match.presentation_id)) if match.presentation_id else None
+                candidate_by_id.get(str(match.presentation_id))
+                if match is not None and match.presentation_id
+                else None
             )
             items.append(
                 {
@@ -584,9 +815,19 @@ def register_presentation_media_routes(
                     "received_at": item.created_at,
                     "availability": item.availability,
                     "suggestion": suggestion,
-                    "confidence": match.confidence,
-                    "match_state": match.state,
-                    "match_reason": match.reason,
+                    "confidence": match.confidence if match is not None else None,
+                    "match_state": match.state if match is not None else "assigned",
+                    "match_reason": match.reason if match is not None else "operator confirmed",
+                    "assigned_presentation_id": (
+                        assigned_version.presentation_id if assigned_version else None
+                    ),
+                    "assigned_presentation_version_id": (
+                        assigned_version.presentation_version_id if assigned_version else None
+                    ),
+                    "commit_state": (
+                        promotion.status if promotion is not None else "needs_assignment"
+                    ),
+                    "commit_error": promotion.last_error if promotion is not None else None,
                     "disposition": item.disposition,
                     "rejected_by": item.rejected_by,
                     "rejected_at": item.rejected_at,
@@ -743,7 +984,11 @@ def register_presentation_media_routes(
         )
         presentation.workflow_status = PresentationWorkflowStatus.RECEIVED
         presentation.sync_state = SyncState.PENDING
-        if version_created:
+        session.flush()
+        recovery_queued = _enqueue_operational_reconciliation(
+            session, session.get(Event, presentation.event_id)
+        )
+        if version_created and not recovery_queued:
             SiteQueue(session).enqueue_outbox(
                 event_type="site.presentation_version.created",
                 aggregate_type="presentation_version",
@@ -790,7 +1035,10 @@ def register_presentation_media_routes(
                     "data": {"replication_session_id": str(replication_id)},
                 },
                 idempotency_key=f"media.replicate:{media_id}:{version.presentation_version_id}",
-                required_capabilities=["transfer"],
+                required_capabilities=[
+                    "intake-promoted",
+                    *(["central-event-synchronized"] if recovery_queued else []),
+                ],
             )
         session.add(
             AuditRecord(
@@ -820,6 +1068,216 @@ def register_presentation_media_routes(
         media_id: UUID, payload: SiteMediaConfirmation, session: WriteSession
     ) -> dict[str, object]:
         return confirm_one(session, media_id, payload.presentation_id)
+
+    @app.post("/api/v1/media/{media_id}/commit-retry", tags=["media"])
+    def retry_media_commit(media_id: UUID, request: Request, session: WriteSession):
+        media = session.get(MediaObject, media_id)
+        job = session.scalar(
+            select(ProcessingJob)
+            .where(
+                ProcessingJob.media_object_id == media_id,
+                ProcessingJob.job_type == INTAKE_PROMOTE_JOB,
+            )
+            .order_by(ProcessingJob.created_at.desc())
+            .with_for_update()
+        )
+        if media is None or job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "intake commit job not found")
+        if media.disposition == "authoritative":
+            return {"media_object_id": media_id, "status": "complete", "duplicate": True}
+        if job.status not in {JobStatus.FAILED, JobStatus.EXHAUSTED}:
+            raise HTTPException(status.HTTP_409_CONFLICT, "intake commit is not failed")
+        job.status = JobStatus.RETRY_WAIT
+        job.next_attempt_at = utc_now()
+        job.completed_at = None
+        job.claimed_by_worker_id = None
+        job.lease_expires_at = None
+        job.error_code = None
+        job.last_error = None
+        session.add(
+            AuditRecord(
+                site_id=media.site_id,
+                event_id=media.event_id,
+                actor_id=getattr(request.state, "site_user_id", "site-operator"),
+                action="site.presentation_media.commit_retried",
+                target_type="media_object",
+                target_id=media_id,
+                after_context={"processing_job_id": str(job.processing_job_id)},
+            )
+        )
+        return {
+            "media_object_id": media_id,
+            "processing_job_id": job.processing_job_id,
+            "status": job.status,
+            "duplicate": False,
+        }
+
+    @app.post("/api/v1/media/{media_id}/reassignment", tags=["media"])
+    def reassign_media(
+        media_id: UUID,
+        payload: SiteMediaReassignment,
+        request: Request,
+        session: WriteSession,
+    ) -> dict[str, object]:
+        media = session.get(MediaObject, media_id, with_for_update=True)
+        target = session.get(Presentation, payload.presentation_id)
+        if media is None or media.deleted_at is not None:
+            raise HTTPException(404, "media intake item not found")
+        if target is None or target.event_id != media.event_id:
+            raise HTTPException(422, "target Presentation Entry is not in the media Event")
+        prior_audit = session.scalar(
+            select(AuditRecord).where(
+                AuditRecord.action == "site.presentation_media.reassigned",
+                AuditRecord.target_id == media_id,
+                AuditRecord.after_context["idempotency_key"].as_string() == payload.idempotency_key,
+            )
+        )
+        if prior_audit:
+            return {
+                **(prior_audit.after_context or {}),
+                "media_object_id": media_id,
+                "duplicate": True,
+            }
+        previous_assets = session.scalars(
+            select(PresentationAsset).where(PresentationAsset.media_object_id == media_id)
+        ).all()
+        previous_presentations = [
+            session.get(PresentationVersion, asset.presentation_version_id).presentation_id
+            for asset in previous_assets
+        ]
+        superseding_versions: list[PresentationVersion] = []
+        for previous_id in set(previous_presentations) - {target.presentation_id}:
+            previous = session.get(Presentation, previous_id, with_for_update=True)
+            previous_number = (
+                session.scalar(
+                    select(func.max(PresentationVersion.version_number)).where(
+                        PresentationVersion.presentation_id == previous_id
+                    )
+                )
+                or 0
+            ) + 1
+            superseding = PresentationVersion(
+                presentation_id=previous_id,
+                version_number=previous_number,
+                sync_state=SyncState.PENDING,
+            )
+            session.add(superseding)
+            superseding_versions.append(superseding)
+            previous.workflow_status = PresentationWorkflowStatus.EXPECTED
+            previous.sync_state = SyncState.PENDING
+        session.execute(
+            select(Presentation.presentation_id)
+            .where(Presentation.presentation_id == target.presentation_id)
+            .with_for_update()
+        )
+        number = (
+            session.scalar(
+                select(func.max(PresentationVersion.version_number)).where(
+                    PresentationVersion.presentation_id == target.presentation_id
+                )
+            )
+            or 0
+        ) + 1
+        version = PresentationVersion(
+            presentation_id=target.presentation_id,
+            version_number=number,
+            sync_state=SyncState.PENDING,
+        )
+        session.add(version)
+        session.flush()
+        session.add(
+            PresentationAsset(
+                presentation_version_id=version.presentation_version_id,
+                media_object_id=media_id,
+                original_filename=media.original_filename,
+                kind=intake_asset_kind(media.original_filename),
+            )
+        )
+        target.workflow_status = PresentationWorkflowStatus.RECEIVED
+        result = {
+            "presentation_id": str(target.presentation_id),
+            "presentation_version_id": str(version.presentation_version_id),
+            "version_number": number,
+            "previous_presentation_ids": [str(value) for value in previous_presentations],
+            "superseding_version_ids": [
+                str(value.presentation_version_id) for value in superseding_versions
+            ],
+            "idempotency_key": payload.idempotency_key,
+        }
+        identity = session.scalar(select(LocalSiteIdentity))
+        session.add(
+            AuditRecord(
+                site_id=identity.site_id,
+                event_id=media.event_id,
+                actor_id=getattr(request.state, "site_user_id", "site-operator"),
+                action="site.presentation_media.reassigned",
+                target_type="media_object",
+                target_id=media_id,
+                before_context={
+                    "presentation_ids": [str(value) for value in previous_presentations]
+                },
+                after_context=result,
+            )
+        )
+        session.flush()
+        recovery_queued = _enqueue_operational_reconciliation(
+            session, session.get(Event, target.event_id)
+        )
+        if not recovery_queued:
+            for created_version in [*superseding_versions, version]:
+                SiteQueue(session).enqueue_outbox(
+                    event_type="site.presentation_version.created",
+                    aggregate_type="presentation_version",
+                    aggregate_id=created_version.presentation_version_id,
+                    site_id=identity.site_id,
+                    protocol_version=UPM_SYNC_PROTOCOL_VERSION,
+                    source_sequence=next_sequence(session),
+                    idempotency_key=(
+                        f"presentation-version:{created_version.presentation_version_id}"
+                    ),
+                    payload=OutboxPayload(
+                        source_system=SourceSystem.SITE,
+                        data={
+                            "presentation_version_id": str(created_version.presentation_version_id),
+                            "presentation_id": str(created_version.presentation_id),
+                            "version_number": created_version.version_number,
+                            "created_at": created_version.created_at.isoformat(),
+                        },
+                    ),
+                )
+        if media.content_hash and media.size_bytes is not None:
+            replication_id = new_uuid7()
+            session.add(
+                MediaReplicationSession(
+                    replication_session_id=replication_id,
+                    site_id=identity.site_id,
+                    event_id=target.event_id,
+                    presentation_id=target.presentation_id,
+                    presentation_version_id=version.presentation_version_id,
+                    media_object_id=media_id,
+                    expected_size=media.size_bytes,
+                    sha256=media.content_hash,
+                    original_filename=media.original_filename,
+                    canonical_filename=media.canonical_filename,
+                    media_type=media.mime_type,
+                    state=MediaReplicationState.QUEUED,
+                )
+            )
+            SiteQueue(session).enqueue_transfer(
+                transfer_job_id=replication_id,
+                site_id=identity.site_id,
+                media_object_id=media_id,
+                transfer_type="presentation_media.central_push",
+                payload={
+                    "schema_version": 1,
+                    "data": {"replication_session_id": str(replication_id)},
+                },
+                idempotency_key=f"media.replicate:{media_id}:{version.presentation_version_id}",
+                required_capabilities=(
+                    ["central-event-synchronized"] if recovery_queued else ["transfer"]
+                ),
+            )
+        return {"media_object_id": media_id, **result, "duplicate": False}
 
     @app.post("/api/v1/media/confirmations", tags=["media"])
     def confirm_media_batch(
@@ -1045,6 +1503,7 @@ def register_presentation_media_routes(
             rows.append(
                 {
                     "presentation_id": item.presentation_id,
+                    "revision": item.revision,
                     "presentation_identifier": item.presentation_identifier,
                     "presentation_identifier_source": item.presentation_identifier_source,
                     "external_presentation_id": item.external_presentation_id,
@@ -1193,9 +1652,21 @@ def register_presentation_media_routes(
             else []
         )
         transfer_by_media = {item.media_object_id: item for item in transfers}
+        replications = (
+            session.scalars(
+                select(MediaReplicationSession)
+                .where(MediaReplicationSession.presentation_version_id.in_(version_ids))
+                .order_by(MediaReplicationSession.created_at.desc())
+            ).all()
+            if version_ids
+            else []
+        )
+        replication_by_version: dict[UUID, MediaReplicationSession] = {}
+        for replication in replications:
+            replication_by_version.setdefault(replication.presentation_version_id, replication)
         room_rows = (
             session.execute(
-                select(RoomAssignment.session_id, Room.label)
+                select(RoomAssignment.session_id, Room.room_id, Room.label)
                 .join(Room, Room.room_id == RoomAssignment.room_id)
                 .where(
                     RoomAssignment.session_id.in_(list(sessions)), RoomAssignment.active.is_(True)
@@ -1204,7 +1675,7 @@ def register_presentation_media_routes(
             if sessions
             else []
         )
-        rooms = dict(room_rows)
+        rooms = {session_id: (room_id, label) for session_id, room_id, label in room_rows}
         items = []
         for item in presentations:
             program_session = sessions.get(item.session_id)
@@ -1226,6 +1697,9 @@ def register_presentation_media_routes(
             version = version_by_presentation.get(item.presentation_id)
             asset = asset_by_version.get(version.presentation_version_id) if version else None
             current_media = media.get(asset.media_object_id) if asset else None
+            replication = (
+                replication_by_version.get(version.presentation_version_id) if version else None
+            )
             confirmation = (
                 session.scalar(
                     select(AuditRecord)
@@ -1280,18 +1754,20 @@ def register_presentation_media_routes(
                 delivery = "current"
             elif version and version.version_number > 1:
                 delivery = "outdated"
-            readiness = (
-                "missing"
-                if current_media is None
-                else (
+            readiness = "missing"
+            if current_media is not None:
+                readiness = (
                     "ready"
                     if current_media.availability is MediaAvailability.AVAILABLE
+                    and current_media.disposition == "authoritative"
+                    else "staged"
+                    if current_media.disposition == "intake"
                     else str(current_media.availability)
                 )
-            )
             items.append(
                 {
                     "presentation_id": item.presentation_id,
+                    "revision": item.revision,
                     "presentation_identifier": item.presentation_identifier,
                     "title": item.title,
                     "presenters": presenters.get(item.presentation_id, []),
@@ -1299,12 +1775,25 @@ def register_presentation_media_routes(
                     "session_code": program_session.session_code if program_session else None,
                     "starts_at": item.scheduled_at
                     or (program_session.starts_at if program_session else None),
-                    "room": rooms.get(item.session_id)
+                    "room": (rooms.get(item.session_id) or (None, None))[1]
                     or (program_session.location_name if program_session else None),
+                    "room_id": (rooms.get(item.session_id) or (None, None))[0],
                     "current_version": version.version_number if version else None,
+                    "current_presentation_version_id": (
+                        version.presentation_version_id if version else None
+                    ),
+                    "media_object_id": current_media.media_object_id if current_media else None,
                     "readiness": readiness,
                     "delivery_state": delivery,
                     "source": current_media.category if current_media else None,
+                    "site_sync_state": item.sync_state,
+                    "central_backup_state": (
+                        replication.state if replication is not None else "not_queued"
+                    ),
+                    "central_backup_error": (
+                        replication.last_error if replication is not None else None
+                    ),
+                    "room_cache_state": "unknown",
                     "received_at": current_media.created_at if current_media else None,
                     "confirmed_at": confirmation.occurred_at if confirmation else None,
                     "confirmed_by": confirmation.actor_id if confirmation else None,
@@ -1319,6 +1808,7 @@ def register_presentation_media_routes(
                         f"/api/v1/presentation-versions/{version.presentation_version_id}/download"
                         if current_media
                         and current_media.availability is MediaAvailability.AVAILABLE
+                        and current_media.disposition == "authoritative"
                         else None
                     ),
                     "sessions": [
@@ -1327,7 +1817,9 @@ def register_presentation_media_routes(
                             "session_code": value.session_code,
                             "title": value.title,
                             "starts_at": value.starts_at,
-                            "room": rooms.get(value.session_id) or value.location_name,
+                            "room": (rooms.get(value.session_id) or (None, None))[1]
+                            or value.location_name,
+                            "room_id": (rooms.get(value.session_id) or (None, None))[0],
                         }
                         for value in associated_sessions
                     ],

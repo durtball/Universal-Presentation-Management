@@ -1,18 +1,12 @@
 """Auditable CSV/XLSX staging, identity reconciliation, and transactional commit."""
 
-import csv
 import hashlib
-import io
-import re
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
-from zipfile import BadZipFile
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -29,6 +23,7 @@ from upm_central.persistence.models import (
     Presentation,
     PresentationPresenter,
     PresentationSession,
+    PresentationVersion,
     ReconciliationDecision,
     SessionParticipant,
     utc_now,
@@ -59,13 +54,37 @@ from upm_shared.enums import (
 )
 from upm_shared.identifiers import new_uuid7
 from upm_shared.presentation_media import allocate_presentation_identifier
+from upm_shared.program_import import (
+    COLUMN_ALIASES as SHARED_COLUMN_ALIASES,
+)
+from upm_shared.program_import import (
+    detect_columns as shared_detect_columns,
+)
+from upm_shared.program_import import (
+    header_key as shared_header_key,
+)
+from upm_shared.program_import import (
+    normalize_row as shared_normalize_row,
+)
+from upm_shared.program_import import (
+    parse_csv as shared_parse_csv,
+)
+from upm_shared.program_import import (
+    parse_source_date as shared_parse_source_date,
+)
+from upm_shared.program_import import (
+    parse_source_time as shared_parse_source_time,
+)
+from upm_shared.program_import import (
+    parse_xlsx as shared_parse_xlsx,
+)
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
 
 def _header_key(value: str) -> str:
     """Normalize source headings without losing the original heading in row evidence."""
-    return re.sub(r"[^a-z0-9]+", "_", value.strip().casefold()).strip("_")
+    return shared_header_key(value)
 
 
 # This is the single importer vocabulary.  More-specific headings intentionally have
@@ -73,11 +92,11 @@ def _header_key(value: str) -> str:
 # to the broad program title/date concepts.
 COLUMN_ALIASES = {
     "presentation_date_added": "presentation_date_added",
-    "presentation_id": "session_code",
-    "presentationid": "session_code",
+    "presentation_id": "external_presentation_id",
+    "presentationid": "external_presentation_id",
     "session_id": "session_code",
     "sessionid": "session_code",
-    "presentation_title": "session_title",
+    "presentation_title": "presentation_title",
     "session_title": "session_title",
     "session_name": "session_title",
     "presenterid": "external_id",
@@ -149,6 +168,9 @@ COLUMN_ALIASES = {
     "session_type": "session_format",
     "presentation_type": "session_format",
 }
+# Central and Site intentionally consume one importer vocabulary.  The literal above is retained
+# temporarily as a readable compatibility inventory; the shared definition is authoritative.
+COLUMN_ALIASES = SHARED_COLUMN_ALIASES
 
 
 def _cell(value: object) -> object:
@@ -161,87 +183,25 @@ def _cell(value: object) -> object:
 
 def _parse_csv(content: bytes) -> list[dict[str, object]]:
     try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="CSV must be UTF-8"
-        ) from exc
-    return [
-        {str(k).strip(): _cell(v) for k, v in row.items()}
-        for row in csv.DictReader(io.StringIO(text))
-    ]
+        return shared_parse_csv(content)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _parse_xlsx(content: bytes) -> list[dict[str, object]]:
     try:
-        workbook = load_workbook(
-            io.BytesIO(content), read_only=True, data_only=True, keep_links=False
-        )
-        sheet = workbook.active
-        values = sheet.iter_rows(values_only=True)
-        headers = [str(value).strip() if value is not None else "" for value in next(values)]
-        rows = []
-        for row in values:
-            raw = {
-                header: _cell(value) for header, value in zip(headers, row, strict=False) if header
-            }
-            if any(value not in (None, "") for value in raw.values()):
-                raw["__worksheet"] = sheet.title
-                rows.append(raw)
-        workbook.close()
-        return rows
-    except (
-        BadZipFile,
-        InvalidFileException,
-        KeyError,
-        OSError,
-        TypeError,
-        ValueError,
-        StopIteration,
-    ) as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid XLSX workbook"
-        ) from exc
+        return shared_parse_xlsx(content)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _normalized(raw: dict[str, object]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in raw.items():
-        if key == "__worksheet":
-            result["_source_worksheet"] = value
-            continue
-        key_value = _header_key(key)
-        normalized_key = COLUMN_ALIASES.get(key_value, key_value)
-        if isinstance(value, str):
-            value = " ".join(value.strip().split())
-        if value in (None, "") and result.get(normalized_key) not in (None, ""):
-            continue
-        result[normalized_key] = value
-    if result.get("presenter_email") and not result.get("email"):
-        result["email"] = result["presenter_email"]
-    if result.get("email"):
-        result["normalized_email"] = normalize_text(str(result["email"]))
-    display = (
-        result.get("display_name")
-        or " ".join(str(result.get(key) or "") for key in ("given_name", "family_name")).strip()
-    )
-    if display:
-        result["display_name"] = display
-        result["normalized_name"] = normalize_text(str(display))
-    if result.get("external_id") and not result.get("external_namespace"):
-        result["external_namespace"] = "program_import_presenter"
-    return result
+    return shared_normalize_row(raw)
 
 
 def detect_columns(headers: list[str]) -> dict[str, str]:
     """Return the importer field selected by the existing normalization rules."""
-    result = {}
-    for header in headers:
-        if not header.strip() or header == "__worksheet":
-            continue
-        normalized = _header_key(header)
-        result[header] = COLUMN_ALIASES.get(normalized, normalized)
-    return result
+    return shared_detect_columns(headers)
 
 
 def _entity(values: dict[str, object]) -> ImportEntityType:
@@ -267,51 +227,12 @@ def _entity(values: dict[str, object]) -> ImportEntityType:
 
 def parse_source_date(value: object) -> date:
     """Interpret a source-local calendar date without assigning a timezone."""
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    supplied = str(value).strip()
-    if "T" in supplied or " " in supplied:
-        try:
-            return datetime.fromisoformat(supplied).date()
-        except ValueError:
-            pass
-    try:
-        return date.fromisoformat(supplied)
-    except ValueError:
-        pass
-    for pattern in ("%m/%d/%Y", "%m/%d/%y"):
-        try:
-            return datetime.strptime(supplied, pattern).date()
-        except ValueError:
-            continue
-    raise ValueError(f"invalid source date {supplied!r}")
+    return shared_parse_source_date(value)
 
 
 def parse_source_time(value: object) -> time:
     """Interpret a source-local wall-clock time without assigning a timezone."""
-    if isinstance(value, datetime):
-        return value.time().replace(tzinfo=None)
-    if isinstance(value, time):
-        return value.replace(tzinfo=None)
-    supplied = str(value).strip()
-    if "T" in supplied or " " in supplied and not supplied.upper().endswith(("AM", "PM")):
-        try:
-            return datetime.fromisoformat(supplied).time().replace(tzinfo=None)
-        except ValueError:
-            pass
-    try:
-        parsed = time.fromisoformat(supplied)
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        pass
-    for pattern in ("%I:%M %p", "%I:%M:%S %p"):
-        try:
-            return datetime.strptime(supplied.upper(), pattern).time()
-        except ValueError:
-            continue
-    raise ValueError(f"invalid source time {supplied!r}")
+    return shared_parse_source_time(value)
 
 
 def _event_datetime(local_date: date, local_time: time, event: Event) -> datetime:
@@ -993,70 +914,118 @@ def _ensure_wide_row_participant(
     return participant
 
 
-def _materialize_session_presentation(
+def _row_presentation_identity(batch: ImportBatch, row: ImportRow) -> str:
+    """Stable identity for the same physical source row across recommits/reimports."""
+    worksheet = str((row.raw_values or {}).get("__worksheet") or "")
+    return f"{batch.source_sha256}:{worksheet}:{row.source_row_number}"
+
+
+def _derived_session_code(values: dict[str, object]) -> str | None:
+    """Derive a source-scoped Session grouping key, never a Presentation identity."""
+    title = str(values.get("session_title") or "").strip()
+    if not title:
+        return None
+    signature = "|".join(
+        str(values.get(field) or "").strip().casefold()
+        for field in (
+            "session_title",
+            "session_date",
+            "starts_at",
+            "ends_at",
+            "location_name",
+            "track",
+        )
+    )
+    return f"IMPORT-SESSION-{hashlib.sha256(signature.encode()).hexdigest()[:16]}"
+
+
+def presentation_group_key(values: dict[str, object], row_identity: str) -> str:
+    """Return explicit shared identity or the unique durable source-row identity."""
+    explicit = str(
+        values.get("external_presentation_id") or values.get("presentation_code") or ""
+    ).strip()
+    return f"external:{explicit}" if explicit else f"row:{row_identity}"
+
+
+def _materialize_row_presentation(
     session: Session,
     event: Event,
+    batch: ImportBatch,
+    row: ImportRow,
     program_session: ProgramSession,
+    values: dict[str, object],
     *,
     actor: str,
-    import_batch_id: UUID | None = None,
 ) -> Presentation:
-    """Ensure an imported presentation-bearing Session has one canonical Presentation.
-
-    The Session's stable Event-scoped program code is the imported Presentation identity for
-    roster-shaped sources. Existing explicit Presentations linked to the Session are reused; this
-    helper never creates a second Presentation for a repeated import or repair request.
-    """
-    item = session.scalar(
-        select(Presentation)
-        .where(
+    """Create one expected upload slot per meaningful row unless an explicit key groups rows."""
+    row_identity = _row_presentation_identity(batch, row)
+    group_key = presentation_group_key(values, row_identity)
+    explicit_key = str(
+        values.get("external_presentation_id") or values.get("presentation_code") or ""
+    ).strip()
+    candidates = session.scalars(
+        select(Presentation).where(
             Presentation.event_id == event.event_id,
-            Presentation.session_id == program_session.session_id,
+            Presentation.source == "import",
         )
-        .order_by(Presentation.created_at, Presentation.presentation_id)
-        .limit(1)
+    ).all()
+    item = next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate.source_metadata or {}).get("import_row_identity") == row_identity
+        ),
+        None,
     )
-    if item is None and program_session.session_code:
-        item = session.scalar(
-            select(Presentation).where(
-                Presentation.event_id == event.event_id,
-                Presentation.presentation_code == program_session.session_code,
-            )
+    if item is None and explicit_key:
+        item = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.external_presentation_id == explicit_key
+            ),
+            None,
         )
     created = item is None
     if item is None:
         presentation_id = new_uuid7()
         identifier, identifier_source = allocate_presentation_identifier(
-            program_session.session_code, "CENTRAL", presentation_id
+            explicit_key or None, "CENTRAL", presentation_id
         )
         item = Presentation(
             presentation_id=presentation_id,
             event_id=event.event_id,
             session_id=program_session.session_id,
-            title=program_session.title,
-            presentation_code=program_session.session_code,
+            title=str(
+                values.get("presentation_title")
+                or values.get("title")
+                or values.get("session_title")
+                or program_session.title
+            ),
+            presentation_code=explicit_key or None,
             presentation_identifier=identifier,
             presentation_identifier_source=identifier_source,
-            external_presentation_id=program_session.session_code,
+            external_presentation_id=explicit_key or None,
             scheduled_at=program_session.starts_at,
             workflow_status=PresentationWorkflowStatus.EXPECTED,
             source="import",
-            source_metadata={"materialized_from_session_id": str(program_session.session_id)},
+            source_metadata={
+                "import_batch_id": str(batch.import_batch_id),
+                "import_row_id": str(row.import_row_id),
+                "import_row_identity": row_identity,
+                "presentation_group_key": group_key,
+                "source_row_number": row.source_row_number,
+                "materialized_for_session_id": str(program_session.session_id),
+                "explicit_shared_presentation": bool(explicit_key),
+            },
         )
         session.add(item)
         session.flush()
-    else:
-        if item.event_id != event.event_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="presentation event mismatch")
-        item.session_id = program_session.session_id
-        if (item.source_metadata or {}).get("materialized_from_session_id"):
-            item.title = program_session.title
-            item.scheduled_at = program_session.starts_at
-    if import_batch_id:
-        item.source_metadata = {
-            **item.source_metadata,
-            "import_batch_id": str(import_batch_id),
-        }
+    elif item.session_id != program_session.session_id:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="explicit presentation key resolves to presentations in different Sessions",
+        )
     if (
         session.scalar(
             select(PresentationSession).where(
@@ -1075,42 +1044,42 @@ def _materialize_session_presentation(
                 source="import",
             )
         )
-    participants = session.scalars(
-        select(SessionParticipant)
-        .where(SessionParticipant.session_id == program_session.session_id)
-        .order_by(SessionParticipant.presenter_order, SessionParticipant.session_participant_id)
-    ).all()
-    for relationship in participants:
-        presenter = session.scalar(
-            select(PresentationPresenter).where(
-                PresentationPresenter.presentation_id == item.presentation_id,
-                PresentationPresenter.event_participation_id == relationship.event_participation_id,
-                PresentationPresenter.role == relationship.role,
+    participant_ids = [
+        UUID(value) for value in (row.committed_entity_ids or {}).get("event_participation_ids", [])
+    ]
+    for order, participant_id in enumerate(participant_ids):
+        if (
+            session.scalar(
+                select(PresentationPresenter).where(
+                    PresentationPresenter.presentation_id == item.presentation_id,
+                    PresentationPresenter.event_participation_id == participant_id,
+                )
             )
-        )
-        if presenter is None:
+            is None
+        ):
             session.add(
                 PresentationPresenter(
                     presentation_id=item.presentation_id,
-                    event_participation_id=relationship.event_participation_id,
-                    role=relationship.role,
-                    presenter_order=relationship.presenter_order,
-                    primary_presenter=relationship.primary_presenter,
+                    event_participation_id=participant_id,
+                    role="presenter",
+                    presenter_order=order,
+                    primary_presenter=order == 0,
                     source="import",
                 )
             )
-        elif presenter.source == "import":
-            presenter.presenter_order = relationship.presenter_order
-            presenter.primary_presenter = relationship.primary_presenter
     session.flush()
     if created:
         audit(
             session,
-            action="central.presentation.materialized_from_session",
+            action="central.presentation.materialized_from_import_row",
             target_type="presentation",
             target_id=item.presentation_id,
             event_id=event.event_id,
-            after={"session_id": str(program_session.session_id)},
+            after={
+                "session_id": str(program_session.session_id),
+                "import_row_id": str(row.import_row_id),
+                "explicit_shared_presentation": bool(explicit_key),
+            },
             actor=actor,
         )
     return item
@@ -1119,19 +1088,66 @@ def _materialize_session_presentation(
 def repair_event_presentation_materialization(
     session: Session, event: Event, *, actor: str = "central-admin"
 ) -> list[Presentation]:
-    """Idempotently repair imported Sessions created before the materialization invariant."""
-    repaired = []
-    imported_sessions = session.scalars(
-        select(ProgramSession).where(
-            ProgramSession.event_id == event.event_id,
-            ProgramSession.source == "import",
-            ProgramSession.session_code.is_not(None),
+    """Idempotently repair row slots without moving ambiguous legacy media."""
+    repaired: list[Presentation] = []
+    batches = session.scalars(
+        select(ImportBatch).where(
+            ImportBatch.event_id == event.event_id,
+            ImportBatch.status == ImportStatus.COMMITTED,
         )
     ).all()
-    for program_session in imported_sessions:
-        repaired.append(
-            _materialize_session_presentation(session, event, program_session, actor=actor)
-        )
+    for batch in batches:
+        rows = session.scalars(
+            select(ImportRow)
+            .where(ImportRow.import_batch_id == batch.import_batch_id)
+            .order_by(ImportRow.source_row_number)
+        ).all()
+        legacy_targets: dict[UUID, list[ImportRow]] = {}
+        for row in rows:
+            ids = row.committed_entity_ids or {}
+            if ids.get("presentation_id"):
+                legacy_targets.setdefault(UUID(str(ids["presentation_id"])), []).append(row)
+        for legacy_id, contributing in legacy_targets.items():
+            legacy = session.get(Presentation, legacy_id)
+            if legacy is not None and len(contributing) > 1:
+                has_media = session.scalar(
+                    select(PresentationVersion.presentation_version_id)
+                    .where(PresentationVersion.presentation_id == legacy_id)
+                    .limit(1)
+                )
+                if has_media:
+                    legacy.source_metadata = {
+                        **(legacy.source_metadata or {}),
+                        "row_level_reconciliation_state": "ambiguous_media_review_required",
+                        "collapsed_import_row_ids": [
+                            str(row.import_row_id) for row in contributing
+                        ],
+                    }
+        for row in rows:
+            ids = row.committed_entity_ids or {}
+            session_id = ids.get("session_id")
+            if not session_id or row.resolution_action in {
+                ReconciliationAction.IGNORE,
+                ReconciliationAction.REJECT,
+            }:
+                continue
+            values = dict(row.normalized_values)
+            if row.corrected_values:
+                values.update(row.corrected_values)
+            program_session = session.get(ProgramSession, UUID(str(session_id)))
+            if program_session is None:
+                continue
+            item = _materialize_row_presentation(
+                session,
+                event,
+                batch,
+                row,
+                program_session,
+                values,
+                actor=actor,
+            )
+            row.committed_entity_ids = {**ids, "presentation_id": str(item.presentation_id)}
+            repaired.append(item)
     return repaired
 
 
@@ -1397,21 +1413,40 @@ def commit_batch(
                     or values.get("session_title")
                 )
                 code = values.get("presentation_code") or None
+                explicit_presentation_key = values.get("external_presentation_id") or code or None
                 item = (
                     session.scalar(
                         select(Presentation).where(
                             Presentation.event_id == event.event_id,
-                            Presentation.presentation_code == code,
+                            Presentation.external_presentation_id == str(explicit_presentation_key),
                         )
                     )
-                    if code
+                    if explicit_presentation_key
                     else None
                 )
+                if item is None:
+                    row_identity = _row_presentation_identity(batch, row)
+                    item = next(
+                        (
+                            candidate
+                            for candidate in session.scalars(
+                                select(Presentation).where(
+                                    Presentation.event_id == event.event_id,
+                                    Presentation.source == "import",
+                                )
+                            )
+                            if (candidate.source_metadata or {}).get("import_row_identity")
+                            == row_identity
+                        ),
+                        None,
+                    )
                 created = item is None
                 if item is None:
                     presentation_id = new_uuid7()
                     identifier, identifier_source = allocate_presentation_identifier(
-                        str(code) if code else None, "CENTRAL", presentation_id
+                        str(explicit_presentation_key) if explicit_presentation_key else None,
+                        "CENTRAL",
+                        presentation_id,
                     )
                     item = Presentation(
                         presentation_id=presentation_id,
@@ -1420,10 +1455,17 @@ def commit_batch(
                         presentation_code=code,
                         presentation_identifier=identifier,
                         presentation_identifier_source=identifier_source,
-                        external_presentation_id=code,
+                        external_presentation_id=(
+                            str(explicit_presentation_key) if explicit_presentation_key else None
+                        ),
                         workflow_status=PresentationWorkflowStatus.EXPECTED,
                         source="import",
-                        source_metadata={"import_batch_id": str(batch.import_batch_id)},
+                        source_metadata={
+                            "import_batch_id": str(batch.import_batch_id),
+                            "import_row_id": str(row.import_row_id),
+                            "import_row_identity": _row_presentation_identity(batch, row),
+                            "explicit_shared_presentation": bool(explicit_presentation_key),
+                        },
                     )
                     session.add(item)
                 else:
@@ -1437,7 +1479,7 @@ def commit_batch(
                     else None
                 )
                 session.flush()
-                session_code = values.get("session_code")
+                session_code = values.get("session_code") or _derived_session_code(values)
                 target_session = None
                 if session_code:
                     target_session = session.scalar(
@@ -1585,30 +1627,37 @@ def commit_batch(
                 actor=actor,
             )
         session.flush()
-        imported_session_rows: dict[UUID, list[ImportRow]] = {}
         for imported_row in rows:
             session_id = (imported_row.committed_entity_ids or {}).get("session_id")
-            if session_id:
-                imported_session_rows.setdefault(UUID(str(session_id)), []).append(imported_row)
-        for session_id, contributing_rows in imported_session_rows.items():
-            program_session = session.get(ProgramSession, session_id)
+            if (imported_row.committed_entity_ids or {}).get("presentation_id"):
+                continue
+            if not session_id or imported_row.resolution_action in {
+                ReconciliationAction.IGNORE,
+                ReconciliationAction.REJECT,
+            }:
+                continue
+            program_session = session.get(ProgramSession, UUID(str(session_id)))
             if program_session is None:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
                     detail=f"committed Session {session_id} is unavailable",
                 )
-            presentation = _materialize_session_presentation(
+            values = dict(imported_row.normalized_values)
+            if imported_row.corrected_values:
+                values.update(imported_row.corrected_values)
+            presentation = _materialize_row_presentation(
                 session,
                 event,
+                batch,
+                imported_row,
                 program_session,
+                values,
                 actor=actor,
-                import_batch_id=batch.import_batch_id,
             )
-            for contributing_row in contributing_rows:
-                contributing_row.committed_entity_ids = {
-                    **contributing_row.committed_entity_ids,
-                    "presentation_id": str(presentation.presentation_id),
-                }
+            imported_row.committed_entity_ids = {
+                **imported_row.committed_entity_ids,
+                "presentation_id": str(presentation.presentation_id),
+            }
         missing_materialization = []
         for imported_row in rows:
             session_id = (imported_row.committed_entity_ids or {}).get("session_id")

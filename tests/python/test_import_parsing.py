@@ -15,6 +15,7 @@ from upm_central.imports import (
     detect_columns,
     parse_source_date,
     parse_source_time,
+    presentation_group_key,
 )
 
 
@@ -109,13 +110,14 @@ def test_production_workbook_preserves_every_populated_row_and_ignores_trailing_
     assert len([key for key in rows[0] if not key.startswith("__")]) == 17
     mapped = detect_columns(list(rows[0]))
     assert len(mapped) == 17
-    assert mapped["Presentation ID"] == "session_code"
+    assert mapped["Presentation ID"] == "external_presentation_id"
     assert mapped["PresenterID"] == "external_id"
     assert mapped["Presentation Date Added"] == "presentation_date_added"
     assert mapped["Position / Title"] == "professional_title"
 
     normalized = [_normalized(row) for row in rows]
-    assert sum(row["session_code"] == "3468947" for row in normalized) == 3
+    assert sum(row["external_presentation_id"] == "3468947" for row in normalized) == 3
+    assert normalized[0]["presentation_title"] == "Agents Are Not Tasks"
     assert sum(row["external_id"] == "PERSON-1" for row in normalized) == 2
     assert normalized[2]["professional_title"] is None
     assert normalized[0]["session_date"] == "2027-04-10"
@@ -137,7 +139,7 @@ def test_alias_vocabulary_keeps_specific_titles_dates_and_identity_distinct() ->
         ]
     )
     assert mapping == {
-        "Presentation_ID": "session_code",
+        "Presentation_ID": "external_presentation_id",
         "Speaker ID": "external_id",
         "Session Name": "session_title",
         "Event Date": "session_date",
@@ -213,6 +215,30 @@ def test_blank_alias_does_not_erase_imported_session_title() -> None:
         }
     )
     assert normalized["session_title"] == "Reinventing Legacy Brands"
+
+
+def test_row_level_presentations_are_distinct_without_explicit_group_identity() -> None:
+    rows = [
+        {"session_title": "Future of AI", "display_name": name}
+        for name in ("Jane Smith", "Bob Jones", "Sarah Lee")
+    ]
+    keys = [
+        presentation_group_key(row, f"source:sheet:{number}") for number, row in enumerate(rows)
+    ]
+
+    assert len(set(keys)) == 3
+    assert all(key.startswith("row:") for key in keys)
+
+
+def test_explicit_external_presentation_id_intentionally_groups_presenters() -> None:
+    rows = [
+        {"external_presentation_id": "SHARED-42", "display_name": name}
+        for name in ("Jane Smith", "Bob Jones")
+    ]
+
+    assert {
+        presentation_group_key(row, f"different-row-{number}") for number, row in enumerate(rows)
+    } == {"external:SHARED-42"}
 
 
 def test_native_excel_schedule_normalizes_like_text() -> None:

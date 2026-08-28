@@ -15,7 +15,9 @@ from upm_central.persistence.models import (
     EventParticipation,
     ExternalIdentifier,
     Presentation,
+    RotationAssignment,
     Site,
+    SiteEventRecoverySnapshot,
     SiteRoomMapping,
     utc_now,
 )
@@ -36,6 +38,7 @@ from upm_shared.contracts.deployments import (
     PresentationSessionSnapshot,
     PresentationSnapshot,
     PresentationVersionSnapshot,
+    RotationAssignmentSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
     SiteUserSnapshot,
@@ -133,6 +136,14 @@ def build_snapshot(
         )
         .order_by(Presentation.presentation_id)
     ).all()
+    rotations = session.scalars(
+        select(RotationAssignment)
+        .where(
+            RotationAssignment.event_id == event.event_id,
+            RotationAssignment.active.is_(True),
+        )
+        .order_by(RotationAssignment.rotation_assignment_id)
+    ).all()
     participations = sorted(event.participations, key=lambda item: str(item.event_participation_id))
     entity_ids = {
         event.event_id,
@@ -155,6 +166,16 @@ def build_snapshot(
         select(SiteRoomMapping).where(SiteRoomMapping.site_id == deployment.site_id)
     ).all()
     users = session.scalars(select(AdminUser).order_by(AdminUser.admin_user_id)).all()
+    recovery = session.scalar(
+        select(SiteEventRecoverySnapshot).where(
+            SiteEventRecoverySnapshot.site_id == deployment.site_id,
+            SiteEventRecoverySnapshot.event_id == event.event_id,
+        )
+    )
+    recovered_room_configuration = (
+        dict(recovery.snapshot.get("room_configuration") or {}) if recovery else {}
+    )
+    recovered_extensions = dict(recovery.snapshot.get("extensions") or {}) if recovery else {}
     return EventDeploymentSnapshot(
         deployment_id=deployment.deployment_id,
         deployment_revision=revision,
@@ -167,6 +188,7 @@ def build_snapshot(
         ends_at=event.ends_at,
         timezone=event.timezone,
         room_configuration={
+            **recovered_room_configuration,
             "mappings": [
                 {
                     "imported_label": item.imported_label,
@@ -177,7 +199,9 @@ def build_snapshot(
                 }
                 for item in room_mappings
             ]
+            or recovered_room_configuration.get("mappings", []),
         },
+        extensions=recovered_extensions,
         users=[
             SiteUserSnapshot(
                 user_id=user.admin_user_id,
@@ -303,6 +327,20 @@ def build_snapshot(
                 ],
             )
             for item in presentations
+        ],
+        rotation_assignments=[
+            RotationAssignmentSnapshot(
+                rotation_assignment_id=item.rotation_assignment_id,
+                event_day=item.event_day,
+                scope=item.scope,
+                room_id=item.room_id,
+                session_id=item.session_id,
+                presentation_version_id=item.presentation_version_id,
+                source_authority="central",
+                active=item.active,
+                central_revision=item.revision,
+            )
+            for item in rotations
         ],
         external_identifiers=[
             ExternalIdentifierSnapshot(

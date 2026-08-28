@@ -186,12 +186,37 @@ def register_program_routes(app: FastAPI, db: Callable[[], Iterator[Session]]) -
 
     @app.get("/admin/program", response_class=HTMLResponse, tags=["administration"])
     def program_page() -> str:
-        return """<!doctype html><html><head><title>UPM Site Program</title></head><body>
+        return """<!doctype html><html><head><title>UPM Site Program</title><style>
+body{font:14px system-ui;background:#091019;color:#dbeaf3;margin:24px}button,input{margin:4px;
+padding:7px;background:#111d29;color:#dbeaf3;border:1px solid #2f657c}pre{background:#0d1721;
+padding:12px;overflow:auto}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+</style></head><body>
 <nav><a href="/admin/central-registration">Central registration</a> |
 <a href="/admin/event-deployments">Deployments</a> | <a href="/admin/program">Program</a></nav>
-<h1>Site-local event program</h1><button onclick="load()">Refresh deployments</button>
-<div id="out"></div><script>async function load(){const ds=await(await fetch(
-'/api/v1/event-deployments')).json();out.replaceChildren();for(const d of ds){const b=document.createElement(
-'button');b.textContent=`Open ${d.event_id}`;b.onclick=async()=>{const p=await(await fetch(
-`/api/v1/events/${d.event_id}/program`)).json();out.innerHTML=`<pre>${JSON.stringify(p,null,2)}</pre>`};
-out.append(b)}}load()</script></body></html>"""
+<h1>Site-local event program</h1><p>Site commits locally; Central recovery sync is asynchronous.</p>
+<div class="row"><input id="eventName" placeholder="New Event name"><input id="timezone"
+value="UTC" aria-label="IANA timezone"><button onclick="createEvent()">CREATE EVENT</button>
+<button onclick="load()">REFRESH</button></div><div id="events"></div><hr>
+<div class="row"><input id="programFile" type="file" accept=".csv,.xlsx"><button
+onclick="stage()">STAGE PROGRAM</button><button id="commit" disabled onclick="commitImport()">
+COMMIT IMPORT</button></div><pre id="status">Select an Event.</pre><div id="out"></div><script>
+let eventId=null,batchId=null,csrf=null;async function token(){if(csrf)return csrf;const r=await
+fetch('/api/v1/auth/session');if(r.ok)csrf=(await r.json()).csrf_token;return csrf||''}async function
+write(url,opt={}){opt.headers={...(opt.headers||{}),'X-CSRF-Token':await token()};const r=await
+fetch(url,opt);const data=await r.json();if(!r.ok)throw Error(data.detail||r.statusText);return data}
+async function load(){const ds=await(await fetch('/api/v1/event-deployments')).json();events.
+replaceChildren();for(const d of ds){const id=d.event_id||d.central_event_id,b=document.createElement
+('button');b.textContent=`${d.event_name||id} — ${d.status}`;b.onclick=()=>openEvent(id);events.append
+(b)}}async function openEvent(id){eventId=id;const p=await(await fetch(`/api/v1/events/${id}/program`))
+.json();out.innerHTML=`<pre>${JSON.stringify(p,null,2)}</pre>`;status.textContent=`Selected ${id}`}
+async function createEvent(){try{const e=await write('/api/v1/events',{method:'POST',headers:
+{'Content-Type':'application/json'},body:JSON.stringify({name:eventName.value,timezone:timezone.value})});
+await load();await openEvent(e.event_id)}catch(e){status.textContent=e.message}}async function stage(){if
+(!eventId)return status.textContent='Select an Event first.';const file=programFile.files[0];if(!file)
+return status.textContent='Select a CSV or XLSX file.';const body=new FormData();body.append('file',file);try
+{const data=await write(`/api/v1/events/${eventId}/program-imports`,{method:'POST',body});batchId=
+data.import_batch_id;status.textContent=JSON.stringify(data,null,2);commit.disabled=data.error_count!==0}
+catch(e){status.textContent=e.message}}async function commitImport(){try{const data=await write(
+`/api/v1/program-imports/${batchId}/commit`,{method:'POST'});status.textContent=JSON.stringify(data,
+null,2);commit.disabled=true;await openEvent(eventId)}catch(e){status.textContent=e.message}}load()
+</script></body></html>"""

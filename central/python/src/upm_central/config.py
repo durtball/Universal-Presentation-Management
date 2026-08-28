@@ -24,7 +24,7 @@ class CentralDatabaseSettings(BaseSettings):
     credential_issuer_key: Annotated[str, Field(min_length=32)]
     public_url: str = "http://upm-central:8080"
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
-    sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
+    sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 10_485_760
     media_storage_url: str = "http://central-media-storage:8080"
     media_storage_token: str = ""
     smb_control_url: str = "http://central-smb:8080"

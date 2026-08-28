@@ -38,7 +38,7 @@ class SiteSettings(BaseSettings):
     application_version: str = "0.1.0"
     central_url: str | None = None
     sync_batch_count: Annotated[int, Field(ge=1, le=100)] = 50
-    sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 1_048_576
+    sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 10_485_760
     heartbeat_interval_seconds: Annotated[float, Field(gt=0)] = 30.0
     transfer_block_bytes: Annotated[int, Field(ge=65_536, le=67_108_864)] = 4_194_304
     transfer_pull_concurrency: Annotated[int, Field(ge=1, le=16)] = 1

@@ -20,6 +20,7 @@ from upm_site.persistence.models import (
     utc_now,
 )
 from upm_site.persistence.models import Session as ProgramSession
+from upm_site.recovery_snapshots import touch_site_recovery_snapshot
 from upm_site.room_operations import (
     list_devices,
     list_media,
@@ -103,6 +104,8 @@ def register_operations_routes(
         room = Room(site_id=identity.site_id, label=label, event_id=payload.event_id)
         session.add(room)
         session.flush()
+        if payload.event_id is not None:
+            touch_site_recovery_snapshot(session, event)
         detail = room_detail(session, room.room_id)
         assert detail is not None
         return detail
@@ -160,6 +163,8 @@ def register_operations_routes(
         if changed:
             room.revision += 1
             session.flush()
+            if room.event_id is not None:
+                touch_site_recovery_snapshot(session, session.get(Event, room.event_id))
         detail = room_detail(session, room_id)
         assert detail is not None
         return detail
@@ -240,6 +245,7 @@ def register_operations_routes(
         session.flush()
         counts = reconcile_program_room_assignments(session, event_id)
         session.flush()
+        touch_site_recovery_snapshot(session, event)
         saved = next(
             item
             for item in program_locations(session, event_id)

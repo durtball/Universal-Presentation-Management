@@ -1,0 +1,65 @@
+name: Windows clients
+
+on:
+  push:
+    paths:
+      - "clients/site-manager/**"
+      - "clients/windows/**"
+      - "scripts/validate-windows-client-boundaries.ps1"
+      - ".github/workflows/windows-clients.yml"
+  pull_request:
+    paths:
+      - "clients/site-manager/**"
+      - "clients/windows/**"
+      - "scripts/validate-windows-client-boundaries.ps1"
+      - ".github/workflows/windows-clients.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test-windows:
+    runs-on: windows-2025
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.302"
+          cache: true
+          cache-dependency-path: |
+            clients/site-manager/UPM.SiteManager.csproj
+            clients/windows/**/*.csproj
+
+      - name: Verify Site Manager and Agent package boundaries
+        shell: pwsh
+        run: ./scripts/validate-windows-client-boundaries.ps1
+
+      - name: Restore shared Windows projects
+        shell: pwsh
+        run: |
+          dotnet restore clients/windows/UPM.Windows.Core/UPM.Windows.Core.csproj
+          dotnet restore clients/windows/UPM.Windows.SiteApi/UPM.Windows.SiteApi.csproj
+          dotnet restore clients/windows/UPM.Windows.Transfers/UPM.Windows.Transfers.csproj
+          dotnet restore clients/windows/UPM.Windows.Shell/UPM.Windows.Shell.csproj
+          dotnet restore clients/windows/UPM.Windows.Tests/UPM.Windows.Tests.csproj
+
+      - name: Build shared Windows projects
+        shell: pwsh
+        run: |
+          dotnet build clients/windows/UPM.Windows.Core/UPM.Windows.Core.csproj --configuration Release --no-restore
+          dotnet build clients/windows/UPM.Windows.SiteApi/UPM.Windows.SiteApi.csproj --configuration Release --no-restore
+          dotnet build clients/windows/UPM.Windows.Transfers/UPM.Windows.Transfers.csproj --configuration Release --no-restore
+          dotnet build clients/windows/UPM.Windows.Shell/UPM.Windows.Shell.csproj --configuration Release --no-restore
+
+      - name: Test shared Windows libraries
+        shell: pwsh
+        run: dotnet test clients/windows/UPM.Windows.Tests/UPM.Windows.Tests.csproj --configuration Release --no-restore
+
+      - name: Restore and build native Site Manager
+        shell: pwsh
+        run: |
+          dotnet restore clients/site-manager/UPM.SiteManager.csproj -p:Platform=x64
+          dotnet build clients/site-manager/UPM.SiteManager.csproj --configuration Release --no-restore -p:Platform=x64

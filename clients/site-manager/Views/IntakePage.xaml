@@ -1,0 +1,54 @@
+<Page
+    x:Class="UPM.SiteManager.Views.IntakePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    AllowDrop="True"
+    DragOver="OnDragOver"
+    Drop="OnDrop">
+    <Grid x:Name="LayoutRoot" Padding="12" RowSpacing="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="165" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="HIGH-VOLUME INTAKE" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Files remain local until a Site and event are selected" />
+            </StackPanel>
+            <Button Grid.Column="1" Content="SELECT FILES" Click="OnSelectFiles" />
+            <Button Grid.Column="2" Content="SELECT FOLDER" Click="OnSelectFolder" />
+        </Grid>
+        <Border Grid.Row="1" BorderBrush="{StaticResource VioletBrush}" BorderThickness="1" CornerRadius="5" Background="#45131D29">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="7">
+                <FontIcon Glyph="&#xE8B7;" FontSize="40" Foreground="{StaticResource AccentBrush}" />
+                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Drop files or folders here" />
+                <TextBlock Foreground="{StaticResource VioletBrush}" Text="or click to browse" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="10" Text="Nested relative paths and source metadata are preserved" />
+            </StackPanel>
+        </Border>
+        <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="DURABLE TRANSFER QUEUE" VerticalAlignment="Center" />
+            <TextBlock x:Name="QueueStatus" Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="0 queued  •  0 active  •  0 failed" />
+        </Grid>
+        <Grid Grid.Row="3" ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="420"/></Grid.ColumnDefinitions><Border Style="{StaticResource ControlRoomPanelStyle}">
+            <Grid>
+                <ListView x:Name="Queue" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True"><ListView.ItemTemplate><DataTemplate><Grid Padding="8,5" Background="{StaticResource TableRowBrush}" ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="100"/><ColumnDefinition Width="130"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Filename}" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding Size}"/><TextBlock Grid.Column="2" Foreground="{Binding StatusBrush}" Text="{Binding Status}"/><ProgressBar Grid.Column="3" Minimum="0" Maximum="100" Value="{Binding Progress}" Foreground="{Binding StatusBrush}"/></Grid></DataTemplate></ListView.ItemTemplate></ListView>
+                <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" IsHitTestVisible="False">
+                    <TextBlock FontSize="17" Text="Intake queue is empty" />
+                    <TextBlock Foreground="{StaticResource MutedBrush}" Text="Drop supported presentation or media files to begin enumeration." TextAlignment="Center" TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </Border><Border Grid.Column="1" Style="{StaticResource ControlRoomPanelStyle}" Padding="10"><Grid RowSpacing="6"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="120"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><TextBlock Style="{StaticResource SectionTitleStyle}" Text="MATCH / ASSIGNMENT"/><ListView x:Name="SiteIntakeList" Grid.Row="1" SelectionChanged="OnSiteIntakeSelection"><ListView.ItemTemplate><DataTemplate><StackPanel Padding="5"><TextBlock Text="{Binding Filename}" TextTrimming="CharacterEllipsis"/><TextBlock Foreground="{StaticResource MutedBrush}" FontSize="10" Text="{Binding MatchState}"/></StackPanel></DataTemplate></ListView.ItemTemplate></ListView><StackPanel Grid.Row="2" Spacing="4"><TextBlock x:Name="InspectFile" FontSize="14" Text="Select a Site intake item"/><TextBlock x:Name="InspectPath" Foreground="{StaticResource MutedBrush}" FontSize="10" Text="—" TextWrapping="Wrap"/><TextBlock Style="{StaticResource HeaderLabelStyle}" Text="MATCH EVIDENCE"/><TextBlock x:Name="InspectEvidence" Text="—" TextWrapping="Wrap"/><TextBlock Style="{StaticResource HeaderLabelStyle}" Text="SUGGESTED PRESENTATION ENTRY"/><TextBlock x:Name="InspectTarget" Text="—" TextWrapping="Wrap"/></StackPanel><StackPanel Grid.Row="3" Spacing="5"><StackPanel Orientation="Horizontal" Spacing="5"><Button x:Name="ConfirmButton" Content="CONFIRM" IsEnabled="False" Click="OnConfirmSuggestion"/><Button x:Name="AssignButton" Content="ASSIGN / CHANGE" IsEnabled="False" Click="OnAssign"/><Button x:Name="CreateEntryButton" Content="CREATE ENTRY" IsEnabled="False" Click="OnCreateEntry"/></StackPanel><Button x:Name="RejectButton" HorizontalAlignment="Left" Content="REJECT" IsEnabled="False" Click="OnReject"/><Button x:Name="RetryCommitButton" HorizontalAlignment="Left" Content="RETRY COMMIT" IsEnabled="False" Click="OnRetryCommit"/></StackPanel></Grid></Border></Grid>
+    </Grid>
+</Page>
