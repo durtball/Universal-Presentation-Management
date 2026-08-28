@@ -1,0 +1,29 @@
+<Page
+    x:Class="UPM.SiteManager.Views.ActivityPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="20" RowSpacing="14">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="ACTIVITY &amp; DIAGNOSTICS" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Site API, storage, durable outbox, Agent command, review and transfer health" />
+            </StackPanel>
+            <Button Grid.Column="1" IsEnabled="False" Content="COPY DIAGNOSTICS" ToolTipService.ToolTip="Connect to Site first" />
+        </Grid>
+        <Grid Grid.Row="1" ColumnSpacing="10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Border Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="SITE API" /><TextBlock Foreground="#D9A13B" Text="UNKNOWN" /></StackPanel></Border>
+            <Border Grid.Column="1" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="MEDIA STORAGE" /><TextBlock Foreground="#D9A13B" Text="UNKNOWN" /></StackPanel></Border>
+            <Border Grid.Column="2" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="DURABLE OUTBOX" /><TextBlock Foreground="#D9A13B" Text="UNKNOWN" /></StackPanel></Border>
+        </Grid>
+        <Border Grid.Row="2" Style="{StaticResource ControlRoomPanelStyle}" Padding="24">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="7">
+                <FontIcon Glyph="&#xE9D9;" FontSize="36" Foreground="{StaticResource VioletBrush}" />
+                <TextBlock FontSize="18" Text="No activity loaded" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Diagnostics intentionally exclude credentials and session tokens." TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

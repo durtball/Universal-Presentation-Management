@@ -1,0 +1,68 @@
+<Page
+    x:Class="UPM.SiteManager.Views.PresentationsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid x:Name="LayoutRoot" Padding="20" RowSpacing="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="220" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="PRESENTATIONS" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Browse authoritative event structure and immutable revisions" />
+            </StackPanel>
+            <TextBox Grid.Column="1" IsEnabled="False" PlaceholderText="Connect to search" />
+        </Grid>
+        <Grid Grid.Row="1" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="110" />
+                <ColumnDefinition Width="90" />
+                <ColumnDefinition Width="130" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="SessionColumn" Width="180" />
+                <ColumnDefinition x:Name="PresenterColumn" Width="150" />
+                <ColumnDefinition x:Name="VersionColumn" Width="80" />
+                <ColumnDefinition x:Name="ModifiedColumn" Width="130" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Foreground="{StaticResource MutedBrush}" Text="STATUS" />
+            <TextBlock Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="START" />
+            <TextBlock Grid.Column="2" Foreground="{StaticResource MutedBrush}" Text="ROOM" />
+            <TextBlock Grid.Column="3" Foreground="{StaticResource MutedBrush}" Text="PRESENTATION" />
+            <TextBlock Grid.Column="4" Foreground="{StaticResource MutedBrush}" Text="SESSION" />
+            <TextBlock Grid.Column="5" Foreground="{StaticResource MutedBrush}" Text="PRESENTER" />
+            <TextBlock Grid.Column="6" Foreground="{StaticResource MutedBrush}" Text="VERSION" />
+            <TextBlock Grid.Column="7" Foreground="{StaticResource MutedBrush}" Text="MODIFIED" />
+        </Grid>
+        <Border Grid.Row="2" Style="{StaticResource ControlRoomPanelStyle}">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560" Spacing="7">
+                <FontIcon Glyph="&#xE8A5;" FontSize="36" Foreground="{StaticResource VioletBrush}" />
+                <TextBlock FontSize="18" Text="No event selected" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Connect to Site and select a deployed event to browse presentations." TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup>
+                <VisualState x:Name="Narrow">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="PresenterColumn.Width" Value="0" />
+                        <Setter Target="ModifiedColumn.Width" Value="0" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Medium">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="1180" /></VisualState.StateTriggers>
+                    <VisualState.Setters><Setter Target="ModifiedColumn.Width" Value="130" /></VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="1500" /></VisualState.StateTriggers>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+    </Grid>
+</Page>

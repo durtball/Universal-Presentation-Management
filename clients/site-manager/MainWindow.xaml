@@ -1,1 +1,128 @@
-<Window x:Class="UPM.SiteManager.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="UPM Site Manager"><Grid Background="#080D14"><Grid.RowDefinitions><RowDefinition Height="64"/><RowDefinition/></Grid.RowDefinitions><Border BorderBrush="#284559" BorderThickness="0,0,0,1"><Grid Margin="18,8"><Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="260"/><ColumnDefinition/><ColumnDefinition Width="210"/></Grid.ColumnDefinitions><TextBlock Text="UPM  SITE MANAGER" Foreground="#26E6FF" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/><ComboBox Grid.Column="1" Header="SITE" PlaceholderText="Select a Site"/><StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center"><Ellipse Width="8" Height="8" Fill="#6B7280"/><TextBlock Text="SITE UNKNOWN" Foreground="#AAB7C4"/></StackPanel></Grid></Border><NavigationView Grid.Row="1" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" Background="#080D14" SelectionChanged="Navigate"><NavigationView.MenuItems><NavigationViewItem Content="Dashboard" Tag="dashboard" Icon="Home"/><NavigationViewItem Content="Intake" Tag="intake" Icon="OpenFile"/><NavigationViewItem Content="Presentations" Tag="presentations" Icon="Document"/><NavigationViewItem Content="Rooms" Tag="rooms" Icon="Map"/><NavigationViewItem Content="Transfers" Tag="transfers" Icon="Sync"/><NavigationViewItem Content="Review Sessions" Tag="reviews" Icon="Preview"/><NavigationViewItem Content="Devices" Tag="devices" Icon="Monitor"/><NavigationViewItem Content="Activity" Tag="activity" Icon="List"/><NavigationViewItem Content="Settings" Tag="settings" Icon="Setting"/></NavigationView.MenuItems><Frame x:Name="ContentFrame"/></NavigationView></Grid></Window>
+<Window
+    x:Class="UPM.SiteManager.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="UPM Site Manager">
+    <Grid x:Name="WindowLayout" Background="{StaticResource GraphiteBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition x:Name="HeaderRow" Height="76" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border
+            x:Name="CommandBarSurface"
+            Padding="20,10"
+            BorderBrush="#284559"
+            BorderThickness="0,0,0,1">
+            <Grid x:Name="CommandBarGrid" ColumnSpacing="16" RowSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="BrandColumn" Width="220" />
+                    <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition x:Name="CompactHeaderRow" Height="0" />
+                </Grid.RowDefinitions>
+
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock
+                        Foreground="{StaticResource AccentBrush}"
+                        FontSize="19"
+                        FontWeight="SemiBold"
+                        Text="UPM" />
+                    <TextBlock
+                        Foreground="#DCE8F2"
+                        FontSize="11"
+                        CharacterSpacing="150"
+                        Text="SITE MANAGER" />
+                </StackPanel>
+
+                <ComboBox
+                    x:Name="SiteSelector"
+                    Grid.Column="1"
+                    Header="SITE"
+                    MinWidth="180"
+                    PlaceholderText="Select a Site" />
+                <ComboBox
+                    x:Name="EventSelector"
+                    Grid.Column="2"
+                    Header="EVENT"
+                    MinWidth="180"
+                    IsEnabled="False"
+                    PlaceholderText="Connect to select event" />
+
+                <StackPanel
+                    x:Name="ConnectionStatus"
+                    Grid.Column="4"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Ellipse Width="8" Height="8" Fill="#6B7280" />
+                        <TextBlock Foreground="#DCE8F2" Text="SITE UNKNOWN" />
+                    </StackPanel>
+                    <TextBlock
+                        Margin="16,3,0,0"
+                        Foreground="{StaticResource MutedBrush}"
+                        FontSize="11"
+                        Text="No authenticated session" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <NavigationView
+            x:Name="PrimaryNavigation"
+            Grid.Row="1"
+            IsBackButtonVisible="Collapsed"
+            IsSettingsVisible="False"
+            PaneDisplayMode="Auto"
+            CompactModeThresholdWidth="1000"
+            ExpandedModeThresholdWidth="1320"
+            OpenPaneLength="220"
+            CompactPaneLength="48"
+            Background="{StaticResource GraphiteBrush}"
+            SelectionChanged="Navigate">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="Dashboard" Tag="dashboard" Icon="Home" />
+                <NavigationViewItem Content="Intake" Tag="intake" Icon="OpenFile" />
+                <NavigationViewItem Content="Presentations" Tag="presentations" Icon="Document" />
+                <NavigationViewItem Content="Rooms" Tag="rooms" Icon="Map" />
+                <NavigationViewItem Content="Transfers" Tag="transfers" Icon="Sync" />
+                <NavigationViewItem Content="Review Sessions" Tag="reviews" Icon="Preview" />
+                <NavigationViewItem Content="Devices" Tag="devices" Icon="Monitor" />
+                <NavigationViewItem Content="Activity" Tag="activity" Icon="List" />
+                <NavigationViewItem Content="Settings" Tag="settings" Icon="Setting" />
+            </NavigationView.MenuItems>
+            <Frame x:Name="ContentFrame" />
+        </NavigationView>
+
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="WindowWidthStates">
+                <VisualState x:Name="WideWindow" />
+                <VisualState x:Name="CompactWindow">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="HeaderRow.Height" Value="124" />
+                        <Setter Target="BrandColumn.Width" Value="170" />
+                        <Setter Target="CompactHeaderRow.Height" Value="Auto" />
+                        <Setter Target="SiteSelector.(Grid.Row)" Value="1" />
+                        <Setter Target="SiteSelector.(Grid.Column)" Value="0" />
+                        <Setter Target="SiteSelector.(Grid.ColumnSpan)" Value="2" />
+                        <Setter Target="EventSelector.(Grid.Row)" Value="1" />
+                        <Setter Target="EventSelector.(Grid.Column)" Value="2" />
+                        <Setter Target="EventSelector.(Grid.ColumnSpan)" Value="2" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="StandardWindow">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="1180" />
+                    </VisualState.StateTriggers>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+    </Grid>
+</Window>

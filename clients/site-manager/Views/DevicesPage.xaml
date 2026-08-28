@@ -1,0 +1,20 @@
+<Page
+    x:Class="UPM.SiteManager.Views.DevicesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="20" RowSpacing="14">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="DEVICES" />
+            <TextBlock Foreground="{StaticResource MutedBrush}" Text="Heartbeat-derived Agent runtime state and server-authoritative room assignment" />
+        </StackPanel>
+        <InfoBar Grid.Row="1" IsOpen="True" Severity="Warning" Title="Telemetry unavailable" Message="No Site session is connected. Device status is UNKNOWN, not online." />
+        <Border Grid.Row="2" Style="{StaticResource ControlRoomPanelStyle}" Padding="24">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
+                <FontIcon Glyph="&#xE975;" FontSize="36" Foreground="{StaticResource AccentBrush}" />
+                <TextBlock FontSize="18" Text="No device runtime projection" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Fresh Agent heartbeat telemetry will appear after authentication." TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

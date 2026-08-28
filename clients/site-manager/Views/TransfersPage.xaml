@@ -1,1 +1,57 @@
-<Page x:Class="UPM.SiteManager.Views.TransfersPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"><Grid Padding="20"><InfoBar IsOpen="True" Severity="Informational" Title="Transfers" Message="Connect to Site to load authoritative operational data."/></Grid></Page>
+<Page
+    x:Class="UPM.SiteManager.Views.TransfersPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="20" RowSpacing="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="TRANSFERS" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Durable local upload activity and Site verification" />
+            </StackPanel>
+            <Button Grid.Column="1" IsEnabled="False" Content="PAUSE ALL" />
+            <Button Grid.Column="2" IsEnabled="False" Content="RETRY FAILED" />
+        </Grid>
+        <Grid Grid.Row="1" ColumnSpacing="10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Border Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="ACTIVE" /><TextBlock FontSize="23" Text="0" /></StackPanel></Border>
+            <Border Grid.Column="1" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="QUEUED" /><TextBlock FontSize="23" Text="0" /></StackPanel></Border>
+            <Border Grid.Column="2" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="COMPLETE" /><TextBlock FontSize="23" Text="0" /></StackPanel></Border>
+            <Border Grid.Column="3" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Foreground="{StaticResource MutedBrush}" Text="FAILED" /><TextBlock FontSize="23" Text="0" /></StackPanel></Border>
+        </Grid>
+        <Grid Grid.Row="2" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="120" />
+                <ColumnDefinition x:Name="SpeedColumn" Width="110" /><ColumnDefinition x:Name="ElapsedColumn" Width="100" /><ColumnDefinition Width="100" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Foreground="{StaticResource MutedBrush}" Text="FILENAME" />
+            <TextBlock Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="CONTEXT" />
+            <TextBlock Grid.Column="2" Foreground="{StaticResource MutedBrush}" Text="STATE" />
+            <TextBlock Grid.Column="3" Foreground="{StaticResource MutedBrush}" Text="SPEED" />
+            <TextBlock Grid.Column="4" Foreground="{StaticResource MutedBrush}" Text="ELAPSED" />
+            <TextBlock Grid.Column="5" Foreground="{StaticResource MutedBrush}" Text="PROGRESS" />
+        </Grid>
+        <Border Grid.Row="3" Style="{StaticResource ControlRoomPanelStyle}">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="7">
+                <FontIcon Glyph="&#xE898;" FontSize="36" Foreground="{StaticResource AccentBrush}" />
+                <TextBlock FontSize="18" Text="No transfer activity" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Accepted transfers will persist here across Site Manager restarts." TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup>
+                <VisualState x:Name="CompactTransfers">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
+                    <VisualState.Setters><Setter Target="SpeedColumn.Width" Value="0" /><Setter Target="ElapsedColumn.Width" Value="0" /></VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="FullTransfers"><VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="1300" /></VisualState.StateTriggers></VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+    </Grid>
+</Page>
