@@ -33,9 +33,20 @@ function mockSite() {
     central_event_id: "44444444-4444-4444-4444-444444444444",
     event_name: "Test Event",
   } as never]);
+  vi.spyOn(siteApi, "registration").mockResolvedValue({ site_id: "77777777-7777-7777-7777-777777777777" } as never);
 }
 
 describe("Site presentation media canonical matching", () => {
+  it("exposes the shared upload workflow on the Site intake workspace", async () => {
+    mockSite();
+    vi.spyOn(siteApi, "mediaIntake").mockResolvedValue({items:[],total:0,limit:50,offset:0});
+    render(<SitePresentationMedia />);
+    fireEvent.click(await screen.findByRole("button", {name:"Upload Media"}));
+    expect(screen.getByRole("dialog", {name:/Upload Media/})).toBeInTheDocument();
+    expect(screen.getByRole("button", {name:"Upload Files"})).toBeInTheDocument();
+    expect(screen.getByRole("button", {name:"Upload Folder"})).toBeInTheDocument();
+  });
+
   it("preselects a suggested canonical ID and confirms it only after operator action", async () => {
     mockSite();
     const intake = vi.spyOn(siteApi, "mediaIntake")

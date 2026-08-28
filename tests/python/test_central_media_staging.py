@@ -15,6 +15,7 @@ from upm_central.presentation_media import (
     MediaStagingError,
     _safe_staging_path,
 )
+from upm_central.presentation_media_api import _view
 from upm_central.worker import (
     PARALLEL_PRESENTATION_MEDIA_JOBS,
     PresentationMediaJobPool,
@@ -74,6 +75,107 @@ def test_central_media_routes_are_authenticated_and_versioned() -> None:
         "POST",
         "/api/v1/media-replications/{replication_session_id}/finalize",
     ) in routes
+
+
+def test_site_delivery_retry_reuses_the_existing_media_contract() -> None:
+    from upm_site.api import create_app as create_site_app
+
+    routes = {
+        (method, route.path)
+        for route in create_site_app().routes
+        for method in getattr(route, "methods", set())
+    }
+    assert ("POST", "/api/v1/media-deliveries/{transfer_session_id}/retry") in routes
+    assert ("POST", "/api/v1/presentation-media/intake/upload") not in routes
+
+
+def test_central_media_view_projects_durable_transfer_progress() -> None:
+    from decimal import Decimal
+
+    transfer_id = uuid4()
+    item = SimpleNamespace(
+        **{
+            key: None
+            for key in (
+                "batch_id",
+                "destination_site_id",
+                "presentation_id",
+                "presentation_version_id",
+                "presentation_identifier",
+                "external_presentation_id",
+                "source_relative_path",
+                "canonical_filename",
+                "mime_type",
+                "sha256",
+                "match_reason",
+                "confirmed_by",
+                "confirmed_at",
+                "rejected_by",
+                "rejected_at",
+                "rejection_reason",
+                "intake_storage_key",
+                "rejected_storage_key",
+                "site_media_object_id",
+                "committed_storage_root_id",
+                "committed_storage_key",
+                "error_code",
+                "error_detail",
+                "source_actor",
+                "source_share",
+            )
+        },
+        media_import_id=uuid4(),
+        event_id=uuid4(),
+        original_filename="deck.pptx",
+        size_bytes=100,
+        match_state=MediaMatchState.UNMATCHED,
+        match_candidates=[],
+        import_state="transferring",
+        sync_state="pending",
+        transfer_job_id=transfer_id,
+        retry_count=0,
+        origin="central",
+        created_at=None,
+        updated_at=None,
+    )
+    transfer = SimpleNamespace(
+        transfer_job_id=transfer_id,
+        status=JobStatus.RUNNING,
+        progress=Decimal("42"),
+        payload={
+            "confirmed_offset": 42,
+            "expected_size": 100,
+            "site_state": "transferring",
+            "last_progress_at": "2026-08-28T12:00:00Z",
+            "local_media_ready": False,
+        },
+        attempt_count=2,
+        max_attempts=5,
+        completed_at=None,
+        error_code=None,
+        last_error=None,
+    )
+    session = SimpleNamespace(
+        get=lambda _model, identity: transfer if identity == transfer_id else None
+    )
+
+    projected = _view(item, session)
+
+    assert projected["transfer"] == {
+        "transfer_job_id": transfer_id,
+        "status": JobStatus.RUNNING,
+        "progress": 42.0,
+        "confirmed_offset": 42,
+        "expected_size": 100,
+        "site_state": "transferring",
+        "attempt_count": 2,
+        "max_attempts": 5,
+        "last_progress_at": "2026-08-28T12:00:00Z",
+        "completed_at": None,
+        "local_media_ready": False,
+        "error_code": None,
+        "last_error": None,
+    }
 
 
 def test_storage_root_uses_standard_central_record_revision() -> None:
@@ -229,9 +331,7 @@ def test_rescan_batch_matches_concurrently_with_deterministic_results() -> None:
 
     assert peak == 4
     assert [media_id for media_id, _ in actual] == [media_id for media_id, _ in expected]
-    assert [result.state for _, result in actual] == [
-        MediaMatchState.SUGGESTED for _ in items
-    ]
+    assert [result.state for _, result in actual] == [MediaMatchState.SUGGESTED for _ in items]
     assert [result.presentation_id for _, result in actual] == [
         result.presentation_id for _, result in expected
     ]

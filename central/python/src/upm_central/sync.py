@@ -7,7 +7,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from upm_central.persistence.models import (
@@ -60,6 +60,45 @@ def secrets_match(value: str, expected_hash: str) -> bool:
 def require_protocol(version: int) -> None:
     if version != UPM_SYNC_PROTOCOL_VERSION:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="incompatible_sync_protocol")
+
+
+def outbox_health(session: Session, *, stuck_after: timedelta = timedelta(minutes=15)) -> dict:
+    """Summarize durable delivery health without inspecting process-local worker state."""
+    now = utc_now()
+    counts = dict(
+        session.execute(select(OutboxEvent.status, func.count()).group_by(OutboxEvent.status)).all()
+    )
+    stuck = (
+        session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(
+                OutboxEvent.status == JobStatus.RUNNING,
+                OutboxEvent.lease_expires_at < now,
+            )
+        )
+        or 0
+    )
+    delayed = (
+        session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(
+                OutboxEvent.status.in_([JobStatus.PENDING, JobStatus.RETRY_WAIT]),
+                OutboxEvent.created_at < now - stuck_after,
+            )
+        )
+        or 0
+    )
+    dead_letter = sum(counts.get(state, 0) for state in (JobStatus.FAILED, JobStatus.EXHAUSTED))
+    return {
+        "healthy": stuck == 0 and dead_letter == 0,
+        "counts": {state.value: count for state, count in counts.items()},
+        "stuck_leases": stuck,
+        "delayed": delayed,
+        "dead_letter": dead_letter,
+        "checked_at": now,
+    }
 
 
 def authenticate_site(session: Session, site_id: UUID, bearer: str | None) -> Site:

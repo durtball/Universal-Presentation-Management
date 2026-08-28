@@ -6,7 +6,7 @@ import type { CentralMediaImport, PresentationMatchCandidate, PresentationMediaR
 import { DataTable, type Column } from "../components/DataTable";
 import { Empty, ErrorSurface, Loading } from "../components/Feedback";
 import { Metric, Page, Panel } from "../components/Page";
-import { MediaStatusBadge, MediaUploadDialog, PresentationMediaDetail, formatBytes, formatDate } from "../components/presentationMedia";
+import { MediaStatusBadge, MediaUploadDialog, PresentationMediaDetail, TransferActivity, formatBytes, formatDate } from "../components/presentationMedia";
 import { useApi } from "../hooks/useApi";
 import { useSession } from "../state/session";
 
@@ -34,29 +34,32 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     const [workspace, presentations] = await Promise.all([api.mediaWorkspace(activeEvent, signal), api.presentations(activeEvent, signal)]);
     return { ...centralRows(workspace.imports, presentations), summary: workspace.summary, imports: workspace.imports, candidates: [], siteId: "", unmatched: workspace.imports };
   }, [mode, activeEvent, session?.csrfToken]);
+  const hasActiveTransfers = Boolean(data.data?.rows.some((row) => row.versions.some((version) => [version.delivery?.state, version.replication?.state].some((state) => state && !["completed", "synced", "failed", "cancelled", "expired"].includes(state)))));
+  const pollData = data.poll;
+  const pollBatches = batches.poll;
   useEffect(() => {
     if (!activeEvent) return;
     const timer = window.setInterval(() => {
-      data.poll();
-      if (mode === "central") batches.poll();
-    }, 10000);
+      pollData();
+      if (mode === "central") pollBatches();
+    }, hasActiveTransfers ? 2500 : 10000);
     return () => window.clearInterval(timer);
-  }, [activeEvent, mode, data.poll, batches.poll]);
+  }, [activeEvent, mode, pollData, pollBatches, hasActiveTransfers]);
   const rows = useMemo(() => (data.data?.rows ?? []).filter((row) => filter === "all" || (filter === "ready" ? row.media_state === "available" : filter === "missing" ? row.media_state === "missing" : filter === "failed" ? row.media_state === "failed" || row.versions.some((version) => version.replication?.state === "failed") : true)), [data.data, filter]);
   const summary = (data.data?.summary ?? {}) as Record<string, number>;
   const doUpload = async (file: File, progress: (value: number) => void, relativePath?: string, retrying?: (count: number) => void, batchId?: string) => {
     if (mode === "central") {
       const result = await centralApi(session.csrfToken).uploadMedia(activeEvent, file, progress, relativePath, retrying, batchId);
       data.refresh();
-      return { state: result.match_state === "suggested" ? "suggested" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const };
+      return { state: result.match_state === "suggested" ? "suggested" as const : result.import_state === "needs_review" ? "needs_review" as const : "staged" as const, sha256: result.sha256, sizeBytes: result.size_bytes, availability: result.import_state, failureReason: result.error_detail };
     }
     else {
       let versionId: string | null = null;
       if (uploadTarget) versionId = (await siteApi.createVersion(uploadTarget)).presentation_version_id;
-      await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath, retrying);
+      const result = await siteApi.uploadMedia(data.data?.siteId || "", activeEvent, file, versionId, progress, relativePath, retrying);
+      data.refresh();
+      return { state: uploadTarget ? "confirmed" as const : "needs_review" as const, sha256: result.content_hash, sizeBytes: result.size_bytes, availability: result.availability, failureReason: result.failure_reason };
     }
-    data.refresh();
-    return { state: uploadTarget ? "confirmed" as const : "needs_review" as const };
   };
   if (events.loading) return <Loading />;
   if (events.error) return <ErrorSurface error={events.error} onRetry={events.refresh} />;
@@ -67,11 +70,12 @@ export function PresentationMedia({ mode }: { mode: Mode }) {
     {data.loading ? <Loading /> : data.error ? <ErrorSurface error={data.error} onRetry={data.refresh} /> : data.data ? <>
       {(summary.expected === 0) && <div className="autonomy-banner autonomy-banner--warning"><strong>No Presentation records available</strong><span>This event currently has no committed Presentation records available for matching. Files will still be preserved for review.</span></div>}
       <div className="metrics"><Metric label="Total presentations" value={summary.expected ?? rows.length} /><Metric label={mode === "central" ? "With media" : "Locally ready"} value={summary.with_media ?? summary.ready ?? 0} tone="success" /><Metric label="Missing media" value={summary.missing ?? 0} tone="warning" /><Metric label="Synchronizing" value={summary.transferring ?? summary.sync_pending ?? 0} /><Metric label="Failures" value={summary.failed ?? 0} tone="danger" /><Metric label="Uploaded files" value={data.data.unmatched.length} /></div>
+      {mode === "central" ? <TransferActivity title="Delivery to Sites" transfers={rows.flatMap((row)=>row.versions.flatMap((version)=>version.delivery?[version.delivery]:[]))} /> : <><TransferActivity title="Downloading from Central" transfers={rows.flatMap((row)=>row.versions.flatMap((version)=>version.delivery?[version.delivery]:[]))} /><TransferActivity title="Replicating to Central" transfers={rows.flatMap((row)=>row.versions.flatMap((version)=>version.replication?[version.replication]:[]))} /></>}
       <Panel title="Presentations" description="Current media and version state. Select Details for complete history."><DataTable rows={rows} columns={columns} rowKey={(row) => row.presentation_id} label="presentation media" pageSize={25} actions={(row) => <><button className="button button--small" onClick={() => setSelected(row)}>Details</button><button className="button button--small" onClick={() => { setUploadTarget(row.presentation_id); setUpload(true); }}>New version</button></>} /></Panel>
       {mode === "central" ? <CentralReviewQueue initialItems={(data.data.unmatched as CentralMediaImport[]).filter(isIntakeItem)} eventId={activeEvent} csrf={session.csrfToken} /> : null}
     </> : <Empty title="Select an event" />}
     {upload && <MediaUploadDialog title={uploadTarget ? "Upload a new presentation version" : "Bulk Import"} onClose={() => { setUpload(false); setUploadTarget(""); data.refresh(); }} upload={doUpload} registerBatch={mode === "central" ? async (selectedCount, skippedItems) => (await centralApi(session.csrfToken).createMediaBatch(activeEvent, selectedCount, skippedItems)).batch_id : undefined} onViewBatchLog={(batchId) => navigate(`/admin/logs?batch_id=${batchId}`)} />}
-    {selected && <PresentationMediaDetail row={selected} onClose={() => setSelected(null)} actions={(version) => mode === "site" && version.replication && ["failed", "retry_wait"].includes(version.replication.state) ? <button className="button button--small" onClick={() => void siteApi.retryReplication(version.replication!.replication_session_id).then(data.refresh)}>Retry Central replication</button> : null} />}
+    {selected && <PresentationMediaDetail row={selected} onClose={() => setSelected(null)} actions={(version) => mode === "site" ? <div className="button-row">{version.delivery && ["failed", "retry_wait"].includes(version.delivery.state) && <button className="button button--small" onClick={() => void siteApi.retryDelivery(version.delivery!.transfer_session_id).then(data.refresh)}>Retry Download</button>}{version.replication && ["failed", "retry_wait"].includes(version.replication.state) && <button className="button button--small" onClick={() => void siteApi.retryReplication(version.replication!.replication_session_id).then(data.refresh)}>Retry Central replication</button>}</div> : null} />}
   </Page>;
 }
 
@@ -91,7 +95,7 @@ function centralRows(imports: CentralMediaImport[], records: Row[]) {
   imports.forEach((item) => item.presentation_id && byPresentation.set(item.presentation_id, [...(byPresentation.get(item.presentation_id) || []), item]));
   const rows = records.map((record): PresentationMediaRow => {
     const linked = (byPresentation.get(String(record.presentation_id)) || []).sort((a, b) => b.created_at.localeCompare(a.created_at));
-    return { presentation_id: String(record.presentation_id), presentation_identifier: String(record.presentation_identifier || record.presentation_code || ""), title: String(record.title || "Untitled presentation"), presenters: Array.isArray(record.presenters) ? record.presenters.map((value) => String((value as Row).display_name || "")).filter(Boolean).join(", ") : "", session: Array.isArray(record.sessions) ? String((record.sessions[0] as Row)?.title || "") : "", room: Array.isArray(record.sessions) ? String((record.sessions[0] as Row)?.location_name || "") : "", scheduled_at: record.scheduled_at as string | undefined, media_state: linked[0]?.import_state === "site_ready" || linked[0]?.import_state === "staged" ? "available" : linked[0]?.import_state || "missing", versions: linked.map((item, index) => ({ presentation_version_id: item.presentation_version_id || item.media_import_id, version_number: linked.length - index, media: { media_object_id: item.media_import_id, original_filename: item.original_filename, canonical_filename: item.canonical_filename, size_bytes: item.size_bytes, sha256: item.sha256, availability: item.import_state, failure_reason: item.error_detail } })) };
+    return { presentation_id: String(record.presentation_id), presentation_identifier: String(record.presentation_identifier || record.presentation_code || ""), title: String(record.title || "Untitled presentation"), presenters: Array.isArray(record.presenters) ? record.presenters.map((value) => String((value as Row).display_name || "")).filter(Boolean).join(", ") : "", session: Array.isArray(record.sessions) ? String((record.sessions[0] as Row)?.title || "") : "", room: Array.isArray(record.sessions) ? String((record.sessions[0] as Row)?.location_name || "") : "", scheduled_at: record.scheduled_at as string | undefined, media_state: linked[0]?.import_state === "site_ready" || linked[0]?.import_state === "staged" ? "available" : linked[0]?.import_state || "missing", versions: linked.map((item, index) => ({ presentation_version_id: item.presentation_version_id || item.media_import_id, version_number: linked.length - index, media: { media_object_id: item.media_import_id, original_filename: item.original_filename, canonical_filename: item.canonical_filename, size_bytes: item.size_bytes, sha256: item.sha256, availability: item.import_state, failure_reason: item.error_detail }, delivery: item.transfer ? { transfer_session_id: item.transfer.transfer_job_id, state: item.transfer.local_media_ready ? "completed" : item.transfer.site_state || item.transfer.status, confirmed_offset: item.transfer.confirmed_offset, expected_size: item.transfer.expected_size, percent: item.transfer.progress, retry_count: Math.max(0,item.transfer.attempt_count-1), last_progress_at: item.transfer.last_progress_at, error_detail: item.transfer.last_error, job_status: item.transfer.status } : null })) };
   });
   return { rows };
 }
@@ -123,11 +127,11 @@ export function CentralReviewQueue({ initialItems, eventId, csrf }: { initialIte
   const fileTypes = useMemo(() => [...new Set(items.map(mediaFileType))].sort(), [items]);
   const visible = useMemo(() => items.filter((item) => reviewFilter(item, filter) && (fileType === "all" || mediaFileType(item) === fileType) && reviewVisible(item, search)).sort((left, right) => compareMediaRows(left, right, sort)), [fileType, filter, items, search, sort]);
   const pageRows = visible.slice(page * REVIEW_PAGE_SIZE, (page + 1) * REVIEW_PAGE_SIZE);
-  const markConfirmationAccepted = (ids: string[], _state = "confirmation_pending") => { setItems((current) => current.filter((item) => !ids.includes(item.media_import_id))); setChecked((current) => new Set([...current].filter((id) => !ids.includes(id)))); };
+  const markConfirmationAccepted = (ids: string[]) => { setItems((current) => current.filter((item) => !ids.includes(item.media_import_id))); setChecked((current) => new Set([...current].filter((id) => !ids.includes(id)))); };
   const confirmOne = async (item: CentralMediaImport) => {
     const presentationId = selectedCandidate(item); if (!presentationId) return;
     setErrors((current) => { const next = new Map(current); next.delete(item.media_import_id); return next; });
-    try { const result=await centralApi(csrf).assignMedia(item.media_import_id, presentationId); markConfirmationAccepted([item.media_import_id], result.match_state === "confirmed" ? "confirmed" : "confirmation_pending"); }
+    try { await centralApi(csrf).assignMedia(item.media_import_id, presentationId); markConfirmationAccepted([item.media_import_id]); }
     catch (error) { setErrors((current) => new Map(current).set(item.media_import_id, error instanceof Error ? error.message : "Confirmation failed")); }
   };
   const confirmSelected = async () => {

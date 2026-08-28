@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -144,6 +146,38 @@ def test_staging_commit_is_content_addressed_and_rejects_traversal(tmp_path):
     assert client.delete(object_url).json() == {"deleted": True}
     assert client.get(object_url).status_code == 404
     assert client.get(f"/api/v1/storage/staging/{STAGING_ID}/../escape").status_code in {404, 422}
+
+
+def test_staging_write_returns_stream_digest(tmp_path):
+    client = configured_client(tmp_path)
+    allocation = client.post("/api/v1/storage/staging/allocations").json()
+    payload = b"synthetic streamed text payload" * 100
+    response = client.put(
+        f"/api/v1/storage/staging/{allocation['storage_target_id']}/{allocation['storage_key']}",
+        content=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_stale_transport_cleanup_is_configurable_and_preserves_intake(tmp_path):
+    client = configured_client(tmp_path)
+    stale = tmp_path / "staging" / "staging" / "abandoned.upload"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("abandoned synthetic upload")
+    old = time.time() - 25 * 60 * 60
+    os.utime(stale, (old, old))
+    intake = tmp_path / "media" / "intake" / "sha256" / "aa" / ("a" * 64)
+    intake.parent.mkdir(parents=True, exist_ok=True)
+    intake.write_text("durable intake")
+    os.utime(intake, (old, old))
+
+    result = client.post("/api/v1/storage/staging/cleanup").json()
+
+    assert result["removed_count"] == 1
+    assert not stale.exists()
+    assert intake.exists()
 
 
 def test_intake_publication_promotion_and_rejection_are_replay_safe(tmp_path):
