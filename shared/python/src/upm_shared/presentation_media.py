@@ -22,6 +22,10 @@ from upm_shared.identifiers import new_uuid7
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
 _SEPARATORS = re.compile(r"[\s._-]+")
 _TOKEN = re.compile(r"[^A-Z0-9]+")
+_REVISION_SUFFIX = re.compile(
+    r"(?:[\s._-]+(?:V(?:ERSION)?[\s._-]*\d+|REV(?:ISION)?[\s._-]*\d+|FINAL|FINAL[\s._-]*\d+|UPDATED|REVISED|COPY))+$",
+    re.IGNORECASE,
+)
 _WINDOWS_RESERVED = {
     "CON",
     "PRN",
@@ -34,9 +38,7 @@ POWERPOINT_PRESENTATION_EXTENSIONS = frozenset({".ppt", ".pptx", ".pps", ".ppsx"
 IMAGE_PRESENTATION_EXTENSIONS = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 )
-VIDEO_PRESENTATION_EXTENSIONS = frozenset(
-    {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
-)
+VIDEO_PRESENTATION_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"})
 DOCUMENT_PRESENTATION_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".txt"})
 SUPPORTED_PRESENTATION_EXTENSIONS = frozenset(
     POWERPOINT_PRESENTATION_EXTENSIONS
@@ -192,6 +194,12 @@ def _meaningful_match_tokens(value: str | None) -> frozenset[str]:
     )
 
 
+def _without_revision_suffix(value: str) -> tuple[str, bool]:
+    """Remove common operator revision labels while retaining them as conflict evidence."""
+    stripped = _REVISION_SUFFIX.sub("", value).rstrip(" ._-")
+    return stripped or value, stripped != value
+
+
 def match_presentation(
     filename: str,
     candidates: Iterable[MatchCandidate],
@@ -206,6 +214,7 @@ def match_presentation(
     raw_path = unicodedata.normalize("NFKC", filename).replace("\\", "/").strip()
     path_parts = tuple(part for part in PurePosixPath(raw_path).parts if part not in {"", "."})
     basename = PurePosixPath(raw_path).stem.strip().upper()
+    stable_basename, has_revision_marker = _without_revision_suffix(basename)
     folder_parts = tuple(part.upper() for part in path_parts[:-1])
     immediate_parent = folder_parts[-1] if folder_parts else None
     ancestor_parts = folder_parts[:-1]
@@ -215,6 +224,7 @@ def match_presentation(
     }
     path_tokens = filename_tokens | folder_tokens
     normalized_filename = _match_token(basename)
+    normalized_stable_filename = _match_token(stable_basename)
     normalized_components = tuple(_match_token(part) for part in (*folder_parts, basename))
     normalized_parent = _match_token(immediate_parent)
     normalized_ancestors = {_match_token(part) for part in ancestor_parts}
@@ -225,7 +235,7 @@ def match_presentation(
         if not token:
             return None
         allow_component_substring = bool(re.search(r"[^A-Za-z0-9]", value or ""))
-        if token == normalized_filename or token in filename_tokens:
+        if token in {normalized_filename, normalized_stable_filename} or token in filename_tokens:
             return "filename"
         if normalized_parent and (
             token == normalized_parent or (allow_component_substring and token in normalized_parent)
@@ -400,6 +410,7 @@ def match_presentation(
             tuple(item.presentation_id for _, item, _ in ranked[:10]),
             views,
             "high",
+            has_revision_marker,
         )
     surname_candidate_ids = {
         item.presentation_id
@@ -452,6 +463,7 @@ def match_presentation(
         tuple(item.presentation_id for _, item, _ in ranked[:10]),
         candidate_views,
         confidence,
+        has_revision_marker,
     )
 
 

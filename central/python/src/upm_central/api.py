@@ -73,6 +73,7 @@ from upm_central.sync import (
     create_setting_event,
     envelope,
     issue_poll_token,
+    outbox_health,
     secret_hash,
     secrets_match,
 )
@@ -337,6 +338,14 @@ def create_app(settings: CentralDatabaseSettings | None = None) -> FastAPI:
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.get(
+        "/api/v1/system/outbox-health",
+        dependencies=[Depends(require_admin)],
+        tags=["system"],
+    )
+    def durable_outbox_health(session: DbSession) -> dict:
+        return outbox_health(session)
 
     @app.post(
         "/api/v1/sites/enrollment-requests",

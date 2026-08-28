@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
@@ -172,6 +172,32 @@ class StorageService:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(block)
         return digest.hexdigest()
+
+    def cleanup_staging(self, *, older_than: timedelta | None = None) -> list[str]:
+        """Remove abandoned transport files, never durable intake or canonical objects."""
+        age = older_than or timedelta(seconds=self.settings.staging_max_age_seconds)
+        if age.total_seconds() <= 0:
+            raise StorageError("Staging cleanup age must be positive.")
+        cutoff = datetime.now(UTC).timestamp() - age.total_seconds()
+        removed: list[str] = []
+        for target in self.targets.values():
+            if not target.enabled or "staging" not in target.roles:
+                continue
+            staging_root = self.path(target, "staging")
+            if not staging_root.exists():
+                continue
+            for candidate in staging_root.iterdir():
+                try:
+                    if candidate.is_file() and candidate.stat().st_mtime < cutoff:
+                        candidate.unlink()
+                        removed.append(f"{target.storage_target_id}/staging/{candidate.name}")
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    logger.exception("staging_cleanup_failed", extra={"path": candidate.name})
+        if removed:
+            logger.info("staging_cleanup_completed", extra={"removed_count": len(removed)})
+        return removed
 
     @staticmethod
     def owned_usage(root: Path) -> tuple[int | None, int | None]:

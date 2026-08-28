@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     smb_presentations_path: Path | None = None
     warning_free_percent: float = 15
     critical_free_percent: float = 5
+    staging_max_age_seconds: int = Field(default=24 * 60 * 60, gt=0)
 
     def targets(self) -> list[TargetConfig]:
         if not self.targets_json:

@@ -89,6 +89,7 @@ from upm_site.sync import (
     bootstrap_identity,
     credential_matches,
     enqueue_heartbeat,
+    outbox_health,
 )
 from upm_site.users_api import register_user_routes
 
@@ -319,6 +320,12 @@ def create_app(
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         return HealthResponse()
+
+    @app.get("/api/v1/system/outbox-health", tags=["system"])
+    def durable_outbox_health(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        return outbox_health(session)
 
     def auth_view(user, csrf=None):
         value = {

@@ -318,6 +318,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/storage/staging/allocations", dependencies=private)
     def allocate() -> dict:
+        storage.cleanup_staging()
         target = storage.active("staging")
         key = f"staging/{uuid4()}.upload"
         return {
@@ -341,10 +342,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid4()}.partial")
         size = 0
+        digest = hashlib.sha256()
         try:
             with temporary.open("xb") as handle:
                 async for chunk in request.stream():
                     size += len(chunk)
+                    digest.update(chunk)
                     handle.write(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -355,8 +358,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "storage_target_id": str(target_id),
             "storage_key": key,
             "size_bytes": size,
-            "sha256": storage.sha256(path),
+            "sha256": digest.hexdigest(),
         }
+
+    @app.post("/api/v1/storage/staging/cleanup", dependencies=private)
+    def cleanup_staging() -> dict:
+        removed = storage.cleanup_staging()
+        return {"removed_count": len(removed), "removed": removed}
 
     @app.get("/api/v1/storage/staging/{target_id}/{key:path}", dependencies=private)
     def staged(

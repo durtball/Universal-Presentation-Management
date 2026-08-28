@@ -4,7 +4,7 @@ import base64
 import hashlib
 import hmac
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -64,6 +64,45 @@ from upm_site.persistence.queue import SiteQueue
 SITE_IDENTITY_BOOTSTRAP_LOCK_ID = 0x55504D5349544501
 DEFERRED_TRANSFER_CAPABILITY = "sync-dependencies"
 logger = logging.getLogger(__name__)
+
+
+def outbox_health(session: Session, *, stuck_after: timedelta = timedelta(minutes=15)) -> dict:
+    """Summarize the Site-local durable outbox, including terminal dead letters."""
+    now = utc_now()
+    counts = dict(
+        session.execute(select(OutboxEvent.status, func.count()).group_by(OutboxEvent.status)).all()
+    )
+    stuck = (
+        session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(
+                OutboxEvent.status == JobStatus.RUNNING,
+                OutboxEvent.lease_expires_at < now,
+            )
+        )
+        or 0
+    )
+    delayed = (
+        session.scalar(
+            select(func.count())
+            .select_from(OutboxEvent)
+            .where(
+                OutboxEvent.status.in_([JobStatus.PENDING, JobStatus.RETRY_WAIT]),
+                OutboxEvent.created_at < now - stuck_after,
+            )
+        )
+        or 0
+    )
+    dead_letter = sum(counts.get(state, 0) for state in (JobStatus.FAILED, JobStatus.EXHAUSTED))
+    return {
+        "healthy": stuck == 0 and dead_letter == 0,
+        "counts": {state.value: count for state, count in counts.items()},
+        "stuck_leases": stuck,
+        "delayed": delayed,
+        "dead_letter": dead_letter,
+        "checked_at": now,
+    }
 
 
 def _manifest_is_satisfied(session: Session, manifest: MediaTransferManifest) -> bool:

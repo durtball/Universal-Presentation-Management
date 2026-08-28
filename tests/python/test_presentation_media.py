@@ -114,6 +114,17 @@ def test_exact_session_identifier_in_folder_is_strong_evidence() -> None:
     assert "Session ID S-220 matched parent folder" in result.reason
 
 
+@pytest.mark.parametrize("suffix", ["_v2", "-version-12", " final", "_revised"])
+def test_revision_suffix_keeps_exact_token_match_reviewable(suffix: str) -> None:
+    candidate = MatchCandidate(UUID(int=1), "P-1042")
+
+    result = match_presentation(f"P-1042{suffix}.pptx", [candidate])
+
+    assert result.state is MediaMatchState.SUGGESTED
+    assert result.presentation_id == candidate.presentation_id
+    assert result.has_conflict is True
+
+
 def test_presenter_room_time_and_title_folders_rank_a_weak_filename() -> None:
     candidate = MatchCandidate(
         UUID(int=1),
@@ -172,8 +183,7 @@ def test_representative_import_paths_have_no_avoidable_unmatched_files() -> None
     ]
 
     results = [
-        match_presentation(path, candidates, event_timezone="America/New_York")
-        for path in paths
+        match_presentation(path, candidates, event_timezone="America/New_York") for path in paths
     ]
 
     assert all(result.state is MediaMatchState.SUGGESTED for result in results)
