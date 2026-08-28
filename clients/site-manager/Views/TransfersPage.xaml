@@ -1,0 +1,1 @@
+<Page x:Class="UPM.SiteManager.Views.TransfersPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"><Grid Padding="20"><InfoBar IsOpen="True" Severity="Informational" Title="Transfers" Message="Connect to Site to load authoritative operational data."/></Grid></Page>

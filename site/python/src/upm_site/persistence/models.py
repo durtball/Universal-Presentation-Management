@@ -653,8 +653,160 @@ class Device(SiteRecordMixin, SiteBase):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agent_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
 
     assignments: Mapped[list["DeviceAssignment"]] = relationship(back_populates="device")
+
+
+class DeviceRuntimeState(SiteBase):
+    """Latest Agent observation; online is always derived from heartbeat freshness."""
+
+    __tablename__ = "device_runtime_states"
+
+    device_id: Mapped[UUID] = mapped_column(
+        ForeignKey("devices.device_id", ondelete="CASCADE"), primary_key=True
+    )
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    ip_address: Mapped[str | None] = mapped_column(String(64))
+    windows_version: Mapped[str | None] = mapped_column(String(255))
+    agent_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    interactive_session_available: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    powerpoint_available: Mapped[bool | None] = mapped_column(Boolean)
+    powerpoint_version: Mapped[str | None] = mapped_column(String(64))
+    free_disk_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    local_cache_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    current_presentation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    current_review_session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    current_command_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class DeviceCommand(SiteBase):
+    """Durable Site-authoritative instruction delivered at least once to an Agent."""
+
+    __tablename__ = "device_commands"
+    __table_args__ = (
+        UniqueConstraint("site_id", "idempotency_key"),
+        Index("ix_site_device_commands_delivery", "device_id", "status", "available_at"),
+        Index("ix_site_device_commands_correlation", "correlation_id"),
+    )
+
+    command_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    device_id: Mapped[UUID] = mapped_column(
+        ForeignKey("devices.device_id", ondelete="RESTRICT"), nullable=False
+    )
+    room_id: Mapped[UUID | None] = mapped_column(ForeignKey("rooms.room_id", ondelete="RESTRICT"))
+    command_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(String(2048))
+    correlation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), nullable=False, default=new_uuid7
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class DeviceCommandAttempt(SiteBase):
+    __tablename__ = "device_command_attempts"
+    __table_args__ = (UniqueConstraint("command_id", "attempt_number"),)
+
+    attempt_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    command_id: Mapped[UUID] = mapped_column(
+        ForeignKey("device_commands.command_id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    delivered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    result_status: Mapped[str | None] = mapped_column(String(16))
+    result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class PresentationReviewSession(SiteBase):
+    __tablename__ = "presentation_review_sessions"
+    __table_args__ = (Index("ix_site_review_sessions_state", "site_id", "state", "opened_at"),)
+
+    review_session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
+    )
+    presentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentations.presentation_id", ondelete="RESTRICT"), nullable=False
+    )
+    base_presentation_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    device_id: Mapped[UUID] = mapped_column(
+        ForeignKey("devices.device_id", ondelete="RESTRICT"), nullable=False
+    )
+    room_id: Mapped[UUID] = mapped_column(
+        ForeignKey("rooms.room_id", ondelete="RESTRICT"), nullable=False
+    )
+    operator_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), default="requested", nullable=False)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    local_changes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    working_filename: Mapped[str | None] = mapped_column(String(1024))
+    working_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    working_sha256: Mapped[str | None] = mapped_column(String(64))
+    working_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    saveback_media_object_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT")
+    )
+    saveback_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT")
+    )
+    conflict_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT")
+    )
+    correlation_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), nullable=False, default=new_uuid7
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DeviceAssignment(SiteRecordMixin, SiteBase):

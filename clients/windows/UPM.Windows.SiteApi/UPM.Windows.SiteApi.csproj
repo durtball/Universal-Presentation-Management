@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../UPM.Windows.Core/UPM.Windows.Core.csproj" /><PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" /></ItemGroup></Project>

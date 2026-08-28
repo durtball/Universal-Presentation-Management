@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../UPM.Windows.Core/UPM.Windows.Core.csproj" /></ItemGroup></Project>

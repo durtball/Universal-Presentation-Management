@@ -1,0 +1,6 @@
+namespace UPM.Windows.Core;
+public enum TransferState { Queued, Hashing, Uploading, Verifying, ReceivedBySite, Matching, NeedsReview, Assigned, Complete, RetryWaiting, Failed, Cancelled }
+public sealed record SiteProfile(Guid ProfileId, string DisplayName, Uri BaseUri, string? CertificateThumbprint, DateTimeOffset CreatedAt);
+public sealed record TransferItem(Guid TransferId, Guid SiteProfileId, Guid? EventId, string SourcePath, string OriginalFilename, string RelativePath, string? SourceVolume, long Length, DateTimeOffset SourceModifiedAt, string IdempotencyKey, TransferState State=TransferState.Queued, long BytesTransferred=0, string? Sha256=null, int RetryCount=0, DateTimeOffset? RetryAt=null, string? Error=null);
+public static class TransferIdentity { public static string Create(Guid profileId, Guid? eventId, string path, long length, DateTimeOffset modified) { var input=$"{profileId:N}|{eventId:N}|{Path.GetFullPath(path).ToUpperInvariant()}|{length}|{modified.UtcTicks}"; return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(input))).ToLowerInvariant(); } }
+public interface ICredentialVault { ValueTask SaveAsync(Guid profileId,string sessionCookie,CancellationToken ct); ValueTask<string?> ReadAsync(Guid profileId,CancellationToken ct); ValueTask ForgetAsync(Guid profileId,CancellationToken ct); }

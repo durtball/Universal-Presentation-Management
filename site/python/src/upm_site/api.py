@@ -42,6 +42,7 @@ from upm_shared.media_storage_client import (
     MediaStorageClient,
     MediaStorageUnavailable,
 )
+from upm_site.agent_control import register_agent_control_routes
 from upm_site.auth import (
     authenticate,
     bootstrap,
@@ -283,6 +284,7 @@ def create_app(
     async def site_authentication(request: Request, call_next):
         if (
             request.url.path in {"/health", "/api/v1/auth/login"}
+            or request.url.path.startswith("/api/v1/agent/")
             or not get_settings().auth_required
         ):
             return await call_next(request)
@@ -896,6 +898,7 @@ const rows=await r.json(),out=document.querySelector('#o');out.replaceChildren()
 for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
+    register_agent_control_routes(app, get_session, transaction)
     register_program_routes(app, get_session)
     register_operations_routes(app, get_session, transaction)
     register_presentation_media_routes(app, get_session, transaction, get_settings)

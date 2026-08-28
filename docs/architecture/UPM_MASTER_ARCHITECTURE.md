@@ -172,9 +172,13 @@ Local operational authority for a physical venue, hotel, or event location.
 
 A Site owns the local operational environment required to run an event independently.
 
+### UPM Site Manager
+
+Native Windows operator, high-volume file-management, and Site-mediated room-control application. It uses Site HTTP/media APIs and a durable client-owned transfer queue. It never connects inbound to Agent devices, accesses Site PostgreSQL or filesystem paths, or uses SMB for managed transfers.
+
 ### UPM Agent
 
-Windows-compatible managed operational client used for presentation, device, transfer, and room workflows.
+A separate presentation-computer product: a lightweight background service for authenticated outbound Site communication, durable commands, cache, and saveback, plus an interactive per-user companion for PowerPoint operations. The supported control path is Site Manager → Site → Agent. Agent online state is derived only from fresh heartbeat telemetry. Review saveback always names its base immutable version; concurrent revisions produce a preserved, explicit conflict rather than overwrite.
 
 ### UPM Room Client / Room Endpoint
 
