@@ -85,6 +85,7 @@ from upm_site.persistence.models import (
 )
 from upm_site.presentation_media_api import register_presentation_media_routes
 from upm_site.program_api import register_program_routes
+from upm_site.rotation_api import register_rotation_routes
 from upm_site.sync import (
     apply_central_event,
     bootstrap_identity,
@@ -901,6 +902,7 @@ pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></bo
     register_agent_control_routes(app, get_session, transaction)
     register_program_routes(app, get_session)
     register_operations_routes(app, get_session, transaction)
+    register_rotation_routes(app, get_session, transaction)
     register_presentation_media_routes(app, get_session, transaction, get_settings)
     register_log_routes(app, get_session)
     register_user_routes(app, get_session, transaction, get_settings)

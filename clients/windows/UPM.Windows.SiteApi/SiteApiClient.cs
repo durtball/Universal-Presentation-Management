@@ -350,8 +350,59 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public Task<JsonElement> GetRoomAsync(Guid roomId, CancellationToken cancellationToken) =>
       GetAsync<JsonElement>($"api/v1/rooms/{roomId}", cancellationToken);
 
+  public Task<JsonElement> GetEffectiveRotationAsync(
+      Guid eventId,
+      DateOnly eventDay,
+      Guid? roomId,
+      Guid? sessionId,
+      CancellationToken cancellationToken)
+  {
+    var query = $"event_day={eventDay:yyyy-MM-dd}";
+    if (roomId.HasValue) query += $"&room_id={roomId.Value}";
+    if (sessionId.HasValue) query += $"&session_id={sessionId.Value}";
+    return GetAsync<JsonElement>($"api/v1/events/{eventId}/rotating-slides?{query}", cancellationToken);
+  }
+
   public Task<JsonElement> GetEventProgramAsync(Guid eventId, CancellationToken cancellationToken) =>
       GetAsync<JsonElement>($"api/v1/events/{eventId}/program", cancellationToken);
+
+  public Task<JsonElement> GetMediaIntakeAsync(Guid eventId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/events/{eventId}/media/intake?limit=100", cancellationToken);
+
+  public Task<JsonElement> FindPresentationEntriesAsync(
+      Guid eventId,
+      string search,
+      CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>(
+          $"api/v1/events/{eventId}/presentation-lookup?search={Uri.EscapeDataString(search)}&limit=50",
+          cancellationToken);
+
+  public async Task<JsonElement> ConfirmMediaAssignmentAsync(
+      Guid mediaId,
+      Guid presentationId,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/confirmation");
+    request.Content = JsonContent.Create(new { presentation_id = presentationId }, options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "media assignment confirmation");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
+  public async Task<JsonElement> ChangeMediaAssignmentAsync(
+      Guid mediaId,
+      Guid presentationId,
+      string idempotencyKey,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/reassignment");
+    request.Content = JsonContent.Create(
+        new { presentation_id = presentationId, idempotency_key = idempotencyKey },
+        options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "media assignment change");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
 
   public async Task<IReadOnlyList<JsonElement>> GetPresentationOperationsAsync(
       Guid eventId,

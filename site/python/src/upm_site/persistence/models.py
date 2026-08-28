@@ -1,6 +1,6 @@
 """Site-local persistence models required for autonomous event operation."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum as PythonEnum
 from uuid import UUID
@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -479,6 +480,56 @@ class Presentation(SiteRecordMixin, SiteBase):
 
     session: Mapped[Session | None] = relationship(back_populates="presentations")
     versions: Mapped[list["PresentationVersion"]] = relationship(back_populates="presentation")
+
+
+class RotationAssignment(SiteRecordMixin, SiteBase):
+    """Central default or Site-local rotating-slide override, preserved independently."""
+
+    __tablename__ = "rotation_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "source_authority IN ('central', 'site')",
+            name="rotation_assignment_valid_authority",
+        ),
+        CheckConstraint(
+            "(scope = 'event_day' AND room_id IS NULL AND session_id IS NULL) OR "
+            "(scope = 'room_day' AND room_id IS NOT NULL AND session_id IS NULL) OR "
+            "(scope = 'session' AND room_id IS NULL AND session_id IS NOT NULL)",
+            name="rotation_assignment_valid_scope",
+        ),
+        Index(
+            "ix_site_rotation_effective",
+            "event_id",
+            "event_day",
+            "room_id",
+            "session_id",
+            "source_authority",
+            "active",
+        ),
+    )
+
+    rotation_assignment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    central_assignment_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_day: Mapped[date] = mapped_column(Date, nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    room_id: Mapped[UUID | None] = mapped_column(ForeignKey("rooms.room_id", ondelete="RESTRICT"))
+    session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT")
+    )
+    presentation_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT")
+    )
+    source_authority: Mapped[str] = mapped_column(String(16), nullable=False)
+    override_state: Mapped[str] = mapped_column(String(16), nullable=False, default="configured")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sync_state: Mapped[SyncState] = mapped_column(
+        upm_enum(SyncState, length=24), default=SyncState.LOCAL, nullable=False
+    )
 
 
 class PresentationSession(SiteRecordMixin, SiteBase):

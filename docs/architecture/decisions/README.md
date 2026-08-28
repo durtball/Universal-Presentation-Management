@@ -25,3 +25,5 @@ New decisions must not silently weaken Central/Site separation, Site offline aut
 - [ADR-0016: Durable presentation media Intake disposition](ADR-0016-durable-presentation-media-intake.md) — Central and Site publish uploads into durable Intake before an operator durably promotes or quarantines the same logical media identity.
 - [ADR-0016: Deployment-local structured operational logs](ADR-0016-deployment-local-operational-logs.md) — Central and Site independently retain sanitized, correlated diagnostics separate from audit history and container stdout.
 - [ADR-0017: Native Site Manager and durable Agent control plane](ADR-0017-windows-site-manager-agent-control-plane.md) — separates Site Manager and Agent products, requires Site-mediated durable control, heartbeat-derived presence, and conflict-safe Agent saveback.
+
+- [ADR-0018: Row Presentation Entries and Rotating-Slide Inheritance](ADR-0018-row-presentation-entries-and-rotating-slides.md)

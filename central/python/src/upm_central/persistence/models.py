@@ -1,6 +1,6 @@
 """Central persistence models with globally authoritative identity and coordination data."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum as PythonEnum
 from uuid import UUID
@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -668,6 +669,49 @@ class Presentation(CentralRecordMixin, CentralBase):
     presenter_links: Mapped[list["PresentationPresenter"]] = relationship(
         back_populates="presentation"
     )
+
+
+class RotationAssignment(CentralRecordMixin, CentralBase):
+    """Central-managed rotating-slide default at event/day, room/day, or Session scope."""
+
+    __tablename__ = "rotation_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "source_authority = 'central'", name="rotation_assignment_central_authority"
+        ),
+        CheckConstraint(
+            "(scope = 'event_day' AND room_id IS NULL AND session_id IS NULL) OR "
+            "(scope = 'room_day' AND room_id IS NOT NULL AND session_id IS NULL) OR "
+            "(scope = 'session' AND room_id IS NULL AND session_id IS NOT NULL)",
+            name="rotation_assignment_valid_scope",
+        ),
+        Index(
+            "ix_central_rotation_effective",
+            "event_id",
+            "event_day",
+            "room_id",
+            "session_id",
+            "active",
+        ),
+    )
+
+    rotation_assignment_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT"), nullable=False
+    )
+    event_day: Mapped[date] = mapped_column(Date, nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    room_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    session_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="RESTRICT")
+    )
+    presentation_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("presentation_versions.presentation_version_id", ondelete="RESTRICT")
+    )
+    source_authority: Mapped[str] = mapped_column(String(16), nullable=False, default="central")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class PresentationSession(CentralRecordMixin, CentralBase):

@@ -15,6 +15,7 @@ from upm_central.persistence.models import (
     EventParticipation,
     ExternalIdentifier,
     Presentation,
+    RotationAssignment,
     Site,
     SiteRoomMapping,
     utc_now,
@@ -36,6 +37,7 @@ from upm_shared.contracts.deployments import (
     PresentationSessionSnapshot,
     PresentationSnapshot,
     PresentationVersionSnapshot,
+    RotationAssignmentSnapshot,
     SessionParticipantSnapshot,
     SessionSnapshot,
     SiteUserSnapshot,
@@ -132,6 +134,14 @@ def build_snapshot(
             selectinload(Presentation.presenter_links),
         )
         .order_by(Presentation.presentation_id)
+    ).all()
+    rotations = session.scalars(
+        select(RotationAssignment)
+        .where(
+            RotationAssignment.event_id == event.event_id,
+            RotationAssignment.active.is_(True),
+        )
+        .order_by(RotationAssignment.rotation_assignment_id)
     ).all()
     participations = sorted(event.participations, key=lambda item: str(item.event_participation_id))
     entity_ids = {
@@ -303,6 +313,20 @@ def build_snapshot(
                 ],
             )
             for item in presentations
+        ],
+        rotation_assignments=[
+            RotationAssignmentSnapshot(
+                rotation_assignment_id=item.rotation_assignment_id,
+                event_day=item.event_day,
+                scope=item.scope,
+                room_id=item.room_id,
+                session_id=item.session_id,
+                presentation_version_id=item.presentation_version_id,
+                source_authority="central",
+                active=item.active,
+                central_revision=item.revision,
+            )
+            for item in rotations
         ],
         external_identifiers=[
             ExternalIdentifierSnapshot(

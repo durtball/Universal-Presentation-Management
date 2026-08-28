@@ -15,6 +15,7 @@ public sealed partial class IntakePage : Page
 {
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly LocalStateStore store = App.Services.GetRequiredService<LocalStateStore>();
+  private readonly List<SiteIntakeRow> siteIntake = [];
 
   public IntakePage()
   {
@@ -122,6 +123,62 @@ public sealed partial class IntakePage : Page
 
     EmptyState.Visibility = Queue.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     QueueStatus.Text = $"{transfers.Count(item => item.State == TransferState.Queued)} queued  •  {transfers.Count(item => item.State is TransferState.Hashing or TransferState.Uploading or TransferState.Verifying)} active  •  {transfers.Count(item => item.State == TransferState.Failed)} failed";
+    await ReloadSiteIntakeAsync();
+  }
+
+  private async Task ReloadSiteIntakeAsync()
+  {
+    siteIntake.Clear();
+    SiteIntakeList.Items.Clear();
+    if (context.ActiveClient is not { } api || context.SelectedEventId is not Guid eventId)
+    {
+      return;
+    }
+    var payload = await api.GetMediaIntakeAsync(eventId, CancellationToken.None);
+    foreach (var item in payload.Items())
+    {
+      var suggestion = item.Child("suggestion");
+      var row = new SiteIntakeRow
+      {
+        MediaId = item.Id("media_object_id"),
+        PresentationId = suggestion.Id("presentation_id"),
+        Filename = item.Text("filename"),
+        RelativePath = item.Text("source_relative_path"),
+        MatchState = item.Text("match_state", "UNASSIGNED").ToUpperInvariant(),
+        Evidence = item.Text("match_reason", "No confident match evidence"),
+        Suggested = suggestion.ValueKind == System.Text.Json.JsonValueKind.Object
+            ? $"{string.Join(", ", suggestion.Items("presenters").Select(value => value.ToString()))}\n{suggestion.Text("title")}\n{suggestion.Text("session_title")}  •  {suggestion.Text("room")}  •  {JsonProjection.LocalTime(suggestion.Text("starts_at", ""))}\nPresentation: {suggestion.Text("presentation_identifier")}"
+            : "No suggested Presentation Entry",
+      };
+      siteIntake.Add(row);
+      SiteIntakeList.Items.Add(row);
+    }
+  }
+
+  private void OnSiteIntakeSelection(object sender, SelectionChangedEventArgs args)
+  {
+    if (SiteIntakeList.SelectedItem is not SiteIntakeRow row)
+    {
+      ConfirmButton.IsEnabled = false;
+      return;
+    }
+    InspectFile.Text = row.Filename;
+    InspectPath.Text = row.RelativePath;
+    InspectEvidence.Text = row.Evidence;
+    InspectTarget.Text = row.Suggested;
+    ConfirmButton.IsEnabled = row.MediaId.HasValue && row.PresentationId.HasValue;
+  }
+
+  private async void OnConfirmSuggestion(object sender, RoutedEventArgs args)
+  {
+    if (SiteIntakeList.SelectedItem is not SiteIntakeRow row ||
+        row.MediaId is not Guid mediaId || row.PresentationId is not Guid presentationId ||
+        context.ActiveClient is not { } api)
+    {
+      return;
+    }
+    await api.ConfirmMediaAssignmentAsync(mediaId, presentationId, CancellationToken.None);
+    await ReloadSiteIntakeAsync();
   }
 }
 
@@ -132,4 +189,15 @@ public sealed class IntakeRow
   public string Status { get; set; } = "UNKNOWN";
   public double Progress { get; set; }
   public Brush StatusBrush { get; set; } = new SolidColorBrush(Colors.Gray);
+}
+
+public sealed class SiteIntakeRow
+{
+  public Guid? MediaId { get; set; }
+  public Guid? PresentationId { get; set; }
+  public string Filename { get; set; } = "—";
+  public string RelativePath { get; set; } = "—";
+  public string MatchState { get; set; } = "UNASSIGNED";
+  public string Evidence { get; set; } = "—";
+  public string Suggested { get; set; } = "—";
 }

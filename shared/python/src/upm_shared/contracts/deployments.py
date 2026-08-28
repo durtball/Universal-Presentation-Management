@@ -1,6 +1,6 @@
 """Versioned Central-to-Site event deployment contracts."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -135,6 +135,29 @@ class PresentationSnapshot(DeploymentModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class RotationAssignmentSnapshot(DeploymentModel):
+    rotation_assignment_id: UUID
+    event_day: date
+    scope: Literal["event_day", "room_day", "session"]
+    room_id: UUID | None = None
+    session_id: UUID | None = None
+    presentation_version_id: UUID | None = None
+    source_authority: Literal["central"] = "central"
+    active: bool = True
+    central_revision: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def scope_references_are_valid(self):
+        valid = (
+            (self.scope == "event_day" and self.room_id is None and self.session_id is None)
+            or (self.scope == "room_day" and self.room_id is not None and self.session_id is None)
+            or (self.scope == "session" and self.room_id is None and self.session_id is not None)
+        )
+        if not valid:
+            raise ValueError("rotation assignment has invalid scope references")
+        return self
+
+
 class EventDeploymentSnapshot(DeploymentModel):
     schema_version: Literal[1] = EVENT_DEPLOYMENT_SCHEMA_VERSION
     deployment_id: UUID
@@ -154,6 +177,7 @@ class EventDeploymentSnapshot(DeploymentModel):
     participations: list[ParticipationSnapshot] = Field(default_factory=list)
     sessions: list[SessionSnapshot] = Field(default_factory=list)
     presentations: list[PresentationSnapshot] = Field(default_factory=list)
+    rotation_assignments: list[RotationAssignmentSnapshot] = Field(default_factory=list)
     external_identifiers: list[ExternalIdentifierSnapshot] = Field(default_factory=list)
     room_configuration: dict[str, object] = Field(default_factory=dict)
     signage_configuration: dict[str, object] = Field(default_factory=dict)
@@ -179,6 +203,11 @@ class EventDeploymentSnapshot(DeploymentModel):
             for item in self.presentations
         ):
             raise ValueError("presentation references an undeployed session")
+        if any(
+            item.session_id is not None and item.session_id not in sessions
+            for item in self.rotation_assignments
+        ):
+            raise ValueError("rotation assignment references an undeployed session")
         if any(
             link.session_id not in sessions for item in self.presentations for link in item.sessions
         ):

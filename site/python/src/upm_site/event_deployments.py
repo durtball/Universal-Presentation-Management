@@ -38,6 +38,7 @@ from upm_site.persistence.models import (
     PresentationVersion,
     Room,
     RoomAssignment,
+    RotationAssignment,
     SessionParticipant,
     User,
     utc_now,
@@ -604,6 +605,48 @@ def _upsert_snapshot(
             local.external_id = item.external_id
             local.active = True
             local.revision = max(local.revision, item.central_revision)
+    deployed_rotation_ids = {item.rotation_assignment_id for item in snapshot.rotation_assignments}
+    for existing in session.scalars(
+        select(RotationAssignment).where(
+            RotationAssignment.event_id == snapshot.event_id,
+            RotationAssignment.source_authority == "central",
+        )
+    ):
+        if existing.central_assignment_id not in deployed_rotation_ids:
+            existing.active = False
+            existing.override_state = "cleared"
+    for item in snapshot.rotation_assignments:
+        local = session.scalar(
+            select(RotationAssignment).where(
+                RotationAssignment.central_assignment_id == item.rotation_assignment_id
+            )
+        )
+        if local is None:
+            local = RotationAssignment(
+                central_assignment_id=item.rotation_assignment_id,
+                event_id=snapshot.event_id,
+                event_day=item.event_day,
+                scope=item.scope,
+                room_id=item.room_id,
+                session_id=item.session_id,
+                presentation_version_id=item.presentation_version_id,
+                source_authority="central",
+                override_state="configured",
+                active=item.active,
+                revision=item.central_revision,
+                sync_state=SyncState.SYNCHRONIZED,
+            )
+            session.add(local)
+        else:
+            local.event_day = item.event_day
+            local.scope = item.scope
+            local.room_id = item.room_id
+            local.session_id = item.session_id
+            local.presentation_version_id = item.presentation_version_id
+            local.override_state = "configured"
+            local.active = item.active
+            local.revision = max(local.revision, item.central_revision)
+            local.sync_state = SyncState.SYNCHRONIZED
     return {
         "people": len(snapshot.people),
         "participants": len(snapshot.participations),
@@ -613,6 +656,7 @@ def _upsert_snapshot(
         "presentations": len(snapshot.presentations),
         "presentation_sessions": sum(len(item.sessions) for item in snapshot.presentations),
         "presentation_presenters": sum(len(item.presenters) for item in snapshot.presentations),
+        "rotation_assignments": len(snapshot.rotation_assignments),
         "external_identifiers": len(snapshot.external_identifiers),
         "rooms": mapped_rooms,
         "unresolved_rooms": unresolved_rooms,

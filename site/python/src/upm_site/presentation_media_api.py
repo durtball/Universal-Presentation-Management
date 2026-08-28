@@ -9,7 +9,7 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -72,6 +72,8 @@ class SitePresentationCreate(BaseModel):
     session_id: UUID | None = None
     title: Annotated[str, Field(min_length=1, max_length=255)]
     source_presentation_id: Annotated[str | None, Field(max_length=512)] = None
+    presenter_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    media_object_id: UUID | None = None
 
 
 class SiteMediaConfirmation(BaseModel):
@@ -84,6 +86,11 @@ class SiteMediaConfirmationBatch(BaseModel):
 
 class SiteMediaRejection(BaseModel):
     reason: str | None = Field(default=None, max_length=2048)
+
+
+class SiteMediaReassignment(BaseModel):
+    presentation_id: UUID
+    idempotency_key: Annotated[str, Field(min_length=8, max_length=255)]
 
 
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
@@ -400,6 +407,23 @@ def register_presentation_media_routes(
         )
         session.add(item)
         session.flush()
+        for order, participant_id in enumerate(payload.presenter_ids):
+            participant = session.get(EventParticipation, participant_id)
+            if participant is None or participant.event_id != event_id:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "presenter is not an Event participant",
+                )
+            session.add(
+                PresentationPresenter(
+                    presentation_id=item.presentation_id,
+                    event_participation_id=participant_id,
+                    role="presenter",
+                    presenter_order=order,
+                    primary_presenter=order == 0,
+                    active=True,
+                )
+            )
         SiteQueue(session).enqueue_outbox(
             event_type="site.presentation.upserted",
             aggregate_type="presentation",
@@ -422,12 +446,17 @@ def register_presentation_media_routes(
                 },
             ),
         )
-        return {
+        result = {
             "presentation_id": item.presentation_id,
             "presentation_identifier": item.presentation_identifier,
             "presentation_identifier_source": item.presentation_identifier_source,
             "sync_state": item.sync_state,
         }
+        if payload.media_object_id:
+            result["media_assignment"] = confirm_one(
+                session, payload.media_object_id, item.presentation_id
+            )
+        return result
 
     @app.post("/api/v1/presentations/{presentation_id}/versions", status_code=201, tags=["media"])
     def create_local_version(presentation_id: UUID, session: WriteSession) -> dict[str, object]:
@@ -820,6 +849,92 @@ def register_presentation_media_routes(
         media_id: UUID, payload: SiteMediaConfirmation, session: WriteSession
     ) -> dict[str, object]:
         return confirm_one(session, media_id, payload.presentation_id)
+
+    @app.post("/api/v1/media/{media_id}/reassignment", tags=["media"])
+    def reassign_media(
+        media_id: UUID,
+        payload: SiteMediaReassignment,
+        request: Request,
+        session: WriteSession,
+    ) -> dict[str, object]:
+        media = session.get(MediaObject, media_id, with_for_update=True)
+        target = session.get(Presentation, payload.presentation_id)
+        if media is None or media.deleted_at is not None:
+            raise HTTPException(404, "media intake item not found")
+        if target is None or target.event_id != media.event_id:
+            raise HTTPException(422, "target Presentation Entry is not in the media Event")
+        prior_audit = session.scalar(
+            select(AuditRecord).where(
+                AuditRecord.action == "site.presentation_media.reassigned",
+                AuditRecord.target_id == media_id,
+                AuditRecord.after_context["idempotency_key"].as_string() == payload.idempotency_key,
+            )
+        )
+        if prior_audit:
+            return {
+                **(prior_audit.after_context or {}),
+                "media_object_id": media_id,
+                "duplicate": True,
+            }
+        previous_assets = session.scalars(
+            select(PresentationAsset).where(PresentationAsset.media_object_id == media_id)
+        ).all()
+        previous_presentations = [
+            session.get(PresentationVersion, asset.presentation_version_id).presentation_id
+            for asset in previous_assets
+        ]
+        session.execute(
+            select(Presentation.presentation_id)
+            .where(Presentation.presentation_id == target.presentation_id)
+            .with_for_update()
+        )
+        number = (
+            session.scalar(
+                select(func.max(PresentationVersion.version_number)).where(
+                    PresentationVersion.presentation_id == target.presentation_id
+                )
+            )
+            or 0
+        ) + 1
+        version = PresentationVersion(
+            presentation_id=target.presentation_id,
+            version_number=number,
+            sync_state=SyncState.PENDING,
+        )
+        session.add(version)
+        session.flush()
+        session.add(
+            PresentationAsset(
+                presentation_version_id=version.presentation_version_id,
+                media_object_id=media_id,
+                original_filename=media.original_filename,
+                kind=intake_asset_kind(media.original_filename),
+            )
+        )
+        target.workflow_status = PresentationWorkflowStatus.RECEIVED
+        result = {
+            "presentation_id": str(target.presentation_id),
+            "presentation_version_id": str(version.presentation_version_id),
+            "version_number": number,
+            "previous_presentation_ids": [str(value) for value in previous_presentations],
+            "idempotency_key": payload.idempotency_key,
+        }
+        identity = session.scalar(select(LocalSiteIdentity))
+        session.add(
+            AuditRecord(
+                site_id=identity.site_id,
+                event_id=media.event_id,
+                actor_id=getattr(request.state, "site_user_id", "site-operator"),
+                action="site.presentation_media.reassigned",
+                target_type="media_object",
+                target_id=media_id,
+                before_context={
+                    "presentation_ids": [str(value) for value in previous_presentations]
+                },
+                after_context=result,
+            )
+        )
+        return {"media_object_id": media_id, **result, "duplicate": False}
 
     @app.post("/api/v1/media/confirmations", tags=["media"])
     def confirm_media_batch(

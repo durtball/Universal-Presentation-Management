@@ -52,6 +52,23 @@ public sealed partial class RoomsPage : Page
         IReadOnlyList<System.Text.Json.JsonElement> eventSessions = item.Id("room_id") is Guid roomId && selectedSessions.TryGetValue(roomId, out var mapped)
             ? mapped
             : [];
+        var rotation = "Effective: —  •  Source: INHERITED/UNKNOWN";
+        var nextDate = next.NullableDate("starts_at");
+        if (context.SelectedEventId is Guid selectedEventId && item.Id("room_id") is Guid selectedRoomId && nextDate.HasValue)
+        {
+          try
+          {
+            var rotationPayload = await api.GetEffectiveRotationAsync(selectedEventId, DateOnly.FromDateTime(nextDate.Value.Date), selectedRoomId, next.Id("session_id"), CancellationToken.None);
+            var effective = rotationPayload.Child("effective");
+            rotation = effective.ValueKind == System.Text.Json.JsonValueKind.Object
+                ? $"Effective version: {effective.Text("presentation_version_id")}  •  Source: {rotationPayload.Text("effective_source", "INHERITED").ToUpperInvariant()}"
+                : "Effective: —  •  Source: NONE";
+          }
+          catch (SiteEndpointException)
+          {
+            rotation = "Effective: —  •  Source: SITE UPDATE REQUIRED";
+          }
+        }
         rooms.Add(new RoomRow
         {
           Label = item.Text("label"), Origin = context.SelectedEventId.HasValue
@@ -61,6 +78,7 @@ public sealed partial class RoomsPage : Page
           Telemetry = Telemetry(endpoints),
           Readiness = $"{summary.Number("ready_count")} ready / {summary.Number("presentation_count")} presentations / {summary.Number("missing_count")} missing",
           Errors = $"{summary.Number("error_count")} errors", NextSession = next.Text("title", "No upcoming session"), NextTime = JsonProjection.LocalTime(next.Text("starts_at", "")),
+          Rotation = rotation,
         });
       }
       CountText.Text = $"{rooms.Count} Site rooms" + (context.SelectedEventId.HasValue ? " • selected event readiness" : " • Site-level infrastructure");
@@ -74,4 +92,4 @@ public sealed partial class RoomsPage : Page
   private void Show(string message, InfoBarSeverity severity) { StateBar.Title = severity == InfoBarSeverity.Error ? "ROOM API ERROR" : "ROOMS"; StateBar.Message = message; StateBar.Severity = severity; StateBar.IsOpen = true; }
 }
 
-public sealed class RoomRow { public string Label { get; set; } = ""; public string Origin { get; set; } = ""; public string Health { get; set; } = ""; public string Primary { get; set; } = ""; public string Backup { get; set; } = ""; public string Telemetry { get; set; } = ""; public string Readiness { get; set; } = ""; public string Errors { get; set; } = ""; public string NextSession { get; set; } = ""; public string NextTime { get; set; } = ""; }
+public sealed class RoomRow { public string Label { get; set; } = ""; public string Origin { get; set; } = ""; public string Health { get; set; } = ""; public string Primary { get; set; } = ""; public string Backup { get; set; } = ""; public string Telemetry { get; set; } = ""; public string Readiness { get; set; } = ""; public string Errors { get; set; } = ""; public string NextSession { get; set; } = ""; public string NextTime { get; set; } = ""; public string Rotation { get; set; } = "Effective: —"; }

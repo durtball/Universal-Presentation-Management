@@ -29,6 +29,7 @@ from upm_central.persistence.models import (
     Presentation,
     PresentationPresenter,
     PresentationSession,
+    PresentationVersion,
     ReconciliationDecision,
     SessionParticipant,
     utc_now,
@@ -73,11 +74,11 @@ def _header_key(value: str) -> str:
 # to the broad program title/date concepts.
 COLUMN_ALIASES = {
     "presentation_date_added": "presentation_date_added",
-    "presentation_id": "session_code",
-    "presentationid": "session_code",
+    "presentation_id": "external_presentation_id",
+    "presentationid": "external_presentation_id",
     "session_id": "session_code",
     "sessionid": "session_code",
-    "presentation_title": "session_title",
+    "presentation_title": "presentation_title",
     "session_title": "session_title",
     "session_name": "session_title",
     "presenterid": "external_id",
@@ -993,70 +994,118 @@ def _ensure_wide_row_participant(
     return participant
 
 
-def _materialize_session_presentation(
+def _row_presentation_identity(batch: ImportBatch, row: ImportRow) -> str:
+    """Stable identity for the same physical source row across recommits/reimports."""
+    worksheet = str((row.raw_values or {}).get("__worksheet") or "")
+    return f"{batch.source_sha256}:{worksheet}:{row.source_row_number}"
+
+
+def _derived_session_code(values: dict[str, object]) -> str | None:
+    """Derive a source-scoped Session grouping key, never a Presentation identity."""
+    title = str(values.get("session_title") or "").strip()
+    if not title:
+        return None
+    signature = "|".join(
+        str(values.get(field) or "").strip().casefold()
+        for field in (
+            "session_title",
+            "session_date",
+            "starts_at",
+            "ends_at",
+            "location_name",
+            "track",
+        )
+    )
+    return f"IMPORT-SESSION-{hashlib.sha256(signature.encode()).hexdigest()[:16]}"
+
+
+def presentation_group_key(values: dict[str, object], row_identity: str) -> str:
+    """Return explicit shared identity or the unique durable source-row identity."""
+    explicit = str(
+        values.get("external_presentation_id") or values.get("presentation_code") or ""
+    ).strip()
+    return f"external:{explicit}" if explicit else f"row:{row_identity}"
+
+
+def _materialize_row_presentation(
     session: Session,
     event: Event,
+    batch: ImportBatch,
+    row: ImportRow,
     program_session: ProgramSession,
+    values: dict[str, object],
     *,
     actor: str,
-    import_batch_id: UUID | None = None,
 ) -> Presentation:
-    """Ensure an imported presentation-bearing Session has one canonical Presentation.
-
-    The Session's stable Event-scoped program code is the imported Presentation identity for
-    roster-shaped sources. Existing explicit Presentations linked to the Session are reused; this
-    helper never creates a second Presentation for a repeated import or repair request.
-    """
-    item = session.scalar(
-        select(Presentation)
-        .where(
+    """Create one expected upload slot per meaningful row unless an explicit key groups rows."""
+    row_identity = _row_presentation_identity(batch, row)
+    group_key = presentation_group_key(values, row_identity)
+    explicit_key = str(
+        values.get("external_presentation_id") or values.get("presentation_code") or ""
+    ).strip()
+    candidates = session.scalars(
+        select(Presentation).where(
             Presentation.event_id == event.event_id,
-            Presentation.session_id == program_session.session_id,
+            Presentation.source == "import",
         )
-        .order_by(Presentation.created_at, Presentation.presentation_id)
-        .limit(1)
+    ).all()
+    item = next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate.source_metadata or {}).get("import_row_identity") == row_identity
+        ),
+        None,
     )
-    if item is None and program_session.session_code:
-        item = session.scalar(
-            select(Presentation).where(
-                Presentation.event_id == event.event_id,
-                Presentation.presentation_code == program_session.session_code,
-            )
+    if item is None and explicit_key:
+        item = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.external_presentation_id == explicit_key
+            ),
+            None,
         )
     created = item is None
     if item is None:
         presentation_id = new_uuid7()
         identifier, identifier_source = allocate_presentation_identifier(
-            program_session.session_code, "CENTRAL", presentation_id
+            explicit_key or None, "CENTRAL", presentation_id
         )
         item = Presentation(
             presentation_id=presentation_id,
             event_id=event.event_id,
             session_id=program_session.session_id,
-            title=program_session.title,
-            presentation_code=program_session.session_code,
+            title=str(
+                values.get("presentation_title")
+                or values.get("title")
+                or values.get("session_title")
+                or program_session.title
+            ),
+            presentation_code=explicit_key or None,
             presentation_identifier=identifier,
             presentation_identifier_source=identifier_source,
-            external_presentation_id=program_session.session_code,
+            external_presentation_id=explicit_key or None,
             scheduled_at=program_session.starts_at,
             workflow_status=PresentationWorkflowStatus.EXPECTED,
             source="import",
-            source_metadata={"materialized_from_session_id": str(program_session.session_id)},
+            source_metadata={
+                "import_batch_id": str(batch.import_batch_id),
+                "import_row_id": str(row.import_row_id),
+                "import_row_identity": row_identity,
+                "presentation_group_key": group_key,
+                "source_row_number": row.source_row_number,
+                "materialized_for_session_id": str(program_session.session_id),
+                "explicit_shared_presentation": bool(explicit_key),
+            },
         )
         session.add(item)
         session.flush()
-    else:
-        if item.event_id != event.event_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="presentation event mismatch")
-        item.session_id = program_session.session_id
-        if (item.source_metadata or {}).get("materialized_from_session_id"):
-            item.title = program_session.title
-            item.scheduled_at = program_session.starts_at
-    if import_batch_id:
-        item.source_metadata = {
-            **item.source_metadata,
-            "import_batch_id": str(import_batch_id),
-        }
+    elif item.session_id != program_session.session_id:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="explicit presentation key resolves to presentations in different Sessions",
+        )
     if (
         session.scalar(
             select(PresentationSession).where(
@@ -1075,42 +1124,42 @@ def _materialize_session_presentation(
                 source="import",
             )
         )
-    participants = session.scalars(
-        select(SessionParticipant)
-        .where(SessionParticipant.session_id == program_session.session_id)
-        .order_by(SessionParticipant.presenter_order, SessionParticipant.session_participant_id)
-    ).all()
-    for relationship in participants:
-        presenter = session.scalar(
-            select(PresentationPresenter).where(
-                PresentationPresenter.presentation_id == item.presentation_id,
-                PresentationPresenter.event_participation_id == relationship.event_participation_id,
-                PresentationPresenter.role == relationship.role,
+    participant_ids = [
+        UUID(value) for value in (row.committed_entity_ids or {}).get("event_participation_ids", [])
+    ]
+    for order, participant_id in enumerate(participant_ids):
+        if (
+            session.scalar(
+                select(PresentationPresenter).where(
+                    PresentationPresenter.presentation_id == item.presentation_id,
+                    PresentationPresenter.event_participation_id == participant_id,
+                )
             )
-        )
-        if presenter is None:
+            is None
+        ):
             session.add(
                 PresentationPresenter(
                     presentation_id=item.presentation_id,
-                    event_participation_id=relationship.event_participation_id,
-                    role=relationship.role,
-                    presenter_order=relationship.presenter_order,
-                    primary_presenter=relationship.primary_presenter,
+                    event_participation_id=participant_id,
+                    role="presenter",
+                    presenter_order=order,
+                    primary_presenter=order == 0,
                     source="import",
                 )
             )
-        elif presenter.source == "import":
-            presenter.presenter_order = relationship.presenter_order
-            presenter.primary_presenter = relationship.primary_presenter
     session.flush()
     if created:
         audit(
             session,
-            action="central.presentation.materialized_from_session",
+            action="central.presentation.materialized_from_import_row",
             target_type="presentation",
             target_id=item.presentation_id,
             event_id=event.event_id,
-            after={"session_id": str(program_session.session_id)},
+            after={
+                "session_id": str(program_session.session_id),
+                "import_row_id": str(row.import_row_id),
+                "explicit_shared_presentation": bool(explicit_key),
+            },
             actor=actor,
         )
     return item
@@ -1119,19 +1168,66 @@ def _materialize_session_presentation(
 def repair_event_presentation_materialization(
     session: Session, event: Event, *, actor: str = "central-admin"
 ) -> list[Presentation]:
-    """Idempotently repair imported Sessions created before the materialization invariant."""
-    repaired = []
-    imported_sessions = session.scalars(
-        select(ProgramSession).where(
-            ProgramSession.event_id == event.event_id,
-            ProgramSession.source == "import",
-            ProgramSession.session_code.is_not(None),
+    """Idempotently repair row slots without moving ambiguous legacy media."""
+    repaired: list[Presentation] = []
+    batches = session.scalars(
+        select(ImportBatch).where(
+            ImportBatch.event_id == event.event_id,
+            ImportBatch.status == ImportStatus.COMMITTED,
         )
     ).all()
-    for program_session in imported_sessions:
-        repaired.append(
-            _materialize_session_presentation(session, event, program_session, actor=actor)
-        )
+    for batch in batches:
+        rows = session.scalars(
+            select(ImportRow)
+            .where(ImportRow.import_batch_id == batch.import_batch_id)
+            .order_by(ImportRow.source_row_number)
+        ).all()
+        legacy_targets: dict[UUID, list[ImportRow]] = {}
+        for row in rows:
+            ids = row.committed_entity_ids or {}
+            if ids.get("presentation_id"):
+                legacy_targets.setdefault(UUID(str(ids["presentation_id"])), []).append(row)
+        for legacy_id, contributing in legacy_targets.items():
+            legacy = session.get(Presentation, legacy_id)
+            if legacy is not None and len(contributing) > 1:
+                has_media = session.scalar(
+                    select(PresentationVersion.presentation_version_id)
+                    .where(PresentationVersion.presentation_id == legacy_id)
+                    .limit(1)
+                )
+                if has_media:
+                    legacy.source_metadata = {
+                        **(legacy.source_metadata or {}),
+                        "row_level_reconciliation_state": "ambiguous_media_review_required",
+                        "collapsed_import_row_ids": [
+                            str(row.import_row_id) for row in contributing
+                        ],
+                    }
+        for row in rows:
+            ids = row.committed_entity_ids or {}
+            session_id = ids.get("session_id")
+            if not session_id or row.resolution_action in {
+                ReconciliationAction.IGNORE,
+                ReconciliationAction.REJECT,
+            }:
+                continue
+            values = dict(row.normalized_values)
+            if row.corrected_values:
+                values.update(row.corrected_values)
+            program_session = session.get(ProgramSession, UUID(str(session_id)))
+            if program_session is None:
+                continue
+            item = _materialize_row_presentation(
+                session,
+                event,
+                batch,
+                row,
+                program_session,
+                values,
+                actor=actor,
+            )
+            row.committed_entity_ids = {**ids, "presentation_id": str(item.presentation_id)}
+            repaired.append(item)
     return repaired
 
 
@@ -1397,21 +1493,40 @@ def commit_batch(
                     or values.get("session_title")
                 )
                 code = values.get("presentation_code") or None
+                explicit_presentation_key = values.get("external_presentation_id") or code or None
                 item = (
                     session.scalar(
                         select(Presentation).where(
                             Presentation.event_id == event.event_id,
-                            Presentation.presentation_code == code,
+                            Presentation.external_presentation_id == str(explicit_presentation_key),
                         )
                     )
-                    if code
+                    if explicit_presentation_key
                     else None
                 )
+                if item is None:
+                    row_identity = _row_presentation_identity(batch, row)
+                    item = next(
+                        (
+                            candidate
+                            for candidate in session.scalars(
+                                select(Presentation).where(
+                                    Presentation.event_id == event.event_id,
+                                    Presentation.source == "import",
+                                )
+                            )
+                            if (candidate.source_metadata or {}).get("import_row_identity")
+                            == row_identity
+                        ),
+                        None,
+                    )
                 created = item is None
                 if item is None:
                     presentation_id = new_uuid7()
                     identifier, identifier_source = allocate_presentation_identifier(
-                        str(code) if code else None, "CENTRAL", presentation_id
+                        str(explicit_presentation_key) if explicit_presentation_key else None,
+                        "CENTRAL",
+                        presentation_id,
                     )
                     item = Presentation(
                         presentation_id=presentation_id,
@@ -1420,10 +1535,17 @@ def commit_batch(
                         presentation_code=code,
                         presentation_identifier=identifier,
                         presentation_identifier_source=identifier_source,
-                        external_presentation_id=code,
+                        external_presentation_id=(
+                            str(explicit_presentation_key) if explicit_presentation_key else None
+                        ),
                         workflow_status=PresentationWorkflowStatus.EXPECTED,
                         source="import",
-                        source_metadata={"import_batch_id": str(batch.import_batch_id)},
+                        source_metadata={
+                            "import_batch_id": str(batch.import_batch_id),
+                            "import_row_id": str(row.import_row_id),
+                            "import_row_identity": _row_presentation_identity(batch, row),
+                            "explicit_shared_presentation": bool(explicit_presentation_key),
+                        },
                     )
                     session.add(item)
                 else:
@@ -1437,7 +1559,7 @@ def commit_batch(
                     else None
                 )
                 session.flush()
-                session_code = values.get("session_code")
+                session_code = values.get("session_code") or _derived_session_code(values)
                 target_session = None
                 if session_code:
                     target_session = session.scalar(
@@ -1585,30 +1707,37 @@ def commit_batch(
                 actor=actor,
             )
         session.flush()
-        imported_session_rows: dict[UUID, list[ImportRow]] = {}
         for imported_row in rows:
             session_id = (imported_row.committed_entity_ids or {}).get("session_id")
-            if session_id:
-                imported_session_rows.setdefault(UUID(str(session_id)), []).append(imported_row)
-        for session_id, contributing_rows in imported_session_rows.items():
-            program_session = session.get(ProgramSession, session_id)
+            if (imported_row.committed_entity_ids or {}).get("presentation_id"):
+                continue
+            if not session_id or imported_row.resolution_action in {
+                ReconciliationAction.IGNORE,
+                ReconciliationAction.REJECT,
+            }:
+                continue
+            program_session = session.get(ProgramSession, UUID(str(session_id)))
             if program_session is None:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
                     detail=f"committed Session {session_id} is unavailable",
                 )
-            presentation = _materialize_session_presentation(
+            values = dict(imported_row.normalized_values)
+            if imported_row.corrected_values:
+                values.update(imported_row.corrected_values)
+            presentation = _materialize_row_presentation(
                 session,
                 event,
+                batch,
+                imported_row,
                 program_session,
+                values,
                 actor=actor,
-                import_batch_id=batch.import_batch_id,
             )
-            for contributing_row in contributing_rows:
-                contributing_row.committed_entity_ids = {
-                    **contributing_row.committed_entity_ids,
-                    "presentation_id": str(presentation.presentation_id),
-                }
+            imported_row.committed_entity_ids = {
+                **imported_row.committed_entity_ids,
+                "presentation_id": str(presentation.presentation_id),
+            }
         missing_materialization = []
         for imported_row in rows:
             session_id = (imported_row.committed_entity_ids or {}).get("session_id")
