@@ -3,11 +3,12 @@
     <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><TextBlock Style="{StaticResource SectionTitleStyle}" Text="ROOM OPERATIONS"/><TextBlock x:Name="CountText" Foreground="{StaticResource MutedBrush}" Text="Site-authoritative rooms"/></StackPanel><Button Grid.Column="1" Click="OnRefresh" Content="REFRESH"/></Grid>
     <InfoBar x:Name="StateBar" Grid.Row="1" IsOpen="False"/>
     <ListView x:Name="RoomList" Grid.Row="2" SelectionMode="None">
-      <ListView.ItemTemplate><DataTemplate><Border Style="{StaticResource ControlRoomPanelStyle}" Padding="14" Margin="0,0,0,8"><Grid ColumnSpacing="14"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <ListView.ItemTemplate><DataTemplate><Border Style="{StaticResource ControlRoomPanelStyle}" Padding="10" Margin="0,0,0,4"><Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel><TextBlock FontSize="18" Text="{Binding Label}"/><TextBlock Foreground="{StaticResource MutedBrush}" Text="{Binding Origin}"/><TextBlock Foreground="{StaticResource AccentBrush}" Text="{Binding Health}"/></StackPanel>
         <StackPanel Grid.Column="1"><TextBlock Foreground="{StaticResource MutedBrush}" Text="AGENTS"/><TextBlock Text="{Binding Primary}"/><TextBlock Text="{Binding Backup}"/><TextBlock Text="{Binding Telemetry}"/></StackPanel>
         <StackPanel Grid.Column="2"><TextBlock Foreground="{StaticResource MutedBrush}" Text="READINESS"/><TextBlock Text="{Binding Readiness}"/><TextBlock Text="{Binding Errors}"/></StackPanel>
         <StackPanel Grid.Column="3"><TextBlock Foreground="{StaticResource MutedBrush}" Text="NEXT"/><TextBlock Text="{Binding NextSession}" TextWrapping="Wrap"/><TextBlock Text="{Binding NextTime}"/></StackPanel>
+        <Button Grid.Column="4" Content="ACTIONS" IsEnabled="False" ToolTipService.ToolTip="Select a presentation version and assigned Agent before issuing a durable Site command"/>
       </Grid></Border></DataTemplate></ListView.ItemTemplate>
     </ListView>
   </Grid>

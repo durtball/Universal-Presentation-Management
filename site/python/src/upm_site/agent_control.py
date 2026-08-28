@@ -512,6 +512,14 @@ def register_agent_control_routes(
                 select(Device).where(Device.device_id.in_([row.device_id for row in rows]))
             )
         }
+        runtimes = {
+            item.device_id: item
+            for item in s.scalars(
+                select(DeviceRuntimeState).where(
+                    DeviceRuntimeState.device_id.in_([row.device_id for row in rows])
+                )
+            )
+        }
         return {
             "items": [
                 {
@@ -525,17 +533,28 @@ def register_agent_control_routes(
                     "device_name": devices.get(row.device_id).display_name
                     if devices.get(row.device_id)
                     else None,
+                    "device_hostname": runtimes.get(row.device_id).hostname
+                    if runtimes.get(row.device_id)
+                    else None,
                     "room_id": row.room_id,
                     "room_label": rooms.get(row.room_id).label if rooms.get(row.room_id) else None,
                     "state": row.state,
                     "opened_at": row.opened_at,
                     "local_changes_at": row.local_changes_at,
+                    "working_filename": row.working_filename,
+                    "working_size_bytes": row.working_size_bytes,
+                    "working_sha256": row.working_sha256,
+                    "working_modified_at": row.working_modified_at,
                     "saveback_version_id": row.saveback_version_id,
                     "conflict_version_id": row.conflict_version_id,
                     "completed_at": row.completed_at,
+                    "last_error": runtimes.get(row.device_id).last_error
+                    if runtimes.get(row.device_id)
+                    else None,
                 }
                 for row in rows
-            ]
+            ],
+            "total": len(rows),
         }
 
     @app.get("/api/v1/review-sessions/{review_id}", tags=["reviews"])

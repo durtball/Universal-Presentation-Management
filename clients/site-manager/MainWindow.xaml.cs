@@ -32,6 +32,7 @@ public sealed partial class MainWindow : Window
   private readonly IOperatorContext operatorContext;
   private readonly ObservableCollection<SiteProfile> profiles = [];
   private readonly ObservableCollection<EventDeployment> events = [];
+  private readonly DispatcherTimer clock = new() { Interval = TimeSpan.FromSeconds(1) };
   private bool updatingSelectors;
 
   public MainWindow(
@@ -50,6 +51,9 @@ public sealed partial class MainWindow : Window
     connections.ConnectionChanged += OnConnectionChanged;
     ContentFrame.Navigate(typeof(DashboardPage));
     PrimaryNavigation.SelectedItem = PrimaryNavigation.MenuItems[0];
+    clock.Tick += (_, _) => UpdateClock();
+    clock.Start();
+    UpdateClock();
   }
 
   private async void OnWindowLoaded(object sender, RoutedEventArgs args)
@@ -226,11 +230,19 @@ public sealed partial class MainWindow : Window
       _ => ("DISCONNECTED", Colors.Gray, InfoBarSeverity.Informational),
     };
     ConnectionTitle.Text = title;
+    ConnectButton.Visibility = status.State == SiteConnectionState.Connected
+        ? Visibility.Collapsed
+        : Visibility.Visible;
     ConnectionIndicator.Fill = new SolidColorBrush(color);
     ConnectionDetail.Text = status.State == SiteConnectionState.Connected && status.Snapshot is not null
         ? $"{status.Snapshot.Registration.DisplayName} / {status.Profile?.BaseUri.Authority}"
         : status.Message;
     ToolTipService.SetToolTip(ConnectionStatus, status.TechnicalDetail ?? status.Message);
+    FooterSite.Text = status.Profile?.DisplayName?.ToUpperInvariant() ?? "NO SITE";
+    FooterOperator.Text = status.Session?.User.DisplayName ?? "Not authenticated";
+    StorageDetail.Text = status.Snapshot is null
+        ? "UNKNOWN"
+        : StorageSummary(status.Snapshot.MediaStorage);
     ConnectionInfoBar.Severity = severity;
     ConnectionInfoBar.Title = title;
     ConnectionInfoBar.Message = status.Message;
@@ -288,5 +300,25 @@ public sealed partial class MainWindow : Window
       ConnectionInfoBar.Severity = InfoBarSeverity.Error;
       ConnectionInfoBar.IsOpen = true;
     }
+  }
+
+  private void UpdateClock()
+  {
+    var now = DateTimeOffset.Now;
+    ClockText.Text = now.ToString("h:mm:ss tt");
+    DateText.Text = now.ToString("MMM d, yyyy");
+  }
+
+  private static string StorageSummary(System.Text.Json.JsonElement storage)
+  {
+    var available = storage.NullableBool("service_available");
+    if (available != true)
+    {
+      return available == false ? "UNAVAILABLE" : "UNKNOWN";
+    }
+
+    var roots = storage.Items("roots");
+    var free = roots.Sum(root => root.NullableLong("free_bytes") ?? 0);
+    return free > 0 ? $"HEALTHY  {JsonProjection.Bytes(free)} free" : "HEALTHY";
   }
 }

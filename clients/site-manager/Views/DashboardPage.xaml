@@ -1,76 +1,10 @@
-<Page
-    x:Class="UPM.SiteManager.Views.DashboardPage"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    SizeChanged="PageSizeChanged">
-    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="20" Spacing="14">
-            <Grid ColumnSpacing="12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <TextBlock Style="{StaticResource SectionTitleStyle}" Text="OPERATIONS OVERVIEW" />
-                    <TextBlock
-                        Margin="0,4,0,0"
-                        Foreground="{StaticResource MutedBrush}"
-                        Text="Live Site status and show-readiness projection" />
-                </StackPanel>
-                <Button x:Name="RefreshButton" Grid.Column="1" IsEnabled="False" Content="REFRESH" Click="OnRefreshClick" ToolTipService.ToolTip="Connect to a Site to refresh" />
-            </Grid>
-
-            <InfoBar x:Name="DashboardInfo" IsOpen="False" IsClosable="True" />
-
-            <GridView
-                x:Name="MetricGrid"
-                IsItemClickEnabled="False"
-                IsTabStop="False"
-                ItemsSource="{x:Bind Metrics}"
-                SelectionMode="None">
-                <GridView.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <ItemsWrapGrid
-                            ItemWidth="220"
-                            ItemHeight="122"
-                            MaximumRowsOrColumns="8"
-                            Orientation="Horizontal" />
-                    </ItemsPanelTemplate>
-                </GridView.ItemsPanel>
-                <GridView.ItemContainerStyle>
-                    <Style TargetType="GridViewItem">
-                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Margin" Value="0,0,10,10" />
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </GridView.ItemContainerStyle>
-                <GridView.ItemTemplate>
-                    <DataTemplate>
-                        <Border Style="{StaticResource ControlRoomPanelStyle}" Padding="15">
-                            <StackPanel>
-                                <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="12" Text="{Binding Label}" />
-                                <TextBlock Margin="0,5,0,0" Foreground="#E9F7FF" FontSize="29" Text="{Binding Value}" />
-                                <TextBlock Margin="0,3,0,0" Foreground="{Binding DetailBrush}" FontSize="12" Text="{Binding Detail}" TextTrimming="CharacterEllipsis" />
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
-                </GridView.ItemTemplate>
-            </GridView>
-
-            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="ROOM STATUS" />
-            <Border Style="{StaticResource ControlRoomPanelStyle}" MinHeight="210" Padding="24">
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="620" Spacing="9">
-                    <FontIcon Glyph="&#xE7F4;" FontSize="38" Foreground="{StaticResource VioletBrush}" />
-                    <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center" FontSize="19" FontWeight="SemiBold" Text="No live room projection" />
-                    <TextBlock
-                        x:Name="EmptyStateDetail"
-                        HorizontalAlignment="Center"
-                        Foreground="{StaticResource MutedBrush}"
-                        Text="Connect and select a deployed event to load room cards. Agent state remains UNKNOWN until fresh heartbeat telemetry is received."
-                        TextAlignment="Center"
-                        TextWrapping="Wrap" />
-                </StackPanel>
-            </Border>
-        </StackPanel>
-    </ScrollViewer>
+<Page x:Class="UPM.SiteManager.Views.DashboardPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" SizeChanged="PageSizeChanged">
+ <ScrollViewer HorizontalScrollBarVisibility="Disabled"><StackPanel Padding="12" Spacing="8">
+  <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Style="{StaticResource SectionTitleStyle}" Text="▣  OPERATIONS OVERVIEW"/><Button x:Name="RefreshButton" Grid.Column="1" Content="REFRESH" Click="OnRefreshClick"/></Grid>
+  <InfoBar x:Name="DashboardInfo" IsOpen="False" IsClosable="True"/>
+  <GridView x:Name="MetricGrid" ItemsSource="{x:Bind Metrics}" SelectionMode="None" IsTabStop="False"><GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid ItemWidth="185" ItemHeight="96" MaximumRowsOrColumns="8" Orientation="Horizontal"/></ItemsPanelTemplate></GridView.ItemsPanel><GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Margin" Value="0,0,7,7"/><Setter Property="Padding" Value="0"/></Style></GridView.ItemContainerStyle><GridView.ItemTemplate><DataTemplate><Border Style="{StaticResource MetricCardStyle}" BorderBrush="{Binding DetailBrush}"><StackPanel><TextBlock Style="{StaticResource HeaderLabelStyle}" Text="{Binding Label}"/><TextBlock Margin="0,4,0,0" Foreground="#EDF8FF" FontSize="25" Text="{Binding Value}"/><TextBlock Foreground="{Binding DetailBrush}" FontSize="10" Text="{Binding Detail}" TextTrimming="CharacterEllipsis"/></StackPanel></Border></DataTemplate></GridView.ItemTemplate></GridView>
+  <TextBlock Style="{StaticResource SectionTitleStyle}" Text="ROOM STATUS"/>
+  <GridView x:Name="RoomGrid" ItemsSource="{x:Bind Rooms}" SelectionMode="None" MinHeight="170"><GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid ItemWidth="295" ItemHeight="170" Orientation="Horizontal"/></ItemsPanelTemplate></GridView.ItemsPanel><GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Margin" Value="0,0,8,8"/><Setter Property="Padding" Value="0"/></Style></GridView.ItemContainerStyle><GridView.ItemTemplate><DataTemplate><Border Style="{StaticResource ControlRoomPanelStyle}" Padding="11"><Grid RowSpacing="4"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding Label}"/><TextBlock Grid.Row="1" FontSize="10" Text="{Binding Agents}" Foreground="{StaticResource MutedBrush}"/><TextBlock Grid.Row="2" Foreground="{StaticResource AccentBrush}" FontSize="10" Text="{Binding Counts}"/><StackPanel Grid.Row="3"><TextBlock Style="{StaticResource HeaderLabelStyle}" Text="NEXT"/><TextBlock Text="{Binding Next}" TextTrimming="CharacterEllipsis"/><TextBlock Foreground="{StaticResource MutedBrush}" FontSize="10" Text="{Binding NextTime}"/></StackPanel><Button Grid.Row="4" Content="OPEN ROOM" IsEnabled="False" ToolTipService.ToolTip="Room navigation is available from the Rooms page"/></Grid></Border></DataTemplate></GridView.ItemTemplate></GridView>
+  <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Border Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Style="{StaticResource SectionTitleStyle}" Text="TRANSFER ACTIVITY"/><TextBlock x:Name="TransferSummary" Margin="0,10,0,6" FontSize="18" Foreground="{StaticResource AccentBrush}" Text="—"/><ProgressBar x:Name="TransferProgress" Height="6"/><TextBlock x:Name="TransferDetail" Margin="0,6,0,0" Foreground="{StaticResource MutedBrush}" FontSize="10" Text="No transfer observations"/></StackPanel></Border><Border Grid.Column="1" Style="{StaticResource ControlRoomPanelStyle}" Padding="12"><StackPanel><TextBlock Style="{StaticResource SectionTitleStyle}" Text="RECENT ACTIVITY"/><ItemsControl x:Name="RecentActivity" ItemsSource="{x:Bind Activity}"><ItemsControl.ItemTemplate><DataTemplate><TextBlock Margin="0,5,0,0" FontSize="10" Text="{Binding}" TextTrimming="CharacterEllipsis"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel></Border></Grid>
+ </StackPanel></ScrollViewer>
 </Page>

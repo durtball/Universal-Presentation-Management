@@ -5,10 +5,10 @@
     AllowDrop="True"
     DragOver="OnDragOver"
     Drop="OnDrop">
-    <Grid x:Name="LayoutRoot" Padding="20" RowSpacing="14">
+    <Grid x:Name="LayoutRoot" Padding="12" RowSpacing="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="180" />
+            <RowDefinition Height="165" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
@@ -22,14 +22,15 @@
                 <TextBlock Style="{StaticResource SectionTitleStyle}" Text="HIGH-VOLUME INTAKE" />
                 <TextBlock Foreground="{StaticResource MutedBrush}" Text="Files remain local until a Site and event are selected" />
             </StackPanel>
-            <Button Grid.Column="1" IsEnabled="False" Content="SELECT FILES" />
-            <Button Grid.Column="2" IsEnabled="False" Content="SELECT FOLDER" />
+            <Button Grid.Column="1" Content="SELECT FILES" Click="OnSelectFiles" />
+            <Button Grid.Column="2" Content="SELECT FOLDER" Click="OnSelectFolder" />
         </Grid>
-        <Border Grid.Row="1" BorderBrush="#A93CDBF5" BorderThickness="2" CornerRadius="8" Background="#45131D29">
+        <Border Grid.Row="1" BorderBrush="{StaticResource VioletBrush}" BorderThickness="1" CornerRadius="5" Background="#45131D29">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="7">
                 <FontIcon Glyph="&#xE8B7;" FontSize="40" Foreground="{StaticResource AccentBrush}" />
-                <TextBlock FontSize="19" FontWeight="SemiBold" Text="DROP FILES OR FOLDERS" />
-                <TextBlock Foreground="{StaticResource MutedBrush}" Text="Nested relative paths and source metadata are preserved" TextAlignment="Center" TextWrapping="Wrap" />
+                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Drop files or folders here" />
+                <TextBlock Foreground="{StaticResource VioletBrush}" Text="or click to browse" />
+                <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="10" Text="Nested relative paths and source metadata are preserved" />
             </StackPanel>
         </Border>
         <Grid Grid.Row="2" ColumnSpacing="12">
@@ -42,7 +43,7 @@
         </Grid>
         <Border Grid.Row="3" Style="{StaticResource ControlRoomPanelStyle}">
             <Grid>
-                <ListView x:Name="Queue" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True" />
+                <ListView x:Name="Queue" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True"><ListView.ItemTemplate><DataTemplate><Grid Padding="8,5" Background="{StaticResource TableRowBrush}" ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="100"/><ColumnDefinition Width="130"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Filename}" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding Size}"/><TextBlock Grid.Column="2" Foreground="{Binding StatusBrush}" Text="{Binding Status}"/><ProgressBar Grid.Column="3" Minimum="0" Maximum="100" Value="{Binding Progress}" Foreground="{Binding StatusBrush}"/></Grid></DataTemplate></ListView.ItemTemplate></ListView>
                 <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6" IsHitTestVisible="False">
                     <TextBlock FontSize="17" Text="Intake queue is empty" />
                     <TextBlock Foreground="{StaticResource MutedBrush}" Text="Drop supported presentation or media files to begin enumeration." TextAlignment="Center" TextWrapping="Wrap" />

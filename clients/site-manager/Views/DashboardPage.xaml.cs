@@ -1,192 +1,114 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.Extensions.DependencyInjection;
+using UPM.Windows.Core;
 using UPM.Windows.SiteApi;
 
 namespace UPM.SiteManager.Views;
 
 public sealed class Metric
 {
-  public Metric()
-  {
-  }
-
-  public Metric(string label, string value, string detail, Brush detailBrush)
-  {
-    Label = label;
-    Value = value;
-    Detail = detail;
-    DetailBrush = detailBrush;
-  }
-
-  public string Label { get; set; } = string.Empty;
-  public string Value { get; set; } = string.Empty;
-  public string Detail { get; set; } = string.Empty;
+  public string Label { get; set; } = "";
+  public string Value { get; set; } = "—";
+  public string Detail { get; set; } = "UNKNOWN";
   public Brush DetailBrush { get; set; } = new SolidColorBrush(Colors.Gray);
+}
+public sealed class DashboardRoom
+{
+  public string Label { get; set; } = "—";
+  public string Agents { get; set; } = "PRIMARY UNASSIGNED  •  BACKUP UNASSIGNED";
+  public string Counts { get; set; } = "— READY  •  — MISSING  •  — REVIEW";
+  public string Next { get; set; } = "No upcoming session";
+  public string NextTime { get; set; } = "—";
 }
 
 public sealed partial class DashboardPage : Page
 {
-  private readonly ISiteConnectionManager connections;
+  private readonly ISiteConnectionManager connections = App.Services.GetRequiredService<ISiteConnectionManager>();
+  private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
+  private readonly LocalStateStore store = App.Services.GetRequiredService<LocalStateStore>();
+  public ObservableCollection<Metric> Metrics { get; } = [];
+  public ObservableCollection<DashboardRoom> Rooms { get; } = [];
+  public ObservableCollection<string> Activity { get; } = [];
 
   public DashboardPage()
   {
-    connections = App.Services.GetRequiredService<ISiteConnectionManager>();
     InitializeComponent();
     SetDisconnectedMetrics();
     connections.ConnectionChanged += OnConnectionChanged;
     Unloaded += OnUnloaded;
-    if (connections.Current is not null)
-    {
-      Apply(connections.Current);
-    }
+    if (connections.Current is { } current) Apply(current);
   }
-
-  public ObservableCollection<Metric> Metrics { get; } = [];
 
   private void PageSizeChanged(object sender, SizeChangedEventArgs args)
   {
-    if (MetricGrid.ItemsPanelRoot is not ItemsWrapGrid panel)
-    {
-      return;
-    }
-
-    var columns = args.NewSize.Width switch
-    {
-      >= 2100 => 8,
-      >= 1500 => 6,
-      >= 1000 => 4,
-      _ => 2,
-    };
-    panel.ItemWidth = Math.Max(190, (args.NewSize.Width - (columns * 12)) / columns);
+    if (MetricGrid.ItemsPanelRoot is not ItemsWrapGrid panel) return;
+    var columns = args.NewSize.Width switch { >= 1800 => 8, >= 1350 => 6, >= 950 => 4, _ => 2 };
+    panel.ItemWidth = Math.Max(160, (args.NewSize.Width - columns * 9) / columns);
   }
 
-  private void OnConnectionChanged(object? sender, SiteConnectionChangedEventArgs args)
-  {
-    if (!DispatcherQueue.HasThreadAccess)
-    {
+  private void OnConnectionChanged(object? sender, SiteConnectionChangedEventArgs args) =>
       DispatcherQueue.TryEnqueue(() => Apply(args.Status));
-    }
-    else
-    {
-      Apply(args.Status);
-    }
-  }
 
   private void Apply(SiteConnectionStatus status)
   {
     RefreshButton.IsEnabled = status.State == SiteConnectionState.Connected;
     if (status.State != SiteConnectionState.Connected || status.Snapshot is null)
     {
-      SetDisconnectedMetrics();
-      return;
+      Rooms.Clear(); Activity.Clear(); SetDisconnectedMetrics(); return;
     }
-
-    var snapshot = status.Snapshot;
-    var dashboard = snapshot.OperationsDashboard;
-    var rooms = ArrayLength(dashboard, "rooms");
-    var attention = ArrayLength(dashboard, "attention");
-    var failedTransfers = IntValue(dashboard, "failed_transfer_jobs");
-    var storageHealth = ReadStorageHealth(snapshot.MediaStorage);
-    Metrics.Clear();
-    Metrics.Add(new("SITE", snapshot.Registration.DisplayName, snapshot.Registration.SiteId.ToString(), Cyan()));
-    Metrics.Add(new("DEPLOYED EVENTS", snapshot.EventDeployments.Count.ToString(), "Canonical Site deployments", Violet()));
-    Metrics.Add(new("STORAGE HEALTH", storageHealth, "Reported by Site media storage", StatusBrush(storageHealth)));
-    Metrics.Add(new("REGISTERED DEVICES", snapshot.Devices.Count.ToString(), "Online state requires heartbeat detail", Cyan()));
-    Metrics.Add(new("ROOMS", rooms.ToString(), "Site operational projection", Cyan()));
-    Metrics.Add(new("ATTENTION", attention.ToString(), "Current Site attention items", attention > 0 ? Amber() : Green()));
-    Metrics.Add(new("FAILED TRANSFERS", failedTransfers.ToString(), "Durable Site transfer jobs", failedTransfers > 0 ? Red() : Green()));
-    Metrics.Add(new("CONNECTION", "LIVE", status.Message, Green()));
-    EmptyStateTitle.Text = rooms == 0 ? "No rooms in the selected Site projection" : $"{rooms} room projection(s) loaded";
-    EmptyStateDetail.Text = rooms == 0
-    ? "Select a deployed event to inspect its room operations. Agent status remains UNKNOWN unless telemetry is available."
-        : "Open Rooms for authoritative readiness and device assignment detail.";
+    _ = LoadLiveAsync(status.Snapshot);
   }
 
-  private async void OnRefreshClick(object sender, RoutedEventArgs args)
+  private async Task LoadLiveAsync(SiteOperationalSnapshot snapshot)
   {
-    if (connections.Current?.Profile is not { } profile)
-    {
-      return;
-    }
-
     try
     {
-      RefreshButton.IsEnabled = false;
-      await connections.RefreshAsync(profile.ProfileId, CancellationToken.None);
+      var transfers = await store.ListTransfersAsync();
+      var roomItems = snapshot.OperationsDashboard.Items("rooms");
+      var attention = snapshot.OperationsDashboard.Items("attention").Count;
+      var failed = transfers.Count(x => x.State == TransferState.Failed);
+      var active = transfers.Count(x => x.State is TransferState.Hashing or TransferState.Uploading or TransferState.Verifying);
+      var queued = transfers.Count(x => x.State == TransferState.Queued);
+      long ready = 0, missing = 0, errors = 0;
+      Rooms.Clear();
+      foreach (var room in roomItems)
+      {
+        var summary = room.Child("summary"); var endpoints = room.Child("endpoints"); var next = summary.Child("next_session");
+        ready += summary.NumberOrDefault("ready_count"); missing += summary.NumberOrDefault("missing_count"); errors += summary.NumberOrDefault("error_count");
+        Rooms.Add(new DashboardRoom
+        {
+          Label = room.Text("label"), Agents = $"PRIMARY {Agent(endpoints, "primary")}  •  BACKUP {Agent(endpoints, "backup")}",
+          Counts = $"{summary.NumberOrDefault("ready_count")} READY  •  {summary.NumberOrDefault("missing_count")} MISSING  •  — REVIEW",
+          Next = next.Text("title", "No upcoming session"), NextTime = JsonProjection.LocalTime(next.Text("starts_at", "")),
+        });
+      }
+      var online = snapshot.Devices.Count(device => string.Equals(device.Text("status", "unknown"), "online", StringComparison.OrdinalIgnoreCase));
+      Metrics.Clear();
+      Add("INTAKE QUEUE", queued.ToString(), "Queued files", Violet()); Add("ACTIVE UPLOADS", active.ToString(), "Local transfer workers", Cyan()); Add("FAILED UPLOADS", failed.ToString(), "Needs attention", failed > 0 ? Red() : Green());
+      Add("PRESENTATIONS READY", ready.ToString(), "Site room projection", Green()); Add("PRESENTATIONS MISSING", missing.ToString(), "Canonical media missing", missing > 0 ? Amber() : Green());
+      Add("ROOMS READY", Math.Max(0, roomItems.Count - attention).ToString(), $"{roomItems.Count} total", attention > 0 ? Amber() : Green()); Add("DEVICES ONLINE", snapshot.Devices.Count == 0 ? "—" : online.ToString(), snapshot.Devices.Count == 0 ? "UNKNOWN" : $"{snapshot.Devices.Count} registered", Cyan()); Add("REVIEWS IN PROGRESS", "—", "UNKNOWN", Violet());
+      var total = transfers.Sum(x => x.Length); var done = transfers.Sum(x => Math.Min(x.BytesTransferred, x.Length));
+      TransferSummary.Text = total > 0 ? $"{JsonProjection.Bytes(done)} / {JsonProjection.Bytes(total)}" : "—"; TransferProgress.Value = total > 0 ? 100d * done / total : 0; TransferDetail.Text = $"{active} active  •  {queued} queued  •  {failed} failed";
+      Activity.Clear();
+      if (context.ActiveClient is { } api)
+      {
+        var logs = await api.GetOperationalLogsAsync(context.SelectedEventId, CancellationToken.None);
+        foreach (var log in logs.Items().Take(5)) Activity.Add($"{JsonProjection.LocalTime(log.Text("occurred_at", ""))}  {log.Text("message")}");
+      }
       DashboardInfo.IsOpen = false;
     }
-    catch (Exception exception)
-    {
-      DashboardInfo.Title = "DASHBOARD REFRESH FAILED";
-      DashboardInfo.Message = exception.Message;
-      DashboardInfo.Severity = InfoBarSeverity.Error;
-      DashboardInfo.IsOpen = true;
-    }
-    finally
-    {
-      RefreshButton.IsEnabled = connections.Current?.State == SiteConnectionState.Connected;
-    }
+    catch (Exception exception) { DashboardInfo.Title = "DASHBOARD REFRESH FAILED"; DashboardInfo.Message = exception.Message; DashboardInfo.Severity = InfoBarSeverity.Error; DashboardInfo.IsOpen = true; }
   }
 
-  private void SetDisconnectedMetrics()
-  {
-    Metrics.Clear();
-    Metrics.Add(new("SITE", "—", "Select or add a Site", Gray()));
-    Metrics.Add(new("DEPLOYED EVENTS", "—", "Authentication required", Gray()));
-    Metrics.Add(new("STORAGE HEALTH", "—", "Connect to Site", Gray()));
-    Metrics.Add(new("REGISTERED DEVICES", "—", "Connect to Site", Gray()));
-    Metrics.Add(new("ROOMS", "—", "Connect to Site", Gray()));
-    Metrics.Add(new("ATTENTION", "—", "Connect to Site", Gray()));
-    Metrics.Add(new("FAILED TRANSFERS", "—", "Connect to Site", Gray()));
-    Metrics.Add(new("CONNECTION", "OFFLINE", "No authenticated Site session", Gray()));
-  }
-
-  private static int ArrayLength(JsonElement value, string property) =>
-      value.TryGetProperty(property, out var array) && array.ValueKind == JsonValueKind.Array
-          ? array.GetArrayLength()
-          : 0;
-
-  private static int IntValue(JsonElement value, string property) =>
-      value.TryGetProperty(property, out var number) && number.TryGetInt32(out var result) ? result : 0;
-
-  private static string ReadStorageHealth(JsonElement storage)
-  {
-    if (!storage.TryGetProperty("service_available", out var available) || !available.GetBoolean())
-    {
-      return "UNAVAILABLE";
-    }
-
-    if (!storage.TryGetProperty("roots", out var roots) || roots.ValueKind != JsonValueKind.Array)
-    {
-      return "UNKNOWN";
-    }
-
-    var states = roots.EnumerateArray()
-        .Select(root => root.TryGetProperty("health", out var health) ? health.GetString() : null)
-        .Where(value => !string.IsNullOrWhiteSpace(value))
-        .ToArray();
-    return states.Any(value => value is "Critical" or "Unavailable") ? "ATTENTION" : "HEALTHY";
-  }
-
-  private static Brush StatusBrush(string status) => status switch
-  {
-    "HEALTHY" => Green(),
-    "UNKNOWN" => Gray(),
-    _ => Red(),
-  };
-
-  private static SolidColorBrush Cyan() => new(Colors.Cyan);
-  private static SolidColorBrush Violet() => new(Colors.Violet);
-  private static SolidColorBrush Green() => new(Colors.LightGreen);
-  private static SolidColorBrush Amber() => new(Colors.Goldenrod);
-  private static SolidColorBrush Red() => new(Colors.OrangeRed);
-  private static SolidColorBrush Gray() => new(Colors.Gray);
-
-  private void OnUnloaded(object sender, RoutedEventArgs args) =>
-      connections.ConnectionChanged -= OnConnectionChanged;
+  private static string Agent(JsonElement endpoints, string role) { var agent = endpoints.Child(role); return agent.ValueKind == JsonValueKind.Object ? $"{agent.Text("name", "UNASSIGNED")} {agent.Text("status", "UNKNOWN").ToUpperInvariant()}" : "UNASSIGNED UNKNOWN"; }
+  private void Add(string label, string value, string detail, Brush brush) => Metrics.Add(new Metric { Label = label, Value = value, Detail = detail, DetailBrush = brush });
+  private async void OnRefreshClick(object sender, RoutedEventArgs args) { if (connections.Current?.Profile is not { } profile) return; try { await connections.RefreshAsync(profile.ProfileId, CancellationToken.None); } catch (Exception ex) { DashboardInfo.Message = ex.Message; DashboardInfo.IsOpen = true; } }
+  private void SetDisconnectedMetrics() { Metrics.Clear(); foreach (var label in new[] { "INTAKE QUEUE", "ACTIVE UPLOADS", "FAILED UPLOADS", "PRESENTATIONS READY", "PRESENTATIONS MISSING", "ROOMS READY", "DEVICES ONLINE", "REVIEWS IN PROGRESS" }) Add(label, "—", "UNKNOWN", Gray()); }
+  private static SolidColorBrush Cyan()=>new(Colors.Cyan); private static SolidColorBrush Violet()=>new(Colors.Violet); private static SolidColorBrush Green()=>new(Colors.LightGreen); private static SolidColorBrush Amber()=>new(Colors.Goldenrod); private static SolidColorBrush Red()=>new(Colors.OrangeRed); private static SolidColorBrush Gray()=>new(Colors.Gray);
+  private void OnUnloaded(object sender, RoutedEventArgs args)=>connections.ConnectionChanged-=OnConnectionChanged;
 }

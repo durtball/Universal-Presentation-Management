@@ -5,34 +5,34 @@
     Title="UPM Site Manager">
     <Grid x:Name="WindowLayout" Background="{StaticResource GraphiteBrush}" Loaded="OnWindowLoaded">
         <Grid.RowDefinitions>
-            <RowDefinition x:Name="HeaderRow" Height="86" />
+            <RowDefinition x:Name="HeaderRow" Height="64" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <Border Padding="18,8" BorderBrush="#284559" BorderThickness="0,0,0,1">
+        <Border Background="#E6080E16" Padding="16,6" BorderBrush="#304B60" BorderThickness="0,0,0,1">
             <Grid ColumnSpacing="12" RowSpacing="7">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition x:Name="BrandColumn" Width="170" />
-                    <ColumnDefinition x:Name="SiteColumn" Width="390" />
-                    <ColumnDefinition x:Name="EventColumn" Width="250" />
+                    <ColumnDefinition x:Name="BrandColumn" Width="190" />
+                    <ColumnDefinition x:Name="SiteColumn" Width="330" />
+                    <ColumnDefinition x:Name="EventColumn" Width="270" />
                     <ColumnDefinition x:Name="SpacerColumn" Width="*" />
-                    <ColumnDefinition x:Name="StatusColumn" Width="Auto" />
+                    <ColumnDefinition x:Name="StatusColumn" Width="430" />
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition x:Name="CompactSiteRow" Height="0" />
                     <RowDefinition x:Name="CompactEventRow" Height="0" />
                 </Grid.RowDefinitions>
-                <StackPanel VerticalAlignment="Center">
-                    <TextBlock Foreground="{StaticResource AccentBrush}" FontSize="19" FontWeight="SemiBold" Text="UPM" />
-                    <TextBlock Foreground="#DCE8F2" FontSize="11" CharacterSpacing="150" Text="SITE MANAGER" />
+                <StackPanel VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
+                    <TextBlock Foreground="{StaticResource AccentBrush}" FontSize="22" FontWeight="Bold" CharacterSpacing="80" Text="UPM" />
+                    <TextBlock Foreground="#DCE8F2" FontSize="12" CharacterSpacing="100" Text="SITE MANAGER" />
                 </StackPanel>
                 <StackPanel x:Name="SiteControl" Grid.Column="1" Spacing="2">
                     <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" Text="SITE" />
                     <Grid ColumnSpacing="6">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <ComboBox x:Name="SiteSelector" MinWidth="190" PlaceholderText="Select a saved Site" DisplayMemberPath="DisplayName" SelectionChanged="OnSiteSelectionChanged" />
-                        <Button Grid.Column="1" Content="CONNECT" Click="OnConnectClick" />
+                        <Button x:Name="ConnectButton" Grid.Column="1" Content="CONNECT" Click="OnConnectClick" />
                         <Button Grid.Column="2" Content="+" AutomationProperties.Name="Add Site" Click="OnAddSiteClick" />
                     </Grid>
                 </StackPanel>
@@ -40,13 +40,12 @@
                     <TextBlock Foreground="{StaticResource MutedBrush}" FontSize="11" Text="EVENT" />
                     <ComboBox x:Name="EventSelector" MinWidth="180" IsEnabled="False" PlaceholderText="Connect to select event" DisplayMemberPath="DisplayLabel" SelectionChanged="OnEventSelectionChanged" />
                 </StackPanel>
-                <StackPanel x:Name="ConnectionStatus" Grid.Column="4" HorizontalAlignment="Right" VerticalAlignment="Center" ToolTipService.ToolTip="Disconnected">
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Ellipse x:Name="ConnectionIndicator" Width="8" Height="8" Fill="#6B7280" />
-                        <TextBlock x:Name="ConnectionTitle" Foreground="#DCE8F2" Text="DISCONNECTED" />
-                    </StackPanel>
-                    <TextBlock x:Name="ConnectionDetail" MaxWidth="280" Margin="16,3,0,0" Foreground="{StaticResource MutedBrush}" FontSize="11" Text="Select or add a Site" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
+                <Grid x:Name="ConnectionStatus" Grid.Column="4" ColumnSpacing="22" HorizontalAlignment="Right" VerticalAlignment="Center" ToolTipService.ToolTip="Disconnected">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="145"/><ColumnDefinition Width="120"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+                    <StackPanel><StackPanel Orientation="Horizontal" Spacing="7"><Ellipse x:Name="ConnectionIndicator" Width="7" Height="7" Fill="#6B7280"/><TextBlock x:Name="ConnectionTitle" Style="{StaticResource HeaderLabelStyle}" Text="DISCONNECTED"/></StackPanel><TextBlock x:Name="ConnectionDetail" Margin="14,2,0,0" Foreground="{StaticResource MutedBrush}" FontSize="10" Text="Select a Site" TextTrimming="CharacterEllipsis"/></StackPanel>
+                    <StackPanel Grid.Column="1"><TextBlock Style="{StaticResource HeaderLabelStyle}" Text="STORAGE HEALTH"/><TextBlock x:Name="StorageDetail" Margin="0,2,0,0" Foreground="{StaticResource MutedBrush}" FontSize="10" Text="UNKNOWN"/></StackPanel>
+                    <StackPanel Grid.Column="2"><TextBlock x:Name="ClockText" Foreground="#F0F7FC" FontSize="15" Text="--:--:--"/><TextBlock x:Name="DateText" Foreground="{StaticResource MutedBrush}" FontSize="10" Text="—"/></StackPanel>
+                </Grid>
             </Grid>
         </Border>
         <InfoBar x:Name="ConnectionInfoBar" Grid.Row="1" Margin="12,6" IsOpen="False" IsClosable="True" />
@@ -73,6 +72,11 @@
                 <NavigationViewItem Content="Activity" Tag="activity" Icon="List" />
                 <NavigationViewItem Content="Settings" Tag="settings" Icon="Setting" />
             </NavigationView.MenuItems>
+            <NavigationView.PaneFooter>
+                <Border Margin="8" Padding="10" BorderBrush="#293F50" BorderThickness="1,1,0,0">
+                    <StackPanel><TextBlock x:Name="FooterSite" Foreground="#DDEAF3" FontSize="11" Text="NO SITE" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="FooterOperator" Foreground="{StaticResource AccentBrush}" FontSize="10" Text="Not authenticated"/></StackPanel>
+                </Border>
+            </NavigationView.PaneFooter>
             <Frame x:Name="ContentFrame" />
         </NavigationView>
         <VisualStateManager.VisualStateGroups>
@@ -80,7 +84,7 @@
                 <VisualState x:Name="CompactWindow">
                     <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
                     <VisualState.Setters>
-                        <Setter Target="HeaderRow.Height" Value="184" />
+                        <Setter Target="HeaderRow.Height" Value="176" />
                         <Setter Target="SiteColumn.Width" Value="*" />
                         <Setter Target="EventColumn.Width" Value="0" />
                         <Setter Target="SpacerColumn.Width" Value="0" />

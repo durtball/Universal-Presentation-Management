@@ -384,8 +384,22 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     return GetAsync<JsonElement>($"api/v1/logs?minutes=1440&limit=250{eventQuery}", cancellationToken);
   }
 
-  public Task<JsonElement> GetReviewSessionsAsync(CancellationToken cancellationToken) =>
-      GetAsync<JsonElement>("api/v1/review-sessions?limit=200", cancellationToken);
+  public async Task<JsonElement> GetReviewSessionsAsync(CancellationToken cancellationToken)
+  {
+    using var response = await http.GetAsync(
+        "api/v1/review-sessions?limit=200",
+        HttpCompletionOption.ResponseHeadersRead,
+        cancellationToken);
+    if (response.StatusCode == HttpStatusCode.MethodNotAllowed)
+    {
+      throw new SiteEndpointException(
+          "Review listing requires a newer UPM Site build.",
+          SiteConnectionState.Error);
+    }
+
+    EnsureSiteSuccess(response, "review-session listing");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
 
   public Task<JsonElement> GetOperationsDashboardAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/operations/dashboard", cancellationToken);
