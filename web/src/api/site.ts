@@ -118,6 +118,8 @@ export const siteApi = {
     } }),
   retryReplication: (replicationId: string) =>
     siteClient.request<Row>(`/api/v1/media-replications/${replicationId}/retry`, { method: "POST" }),
+  retryDelivery: (transferId: string) =>
+    siteClient.request<Row>(`/api/v1/media-deliveries/${transferId}/retry`, { method: "POST" }),
   operations: (signal?: AbortSignal) =>
     get<OperationsDashboard>("/api/v1/operations/dashboard", signal),
   retrySync: () =>

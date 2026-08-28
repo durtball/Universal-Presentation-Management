@@ -267,6 +267,26 @@ def _view(item: PresentationMediaImport, session: Session | None = None) -> dict
         if suggested_id is not None:
             candidates = _candidate_views(session, item.event_id, presentation_ids={suggested_id})
             suggested_candidate = candidates[0] if candidates else None
+    transfer_view = None
+    if session is not None and item.transfer_job_id is not None:
+        transfer = session.get(TransferJob, item.transfer_job_id)
+        if transfer is not None:
+            payload = transfer.payload or {}
+            transfer_view = {
+                "transfer_job_id": transfer.transfer_job_id,
+                "status": transfer.status,
+                "progress": float(transfer.progress),
+                "confirmed_offset": int(payload.get("confirmed_offset", 0)),
+                "expected_size": int(payload.get("expected_size", item.size_bytes or 0)),
+                "site_state": payload.get("site_state"),
+                "attempt_count": transfer.attempt_count,
+                "max_attempts": transfer.max_attempts,
+                "last_progress_at": payload.get("last_progress_at"),
+                "completed_at": transfer.completed_at,
+                "local_media_ready": bool(payload.get("local_media_ready", False)),
+                "error_code": transfer.error_code,
+                "last_error": transfer.last_error,
+            }
     return {
         "media_import_id": item.media_import_id,
         "batch_id": item.batch_id,
@@ -296,6 +316,7 @@ def _view(item: PresentationMediaImport, session: Session | None = None) -> dict
         "import_state": item.import_state,
         "sync_state": item.sync_state,
         "transfer_job_id": item.transfer_job_id,
+        "transfer": transfer_view,
         "site_media_object_id": item.site_media_object_id,
         "committed_storage_target_id": item.committed_storage_root_id,
         "committed_storage_key": item.committed_storage_key,

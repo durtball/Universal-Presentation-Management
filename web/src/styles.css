@@ -73,6 +73,14 @@
     --menu-hover-bg: #263b56;
     --menu-selected-bg: #45c7e8;
     --menu-selected-fg: #031216;
+    --progress-track: rgba(2, 8, 18, 0.7);
+    --progress-border: rgba(139, 229, 245, 0.26);
+    --progress-fill: #45c7e8;
+    --progress-success: #49d39b;
+    --progress-warning: #f1bd58;
+    --progress-danger: #ff7189;
+    --progress-text: #f4f7fb;
+    --progress-glow: 0 0 12px rgba(69, 199, 232, 0.32);
     --blur: blur(18px);
     --duration: 180ms;
     --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -112,6 +120,14 @@
     --menu-hover-bg: #d4d0c8;
     --menu-selected-bg: #000080;
     --menu-selected-fg: #fff;
+    --progress-track: #fff;
+    --progress-border: #111;
+    --progress-fill: #000080;
+    --progress-success: #087a2a;
+    --progress-warning: #7a5100;
+    --progress-danger: #a00016;
+    --progress-text: #111;
+    --progress-glow: none;
     --blur: none;
     --duration: 100ms;
     --ease: linear;
@@ -177,6 +193,30 @@
   small {
     color: var(--muted);
   }
+}
+
+@layer components {
+  .progress-bar { min-width: 9rem; color: var(--progress-text); }
+  .progress-bar__labels { display: flex; justify-content: space-between; gap: .75rem; margin-bottom: .25rem; font-size: .78rem; }
+  .progress-bar__track { position: relative; height: .72rem; overflow: hidden; border: 1px solid var(--progress-border); border-radius: var(--radius-small); background: var(--progress-track); }
+  .progress-bar__fill { display: block; height: 100%; background: var(--progress-fill); transition: width var(--duration) var(--ease); }
+  .progress-bar--active .progress-bar__fill { box-shadow: var(--progress-glow); background: linear-gradient(90deg, var(--progress-fill), var(--accent-strong), var(--progress-fill)); background-size: 200% 100%; animation: progress-sweep 1.8s linear infinite; }
+  .progress-bar--success .progress-bar__fill { background: var(--progress-success); }
+  .progress-bar--warning .progress-bar__fill { background: var(--progress-warning); }
+  .progress-bar--danger .progress-bar__fill { background: var(--progress-danger); }
+  .progress-bar--compact .progress-bar__labels { margin: 0; }
+  .progress-bar--compact .progress-bar__track { height: .55rem; }
+  .progress-bar > small { display: block; margin-top: .25rem; color: var(--muted); }
+  .transfer-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .75rem; margin-top: .75rem; }
+  .transfer-status, .transfer-activity { padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--surface-soft); }
+  .transfer-status > div:first-child, .transfer-activity { display: flex; justify-content: space-between; gap: .75rem; align-items: center; }
+  .transfer-activity { margin-bottom: .75rem; }
+  .transfer-activity > div:first-child { display: grid; }
+  @keyframes progress-sweep { to { background-position: -200% 0; } }
+  [data-theme="classic"] .progress-bar__track { height: 1rem; border-width: 2px; border-color: #808080 #fff #fff #808080; border-radius: 0; padding: 2px; }
+  [data-theme="classic"] .progress-bar__fill { box-shadow: none; background-image: repeating-linear-gradient(90deg, var(--progress-fill) 0 8px, transparent 8px 10px); }
+  [data-theme="classic"] .transfer-status, [data-theme="classic"] .transfer-activity { border-color: #fff #606060 #606060 #fff; border-width: 2px; }
+  [data-motion="reduced"] .progress-bar__fill, [data-motion="off"] .progress-bar__fill { animation: none; transition: none; background-image: none; }
 }
 @layer components {
   .media-toolbar { display:flex; align-items:end; gap:12px; flex-wrap:wrap; }

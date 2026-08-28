@@ -2,6 +2,7 @@
 
 # ruff: noqa: E501
 
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from datetime import timedelta
 from typing import Annotated
@@ -21,6 +22,7 @@ from upm_shared.enums import (
     MediaAvailability,
     MediaCategory,
     MediaReplicationState,
+    MediaTransferState,
     PresentationProcessingStatus,
     PresentationWorkflowStatus,
     SourceSystem,
@@ -47,6 +49,7 @@ from upm_site.persistence.models import (
     LocalSiteIdentity,
     MediaObject,
     MediaReplicationSession,
+    MediaTransferSession,
     PersonProjection,
     Presentation,
     PresentationAsset,
@@ -914,27 +917,73 @@ def register_presentation_media_routes(
             .offset(offset)
             .limit(limit)
         ).all()
+        presentation_ids = [item.presentation_id for item in presentations]
+        versions_by_presentation: dict[UUID, list[PresentationVersion]] = defaultdict(list)
+        all_versions = (
+            session.scalars(
+                select(PresentationVersion)
+                .where(PresentationVersion.presentation_id.in_(presentation_ids))
+                .order_by(PresentationVersion.version_number.desc())
+            ).all()
+            if presentation_ids
+            else []
+        )
+        for version in all_versions:
+            if len(versions_by_presentation[version.presentation_id]) < 20:
+                versions_by_presentation[version.presentation_id].append(version)
+        version_ids = [version.presentation_version_id for version in all_versions]
+        media_by_version: dict[UUID, MediaObject] = {}
+        if version_ids:
+            for version_id, media in session.execute(
+                select(PresentationAsset.presentation_version_id, MediaObject)
+                .join(MediaObject, PresentationAsset.media_object_id == MediaObject.media_object_id)
+                .where(PresentationAsset.presentation_version_id.in_(version_ids))
+                .order_by(MediaObject.created_at.desc())
+            ):
+                media_by_version.setdefault(version_id, media)
+        deliveries = (
+            session.scalars(
+                select(MediaTransferSession)
+                .where(MediaTransferSession.presentation_version_id.in_(version_ids))
+                .order_by(MediaTransferSession.created_at.desc())
+            ).all()
+            if version_ids
+            else []
+        )
+        delivery_by_version: dict[UUID, MediaTransferSession] = {}
+        for delivery in deliveries:
+            delivery_by_version.setdefault(delivery.presentation_version_id, delivery)
+        replications = (
+            session.scalars(
+                select(MediaReplicationSession)
+                .where(MediaReplicationSession.presentation_version_id.in_(version_ids))
+                .order_by(MediaReplicationSession.created_at.desc())
+            ).all()
+            if version_ids
+            else []
+        )
+        replication_by_version: dict[UUID, MediaReplicationSession] = {}
+        for replication in replications:
+            replication_by_version.setdefault(replication.presentation_version_id, replication)
+        job_ids = [item.transfer_session_id for item in deliveries] + [
+            item.replication_session_id for item in replications
+        ]
+        jobs = (
+            {
+                job.transfer_job_id: job
+                for job in session.scalars(
+                    select(TransferJob).where(TransferJob.transfer_job_id.in_(job_ids))
+                )
+            }
+            if job_ids
+            else {}
+        )
         rows = []
         for item in presentations:
-            versions = session.scalars(
-                select(PresentationVersion)
-                .where(PresentationVersion.presentation_id == item.presentation_id)
-                .order_by(PresentationVersion.version_number.desc())
-                .limit(20)
-            ).all()
+            versions = versions_by_presentation[item.presentation_id]
             history = []
             for version in versions:
-                media = session.scalar(
-                    select(MediaObject)
-                    .join(
-                        PresentationAsset,
-                        PresentationAsset.media_object_id == MediaObject.media_object_id,
-                    )
-                    .where(
-                        PresentationAsset.presentation_version_id == version.presentation_version_id
-                    )
-                    .order_by(MediaObject.created_at.desc())
-                )
+                media = media_by_version.get(version.presentation_version_id)
                 history.append(
                     {
                         "presentation_version_id": version.presentation_version_id,
@@ -950,20 +999,39 @@ def register_presentation_media_routes(
                             "sha256": media.content_hash,
                             "availability": media.availability,
                             "failure_reason": media.failure_reason,
+                            "provenance": {
+                                "origin": media.intake_origin,
+                                "source_share": media.source_share,
+                                "source_relative_path": media.source_relative_path,
+                                "received_at": media.created_at,
+                            },
                         },
                         "replication": None,
+                        "delivery": None,
                     }
                 )
-                if media is not None:
-                    replication = session.scalar(
-                        select(MediaReplicationSession).where(
-                            MediaReplicationSession.media_object_id == media.media_object_id,
-                            MediaReplicationSession.presentation_version_id
-                            == version.presentation_version_id,
+                delivery = delivery_by_version.get(version.presentation_version_id)
+                if delivery is not None:
+                    delivery_job = jobs.get(delivery.transfer_session_id)
+                    history[-1]["delivery"] = {
+                        "transfer_session_id": delivery.transfer_session_id,
+                        "state": delivery.state,
+                        "confirmed_offset": delivery.confirmed_offset,
+                        "expected_size": delivery.expected_size,
+                        "percent": round(
+                            delivery.confirmed_offset * 100 / delivery.expected_size, 2
                         )
-                    )
+                        if delivery.expected_size
+                        else 0,
+                        "retry_count": delivery.retry_count,
+                        "last_progress_at": delivery.last_progress_at,
+                        "error_detail": delivery.error_detail,
+                        "job_status": delivery_job.status if delivery_job else None,
+                    }
+                if media is not None:
+                    replication = replication_by_version.get(version.presentation_version_id)
                     if replication is not None:
-                        transfer = session.get(TransferJob, replication.replication_session_id)
+                        transfer = jobs.get(replication.replication_session_id)
                         history[-1]["replication"] = {
                             "replication_session_id": replication.replication_session_id,
                             "state": replication.state,
@@ -1304,4 +1372,34 @@ def register_presentation_media_routes(
             "replication_session_id": replication.replication_session_id,
             "state": replication.state,
             "retry_count": replication.retry_count,
+        }
+
+    @app.post("/api/v1/media-deliveries/{transfer_session_id}/retry", tags=["media"])
+    def retry_delivery(transfer_session_id: UUID, session: WriteSession) -> dict[str, object]:
+        delivery = session.get(MediaTransferSession, transfer_session_id, with_for_update=True)
+        transfer = session.get(TransferJob, transfer_session_id, with_for_update=True)
+        if delivery is None or transfer is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "delivery not found")
+        if transfer.transfer_type != "presentation_media.central_pull":
+            raise HTTPException(status.HTTP_409_CONFLICT, "delivery direction is invalid")
+        if transfer.status not in {JobStatus.FAILED, JobStatus.EXHAUSTED, JobStatus.RETRY_WAIT}:
+            raise HTTPException(status.HTTP_409_CONFLICT, "delivery is not retryable")
+        # Keep confirmed_offset, storage allocation, and partial_key: the pull worker resumes the
+        # same durable contiguous range rather than restarting or touching verified local media.
+        transfer.status = JobStatus.RETRY_WAIT
+        transfer.next_attempt_at = utc_now()
+        transfer.claimed_by_worker_id = None
+        transfer.lease_expires_at = None
+        transfer.heartbeat_at = None
+        transfer.error_code = None
+        transfer.last_error = None
+        delivery.state = MediaTransferState.RETRY_WAIT
+        delivery.retry_count += 1
+        delivery.error_detail = None
+        return {
+            "transfer_session_id": delivery.transfer_session_id,
+            "state": delivery.state,
+            "confirmed_offset": delivery.confirmed_offset,
+            "expected_size": delivery.expected_size,
+            "retry_count": delivery.retry_count,
         }

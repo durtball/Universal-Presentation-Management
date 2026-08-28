@@ -276,10 +276,12 @@ export interface SiteMedia extends Row {
   mime_type?: string | null;
   category?: string;
   availability: string;
+  failure_reason?: string | null;
   processing_state?: string | null;
   processing_error?: string | null;
   ingested_at: string;
   checksum?: string | null;
+  content_hash?: string | null;
   hash_algorithm?: string | null;
   transfer_state?: string | null;
 }
@@ -314,6 +316,17 @@ export interface MediaReplication extends Row {
   last_error?: string | null;
   job_status?: string | null;
 }
+export interface MediaDelivery extends Row {
+  transfer_session_id: string;
+  state: string;
+  confirmed_offset: number;
+  expected_size: number;
+  percent: number;
+  retry_count: number;
+  last_progress_at?: string | null;
+  error_detail?: string | null;
+  job_status?: string | null;
+}
 export interface PresentationMediaVersion extends Row {
   presentation_version_id: string;
   version_number: number;
@@ -326,8 +339,30 @@ export interface PresentationMediaVersion extends Row {
     sha256?: string | null;
     availability: string;
     failure_reason?: string | null;
+    provenance?: {
+      origin: string;
+      source_share?: string | null;
+      source_relative_path?: string | null;
+      received_at?: string | null;
+    } | null;
   } | null;
   replication?: MediaReplication | null;
+  delivery?: MediaDelivery | null;
+}
+export interface CentralMediaTransfer extends Row {
+  transfer_job_id: string;
+  status: string;
+  progress: number;
+  confirmed_offset: number;
+  expected_size: number;
+  site_state?: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  last_progress_at?: string | null;
+  completed_at?: string | null;
+  local_media_ready: boolean;
+  error_code?: string | null;
+  last_error?: string | null;
 }
 export interface PresentationMediaRow extends Row {
   presentation_id: string;
@@ -373,6 +408,7 @@ export interface CentralMediaImport extends Row {
   error_detail?: string | null;
   created_at: string;
   updated_at: string;
+  transfer?: CentralMediaTransfer | null;
 }
 export interface MediaRescanProgress extends Row {
   operation_id: string;

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { MediaUploadDialog, PresentationMediaDetail, ReplicationStatus } from "../components/presentationMedia";
+import { DeliveryStatus, MediaUploadDialog, PresentationMediaDetail, ReplicationStatus, TransferActivity } from "../components/presentationMedia";
+import { ProgressBar } from "../components/ProgressBar";
 import { CentralReviewQueue, goodMatchIds, MatchControl, selectedConfirmations } from "../pages/PresentationMedia";
 
 describe("presentation media workflows", () => {
@@ -11,7 +12,8 @@ describe("presentation media workflows", () => {
     fireEvent.change(input, { target: { files: [new File(["one"], "UPM-101.pptx"), new File(["two"], "unknown.pdf")] } });
     fireEvent.click(screen.getByRole("button", { name: "Upload 2 files" }));
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
-    expect(await screen.findAllByText("Staged")).toHaveLength(3); // summary label plus two items
+    expect(await screen.findAllByText("Staged")).toHaveLength(2);
+    expect(within(screen.getByLabelText("Upload summary")).getByText(/Intake ready/)).toHaveTextContent("2");
   });
 
   it("keeps 2,000 rows searchable without rendering the entire list", () => {
@@ -57,7 +59,34 @@ describe("presentation media workflows", () => {
     render(<ReplicationStatus replication={{ replication_session_id: "r1", state: "failed", confirmed_offset: 50, expected_size: 100, retry_count: 2, last_error: "Central connection refused" }} />);
     expect(screen.getByText("Failed")).toBeInTheDocument();
     expect(screen.getByText(/Local media remains ready/)).toBeInTheDocument();
-    expect(screen.getAllByText(/50%/)).toHaveLength(2);
+    expect(screen.getByText(/50%/)).toBeInTheDocument();
+  });
+
+  it("uses accessible progress semantics and byte-weighted aggregate progress", () => {
+    render(<><ProgressBar value={25} max={100} label="Upload deck" status="uploading" direction="upload"/><TransferActivity title="Downloading from Central" transfers={[{confirmed_offset:50,expected_size:100,state:"transferring"},{confirmed_offset:100,expected_size:300,state:"transferring"}]} /></>);
+    expect(screen.getByRole("progressbar", {name:"Upload deck"})).toHaveAttribute("aria-valuenow", "25");
+    expect(screen.getByRole("progressbar", {name:"Downloading from Central aggregate progress"})).toHaveAttribute("aria-valuenow", "150");
+    expect(screen.getByText("38%")).toBeInTheDocument();
+  });
+
+  it("renders Central delivery independently from outbound replication", () => {
+    render(<DeliveryStatus delivery={{transfer_session_id:"d1",state:"failed",confirmed_offset:31,expected_size:100,percent:31,retry_count:1,error_detail:"connection lost"}}/>);
+    expect(screen.getByText("Central → Site delivery")).toBeInTheDocument();
+    expect(screen.getByText(/No verified local copy/)).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", {name:"Download from Central"})).toHaveAttribute("aria-valuenow", "31");
+  });
+
+  it("shows finalizing after browser transmission reaches 100 percent", async () => {
+    let finish!: (value:{state:"needs_review"})=>void;
+    const upload = vi.fn((_file:File, progress:(value:number)=>void) => { progress(100); return new Promise<{state:"needs_review"}>((resolve)=>{finish=resolve;}); });
+    render(<MediaUploadDialog title="Upload media" onClose={()=>undefined} upload={upload}/>);
+    fireEvent.change(document.querySelector('input[type="file"]')!, {target:{files:[new File(["text"],"deck.pptx")]}});
+    fireEvent.click(screen.getByRole("button",{name:"Upload 1 file"}));
+    expect(await screen.findByText("Finalizing / verifying")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Upload summary")).getByText(/Finalizing \/ verifying/)).toHaveTextContent("1");
+    finish({state:"needs_review"});
+    expect(await screen.findByText("Needs review")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Upload summary")).getByText(/Needs review/)).toHaveTextContent("1");
   });
 });
 

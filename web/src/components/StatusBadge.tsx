@@ -16,6 +16,13 @@ const semantics: Record<string, { tone: string; label: string }> = {
   processing: { tone: "info", label: "Processing" },
   transfer_pending: { tone: "warning", label: "Transfer pending" },
   transferring: { tone: "info", label: "Transferring" },
+  queued: { tone: "warning", label: "Queued" },
+  finalizing: { tone: "info", label: "Finalizing / verifying" },
+  verifying: { tone: "info", label: "Verifying" },
+  intake_ready: { tone: "success", label: "Intake ready" },
+  completed: { tone: "success", label: "Complete" },
+  synced: { tone: "success", label: "Synced" },
+  local_only: { tone: "warning", label: "Local only" },
   missing: { tone: "warning", label: "Missing" },
   error: { tone: "danger", label: "Error" },
   parsing: { tone: "info", label: "Parsing" },
@@ -41,6 +48,7 @@ const semantics: Record<string, { tone: string; label: string }> = {
   revoked: { tone: "danger", label: "Revoked" },
   disabled: { tone: "neutral", label: "Disabled" },
   cancelled: { tone: "neutral", label: "Cancelled" },
+  expired: { tone: "neutral", label: "Expired" },
 };
 
 export function statusInfo(value: unknown) {
