@@ -725,10 +725,23 @@ def register_presentation_media_routes(
             .limit(limit)
         ).all()
         media_ids = [item.media_object_id for item in media]
+        # An intake object can retain historical assets after an explicit reassignment.  Choose
+        # the newest immutable version deterministically; an unordered dict previously allowed
+        # polling to report the old automatic/confirmed target after an operator chose a new one.
         assigned_assets = {
             asset.media_object_id: asset
             for asset in session.scalars(
-                select(PresentationAsset).where(PresentationAsset.media_object_id.in_(media_ids))
+                select(PresentationAsset)
+                .join(
+                    PresentationVersion,
+                    PresentationVersion.presentation_version_id
+                    == PresentationAsset.presentation_version_id,
+                )
+                .where(PresentationAsset.media_object_id.in_(media_ids))
+                .order_by(
+                    PresentationVersion.created_at,
+                    PresentationVersion.presentation_version_id,
+                )
             )
         }
         promotion_jobs = {
@@ -805,6 +818,20 @@ def register_presentation_media_routes(
                 if match is not None and match.presentation_id
                 else None
             )
+            assigned_presentation = (
+                candidate_by_id.get(str(assigned_version.presentation_id))
+                if assigned_version is not None
+                else None
+            )
+            if assigned_version is not None and assigned_presentation is None:
+                assigned = session.get(Presentation, assigned_version.presentation_id)
+                assigned_rows = _candidate_rows(
+                    session,
+                    event_id,
+                    assigned.presentation_identifier if assigned is not None else "",
+                    1,
+                )
+                assigned_presentation = assigned_rows[0] if assigned_rows else None
             items.append(
                 {
                     "media_object_id": item.media_object_id,
@@ -815,6 +842,7 @@ def register_presentation_media_routes(
                     "received_at": item.created_at,
                     "availability": item.availability,
                     "suggestion": suggestion,
+                    "assigned_presentation": assigned_presentation,
                     "confidence": match.confidence if match is not None else None,
                     "match_state": match.state if match is not None else "assigned",
                     "match_reason": match.reason if match is not None else "operator confirmed",
@@ -824,6 +852,7 @@ def register_presentation_media_routes(
                     "assigned_presentation_version_id": (
                         assigned_version.presentation_version_id if assigned_version else None
                     ),
+                    "assignment_source": "operator" if assigned_version else None,
                     "commit_state": (
                         promotion.status if promotion is not None else "needs_assignment"
                     ),

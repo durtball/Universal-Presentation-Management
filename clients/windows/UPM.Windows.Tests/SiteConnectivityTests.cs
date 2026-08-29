@@ -154,6 +154,41 @@ public sealed class SiteConnectivityTests
   }
 
   [Fact]
+  public async Task CanonicalPresentationDownloadStreamsAndReportsProgress()
+  {
+    var versionId = Guid.NewGuid();
+    var bytes = Enumerable.Range(0, 300_000).Select(value => (byte)(value % 251)).ToArray();
+    var handler = new RecordingHandler(request =>
+        request.RequestUri!.AbsolutePath == $"/api/v1/presentation-versions/{versionId}/download"
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) }
+            : throw new InvalidOperationException(request.RequestUri.AbsolutePath));
+    var api = CreateApi(handler);
+    await using var destination = new MemoryStream();
+    var reported = new List<double>();
+
+    await api.CopyPresentationVersionAsync(
+        versionId,
+        destination,
+        CancellationToken.None,
+        new SynchronousProgress<double>(reported.Add));
+
+    Assert.Equal(bytes, destination.ToArray());
+    Assert.Equal(100, reported[^1]);
+  }
+
+  [Fact]
+  public async Task MissingCanonicalPresentationHasActionableError()
+  {
+    var versionId = Guid.NewGuid();
+    var api = CreateApi(new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
+
+    var error = await Assert.ThrowsAsync<SiteEndpointException>(() =>
+        api.CopyPresentationVersionAsync(versionId, new MemoryStream(), CancellationToken.None));
+
+    Assert.Contains("MEDIA NOT AVAILABLE LOCALLY", error.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task IdentityMismatchIsRejectedAndTransferKeepsOwningProfile()
   {
     var expectedSite = Guid.NewGuid();
@@ -314,6 +349,11 @@ public sealed class SiteConnectivityTests
       Requests.Add(request);
       return Task.FromResult(response(request));
     }
+  }
+
+  private sealed class SynchronousProgress<T>(Action<T> report) : IProgress<T>
+  {
+    public void Report(T value) => report(value);
   }
 
   private sealed class FakeFactory : ISiteClientFactory

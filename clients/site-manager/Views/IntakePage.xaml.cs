@@ -1,7 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Windows.ApplicationModel.DataTransfer;
+using global::Windows.ApplicationModel.DataTransfer;
 using Microsoft.Extensions.DependencyInjection;
 using UPM.Windows.Core;
 using UPM.Windows.SiteApi;
@@ -18,6 +18,7 @@ public sealed partial class IntakePage : Page
   private readonly List<SiteIntakeRow> siteIntake = [];
   private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(2) };
   private bool reloading;
+  private bool assignmentEditing;
 
   public IntakePage()
   {
@@ -32,10 +33,14 @@ public sealed partial class IntakePage : Page
     args.AcceptedOperation = DataPackageOperation.Copy;
     args.DragUIOverride.Caption = "Queue in UPM Site Manager";
     args.DragUIOverride.IsCaptionVisible = true;
+    DropSurface.BorderBrush = new SolidColorBrush(Colors.Cyan);
+    DropSurface.BorderThickness = new Thickness(2);
   }
 
   private async void OnDrop(object sender, DragEventArgs args)
   {
+    DropSurface.BorderBrush = (Brush)Application.Current.Resources["VioletBrush"];
+    DropSurface.BorderThickness = new Thickness(1);
     if (!args.DataView.Contains(StandardDataFormats.StorageItems))
     {
       return;
@@ -47,7 +52,7 @@ public sealed partial class IntakePage : Page
 
   private async void OnSelectFiles(object sender, RoutedEventArgs args)
   {
-    var picker = new Windows.Storage.Pickers.FileOpenPicker();
+    var picker = new global::Windows.Storage.Pickers.FileOpenPicker();
     picker.FileTypeFilter.Add("*");
     WinRT.Interop.InitializeWithWindow.Initialize(
         picker,
@@ -58,7 +63,7 @@ public sealed partial class IntakePage : Page
 
   private async void OnSelectFolder(object sender, RoutedEventArgs args)
   {
-    var picker = new Windows.Storage.Pickers.FolderPicker();
+    var picker = new global::Windows.Storage.Pickers.FolderPicker();
     picker.FileTypeFilter.Add("*");
     WinRT.Interop.InitializeWithWindow.Initialize(
         picker,
@@ -143,6 +148,8 @@ public sealed partial class IntakePage : Page
 
   private async Task ReloadSiteIntakeAsync()
   {
+    if (assignmentEditing) return;
+    var selectedMediaId = (SiteIntakeList.SelectedItem as SiteIntakeRow)?.MediaId;
     siteIntake.Clear();
     SiteIntakeList.Items.Clear();
     if (context.ActiveClient is not { } api || context.SelectedEventId is not Guid eventId)
@@ -153,6 +160,7 @@ public sealed partial class IntakePage : Page
     foreach (var item in payload.Items())
     {
       var suggestion = item.Child("suggestion");
+      var assigned = item.Child("assigned_presentation");
       var row = new SiteIntakeRow
       {
         MediaId = item.Id("media_object_id"),
@@ -161,15 +169,22 @@ public sealed partial class IntakePage : Page
         CanRetry = item.Text("commit_state", "").Equals("failed", StringComparison.OrdinalIgnoreCase) || item.Text("commit_state", "").Equals("exhausted", StringComparison.OrdinalIgnoreCase),
         Filename = item.Text("filename"),
         RelativePath = item.Text("source_relative_path"),
-        MatchState = $"{item.Text("match_state", "UNASSIGNED").ToUpperInvariant()} • {item.Text("commit_state", "NEEDS ASSIGNMENT").ToUpperInvariant()}",
+        MatchState = item.Id("assigned_presentation_id").HasValue
+            ? $"OPERATOR ASSIGNED • {item.Text("commit_state", "PENDING").ToUpperInvariant()}"
+            : $"{item.Text("match_state", "NEEDS ASSIGNMENT").ToUpperInvariant()} • {item.Text("commit_state", "NEEDS ASSIGNMENT").ToUpperInvariant()}",
         Evidence = item.Text("match_reason", "No confident match evidence"),
         Suggested = suggestion.ValueKind == System.Text.Json.JsonValueKind.Object
             ? $"{string.Join(", ", suggestion.Items("presenters").Select(value => value.ToString()))}\n{suggestion.Text("title")}\n{suggestion.Text("session_title")}  •  {suggestion.Text("room")}  •  {JsonProjection.LocalTime(suggestion.Text("starts_at", ""))}\nPresentation: {suggestion.Text("presentation_identifier")}"
             : "No suggested Presentation Entry",
+        Assigned = assigned.ValueKind == System.Text.Json.JsonValueKind.Object
+            ? $"{string.Join(", ", assigned.Items("presenters").Select(value => value.ToString()))}\n{assigned.Text("title")}\n{assigned.Text("session_title")}  •  {assigned.Text("room")}  •  {JsonProjection.LocalTime(assigned.Text("starts_at", ""))}\nPresentation: {assigned.Text("presentation_identifier")}"
+            : "Not explicitly assigned",
       };
       siteIntake.Add(row);
       SiteIntakeList.Items.Add(row);
     }
+    if (selectedMediaId.HasValue)
+      SiteIntakeList.SelectedItem = siteIntake.FirstOrDefault(item => item.MediaId == selectedMediaId);
   }
 
   private void OnSiteIntakeSelection(object sender, SelectionChangedEventArgs args)
@@ -186,7 +201,9 @@ public sealed partial class IntakePage : Page
     InspectFile.Text = row.Filename;
     InspectPath.Text = row.RelativePath;
     InspectEvidence.Text = row.Evidence;
-    InspectTarget.Text = row.Suggested;
+    InspectTarget.Text = row.AssignedPresentationId.HasValue
+        ? $"OPERATOR ASSIGNMENT\n{row.Assigned}\n\nMATCH SUGGESTION (advisory)\n{row.Suggested}"
+        : $"MATCH SUGGESTION (advisory)\n{row.Suggested}";
     ConfirmButton.IsEnabled = row.MediaId.HasValue && row.PresentationId.HasValue;
     AssignButton.IsEnabled = row.MediaId.HasValue;
     CreateEntryButton.IsEnabled = row.MediaId.HasValue;
@@ -213,6 +230,7 @@ public sealed partial class IntakePage : Page
     var search = new TextBox { PlaceholderText = "Presenter, Presentation Entry, Session, room, time, or identifier" };
     var results = new ListView { Height = 280, SelectionMode = ListViewSelectionMode.Single };
     var status = new TextBlock { Text = "Enter at least one search character.", TextWrapping = TextWrapping.Wrap };
+    var reassignmentKeys = new Dictionary<Guid, string>();
     search.TextChanged += async (_, _) =>
     {
       results.Items.Clear();
@@ -233,17 +251,47 @@ public sealed partial class IntakePage : Page
     };
     var panel = new StackPanel { Spacing = 6 };
     panel.Children.Add(search); panel.Children.Add(status); panel.Children.Add(results);
-    var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "ASSIGN PRESENTATION ENTRY", Content = panel, PrimaryButtonText = "ASSIGN", CloseButtonText = "CANCEL", DefaultButton = ContentDialogButton.Primary };
-    if (await dialog.ShowAsync() != ContentDialogResult.Primary || results.SelectedItem is not AssignmentCandidate target || target.PresentationId == Guid.Empty) return;
-    try
+    var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "ASSIGN PRESENTATION ENTRY", Content = panel, PrimaryButtonText = "ASSIGN", CloseButtonText = "CANCEL", DefaultButton = ContentDialogButton.Primary, IsPrimaryButtonEnabled = false };
+    results.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = results.SelectedItem is AssignmentCandidate;
+    var accepted = false;
+    dialog.PrimaryButtonClick += async (_, clickArgs) =>
     {
-      if (row.AssignedPresentationId.HasValue)
-        await api.ChangeMediaAssignmentAsync(mediaId, target.PresentationId, $"site-manager:{mediaId}:{target.PresentationId}", CancellationToken.None);
-      else
-        await api.ConfirmMediaAssignmentAsync(mediaId, target.PresentationId, CancellationToken.None);
-      await ReloadSiteIntakeAsync();
-    }
-    catch (Exception exception) { await ShowErrorAsync("ASSIGNMENT FAILED", exception.Message); }
+      clickArgs.Cancel = true;
+      if (results.SelectedItem is not AssignmentCandidate target || target.PresentationId == Guid.Empty) return;
+      var deferral = clickArgs.GetDeferral();
+      dialog.IsPrimaryButtonEnabled = false;
+      status.Text = "Saving authoritative operator assignment…";
+      try
+      {
+        System.Text.Json.JsonElement authoritative;
+        if (row.AssignedPresentationId.HasValue)
+          authoritative = await api.ChangeMediaAssignmentAsync(
+              mediaId,
+              target.PresentationId,
+              reassignmentKeys.TryGetValue(target.PresentationId, out var existingKey)
+                  ? existingKey
+                  : reassignmentKeys[target.PresentationId] = $"site-manager:{mediaId}:{target.PresentationId}:{Guid.NewGuid()}",
+              CancellationToken.None);
+        else
+          authoritative = await api.ConfirmMediaAssignmentAsync(mediaId, target.PresentationId, CancellationToken.None);
+        if (authoritative.Id("presentation_id") != target.PresentationId)
+          throw new InvalidDataException("Site returned a different authoritative Presentation Entry.");
+        row.AssignedPresentationId = target.PresentationId;
+        row.MatchState = "OPERATOR ASSIGNED • COMMIT PENDING";
+        accepted = true;
+        dialog.Hide();
+      }
+      catch (Exception exception)
+      {
+        status.Text = $"Assignment failed: {exception.Message}";
+        dialog.IsPrimaryButtonEnabled = true;
+      }
+      finally { deferral.Complete(); }
+    };
+    assignmentEditing = true;
+    try { await dialog.ShowAsync(); }
+    finally { assignmentEditing = false; }
+    if (accepted) await ReloadSiteIntakeAsync();
   }
 
   private async void OnCreateEntry(object sender, RoutedEventArgs args)
@@ -309,6 +357,7 @@ public sealed class SiteIntakeRow
   public string MatchState { get; set; } = "UNASSIGNED";
   public string Evidence { get; set; } = "—";
   public string Suggested { get; set; } = "—";
+  public string Assigned { get; set; } = "—";
 }
 
 public sealed record AssignmentCandidate(Guid PresentationId, string Label) { public override string ToString() => Label; }

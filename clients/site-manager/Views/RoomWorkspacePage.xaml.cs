@@ -5,13 +5,12 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using UPM.Windows.SiteApi;
-using Windows.Storage;
-using Windows.System;
 
 namespace UPM.SiteManager.Views;
 
 public sealed partial class RoomWorkspacePage : Page
 {
+  private readonly PresentationOpenService opener = new();
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly ObservableCollection<RoomScheduleRow> rows = [];
   private Guid roomId;
@@ -119,7 +118,9 @@ public sealed partial class RoomWorkspacePage : Page
             PresentationId = presentation.Id("presentation_id") ?? Guid.Empty,
             PresentationVersionId = latest.Id("presentation_version_id"),
             VersionNumber = latest.NullableLong("version_number")?.ToString() ?? "—",
-            Filename = media.Text("filename", $"{presentation.Text("title", "presentation")}.pptx"),
+            Filename = media.Text("original_filename", media.Text("filename", $"{presentation.Text("title", "presentation")}.pptx")),
+            SizeBytes = media.NullableLong("size_bytes"),
+            Sha256 = media.Text("sha256", ""),
             Readiness = presentation.Text("operational_status", "UNKNOWN").ToUpperInvariant(),
           });
         }
@@ -137,30 +138,20 @@ public sealed partial class RoomWorkspacePage : Page
   {
     if (context.ActiveClient is not { } api || row.PresentationVersionId is not Guid versionId)
     {
-      Show("This Presentation Entry has no Site-managed version to open.", InfoBarSeverity.Warning);
+      Show("NO COMMITTED VERSION — this Presentation Entry has no canonical Site version to open here.", InfoBarSeverity.Warning);
       return;
     }
     try
     {
-      var safeName = string.Concat(row.Filename.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
-      var file = await ApplicationData.Current.TemporaryFolder.CreateFileAsync(
-          safeName,
-          CreationCollisionOption.GenerateUniqueName);
-      await using (var target = await file.OpenStreamForWriteAsync())
-      {
-        await api.CopyPresentationVersionAsync(versionId, target, CancellationToken.None);
-      }
-      if (!await Launcher.LaunchFileAsync(file))
-      {
-        Show("Windows has no application registered for this presentation type.", InfoBarSeverity.Warning);
-      }
+      var progress = new Progress<PresentationOpenProgress>(update =>
+          Show(update.Percent.HasValue ? $"{update.State} {update.Percent:0}%" : update.State, InfoBarSeverity.Informational));
+      var result = await opener.OpenAsync(api, new(versionId, row.Filename, row.SizeBytes, string.IsNullOrWhiteSpace(row.Sha256) ? null : row.Sha256), progress, CancellationToken.None);
+      Show(result.Message, result.Launched ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
     }
-    catch (Exception exception)
-    {
-      Show(exception.Message, InfoBarSeverity.Error);
-    }
+    catch (SiteEndpointException exception) { Show($"MEDIA NOT AVAILABLE LOCALLY — {exception.Message}", InfoBarSeverity.Error); }
+    catch (InvalidDataException exception) { Show($"DOWNLOAD VERIFICATION FAILED — {exception.Message}", InfoBarSeverity.Error); }
+    catch (Exception exception) { Show(exception.Message, InfoBarSeverity.Error); }
   }
-
   private async Task SendCommandAsync(RoomScheduleRow row, string commandType)
   {
     if (context.ActiveClient is not { } api)
@@ -236,5 +227,7 @@ public sealed class RoomScheduleRow
   public Guid? PresentationVersionId { get; set; }
   public string VersionNumber { get; set; } = "—";
   public string Filename { get; set; } = "presentation.pptx";
+  public long? SizeBytes { get; set; }
+  public string Sha256 { get; set; } = "";
   public string Readiness { get; set; } = "UNKNOWN";
 }
