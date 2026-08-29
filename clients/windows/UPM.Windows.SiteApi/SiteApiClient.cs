@@ -373,6 +373,27 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     return await ReadAsync<JsonElement>(response, cancellationToken);
   }
 
+  public Task<JsonElement> GetProgramImportAsync(Guid batchId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/program-imports/{batchId}", cancellationToken);
+
+  public async Task<JsonElement> UpdateProgramImportRowAsync(
+      Guid batchId,
+      Guid rowId,
+      IReadOnlyDictionary<string, object?> correctedValues,
+      bool reject,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(
+        HttpMethod.Patch,
+        $"api/v1/program-imports/{batchId}/rows/{rowId}");
+    request.Content = JsonContent.Create(
+        new { corrected_values = correctedValues, reject },
+        options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, reject ? "program row rejection" : "program row correction");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
   public Task<JsonElement> GetMediaStorageAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/media-storage", cancellationToken);
 

@@ -217,6 +217,10 @@ public sealed class SiteConnectivityTests
           Json("""{"import_batch_id":"019b5555-5555-7555-8555-555555555555"}"""),
       "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555/commit" =>
           Json("""{"status":"committed"}"""),
+      "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555" =>
+          Json("""{"status":"review","rows":[]}"""),
+      "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555/rows/019b7777-7777-7777-8777-777777777777" =>
+          Json("""{"validation_state":"valid"}"""),
       "/api/v1/presentations/019b6666-6666-7666-8666-666666666666/assignment" =>
           Json("""{"revision":2}"""),
       _ => throw new InvalidOperationException(request.RequestUri.AbsolutePath),
@@ -234,6 +238,13 @@ public sealed class SiteConnectivityTests
         new MemoryStream("Session Title\nOpening"u8.ToArray()),
         CancellationToken.None);
     await api.CommitProgramImportAsync(batchId, CancellationToken.None);
+    await api.GetProgramImportAsync(batchId, CancellationToken.None);
+    await api.UpdateProgramImportRowAsync(
+        batchId,
+        Guid.Parse("019b7777-7777-7777-8777-777777777777"),
+        new Dictionary<string, object?> { ["session_title"] = "Corrected" },
+        false,
+        CancellationToken.None);
     await api.UpdatePresentationAssignmentAsync(
         presentationId,
         Guid.NewGuid(),
