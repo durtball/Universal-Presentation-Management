@@ -30,6 +30,7 @@ public sealed partial class MainWindow : Window
   private readonly LocalStateStore store;
   private readonly ISiteConnectionManager connections;
   private readonly IOperatorContext operatorContext;
+  private readonly StartupDiagnostics diagnostics;
   private readonly ObservableCollection<SiteProfile> profiles = [];
   private readonly ObservableCollection<EventDeployment> events = [];
   private readonly DispatcherTimer clock = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -38,18 +39,25 @@ public sealed partial class MainWindow : Window
   public MainWindow(
       LocalStateStore store,
       ISiteConnectionManager connections,
-      IOperatorContext operatorContext)
+      IOperatorContext operatorContext,
+      StartupDiagnostics diagnostics)
   {
     this.store = store;
     this.connections = connections;
     this.operatorContext = operatorContext;
+    this.diagnostics = diagnostics;
+    diagnostics.EnterPhase("main window XAML initialization");
     InitializeComponent();
+    diagnostics.EnterPhase("main window shell initialization");
     SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
     AppWindow.Resize(new SizeInt32(1280, 800));
     SiteSelector.ItemsSource = profiles;
     EventSelector.ItemsSource = events;
     connections.ConnectionChanged += OnConnectionChanged;
-    ContentFrame.Navigate(typeof(DashboardPage));
+    diagnostics.EnterPhase("initial Dashboard navigation");
+    if (!ContentFrame.Navigate(typeof(DashboardPage)))
+      throw new InvalidOperationException("WinUI could not navigate to the initial Dashboard page.");
+    diagnostics.EnterPhase("main window shell finalization");
     PrimaryNavigation.SelectedItem = PrimaryNavigation.MenuItems[0];
     clock.Tick += (_, _) => UpdateClock();
     clock.Start();

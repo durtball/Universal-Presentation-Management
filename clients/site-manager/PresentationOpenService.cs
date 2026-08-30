@@ -5,13 +5,19 @@ namespace UPM.SiteManager;
 
 public sealed class PresentationOpenService
 {
-  private readonly PresentationCache cache;
+  private readonly string cacheRoot;
+  private PresentationCache? cache;
   private readonly HashSet<Guid> activeDownloads = [];
 
   public PresentationOpenService()
   {
-    var root = Path.Combine(global::Windows.Storage.ApplicationData.Current.LocalCacheFolder.Path, "PresentationCache");
-    cache = new PresentationCache(root);
+    // Construction happens while WinUI creates a Page. Do not touch ApplicationData, StorageFile,
+    // Launcher, or any other apartment-sensitive WinRT API until the operator invokes Open Here.
+    cacheRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "UPM",
+        "SiteManager",
+        "PresentationCache");
   }
 
   public async Task<PresentationOpenResult> OpenAsync(SiteApiClient api, PresentationOpenRequest request, IProgress<PresentationOpenProgress>? progress, CancellationToken cancellationToken)
@@ -24,6 +30,7 @@ public sealed class PresentationOpenService
     {
       progress?.Report(new("PREPARING", null));
       var transferProgress = new Progress<double>(value => progress?.Report(new("DOWNLOADING", value)));
+      cache ??= new PresentationCache(cacheRoot);
       var cached = await cache.GetOrDownloadAsync(
           new(request.PresentationVersionId, request.Filename, request.ExpectedSize, request.ExpectedSha256),
           (target, reported, token) => api.CopyPresentationVersionAsync(request.PresentationVersionId, target, token, reported),

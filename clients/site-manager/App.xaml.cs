@@ -12,7 +12,6 @@ public partial class App : Application
 {
   private readonly IHost host;
   private readonly StartupDiagnostics diagnostics;
-  private string startupStage = "application construction";
 
   public App()
   {
@@ -21,12 +20,21 @@ public partial class App : Application
         "UPM",
         "SiteManager");
     diagnostics = new StartupDiagnostics(root);
+    AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+    {
+      if (eventArgs.ExceptionObject is Exception exception)
+        diagnostics.WriteFailure(diagnostics.Phase, exception);
+    };
+    TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
+    {
+      diagnostics.WriteFailure(diagnostics.Phase, eventArgs.Exception);
+    };
     try
     {
-      startupStage = "WinUI resource initialization";
+      SetStartupPhase("WinUI resource initialization");
       InitializeComponent();
       UnhandledException += OnUnhandledException;
-      startupStage = "dependency injection configuration";
+      SetStartupPhase("dependency injection configuration");
       host = Host.CreateDefaultBuilder()
           .ConfigureLogging(logging => logging.AddProvider(new LocalFileLoggerProvider(root)))
                 .ConfigureServices(services =>
@@ -46,7 +54,7 @@ public partial class App : Application
     }
     catch (Exception exception)
     {
-      diagnostics.WriteFailure(startupStage, exception);
+      diagnostics.WriteFailure(diagnostics.Phase, exception);
       throw;
     }
   }
@@ -57,23 +65,30 @@ public partial class App : Application
   {
     try
     {
-      startupStage = "local state initialization";
+      SetStartupPhase("local state initialization");
       await host.Services.GetRequiredService<LocalStateStore>().InitializeAsync();
-      startupStage = "background service startup";
+      SetStartupPhase("background service startup");
       await host.StartAsync();
-      startupStage = "main window creation";
-      host.Services.GetRequiredService<MainWindow>().Activate();
-      startupStage = "running";
+      SetStartupPhase("main window creation");
+      var window = host.Services.GetRequiredService<MainWindow>();
+      SetStartupPhase("main window activation");
+      window.Activate();
+      SetStartupPhase("running");
     }
     catch (Exception exception)
     {
-      diagnostics.WriteFailure(startupStage, exception);
+      diagnostics.WriteFailure(diagnostics.Phase, exception);
       throw;
     }
   }
 
   private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs args)
   {
-    diagnostics.WriteFailure(startupStage, args.Exception);
+    diagnostics.WriteFailure(diagnostics.Phase, args.Exception);
+  }
+
+  private void SetStartupPhase(string phase)
+  {
+    diagnostics.EnterPhase(phase);
   }
 }

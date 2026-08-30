@@ -8,6 +8,16 @@ namespace UPM.Windows.Tests;
 public sealed class PresentationCacheTests
 {
   [Fact]
+  public void ConstructionDoesNotCreateOrAccessCacheDirectory()
+  {
+    var root = Path.Combine(Path.GetTempPath(), $"upm-cache-{Guid.NewGuid():N}");
+
+    _ = new PresentationCache(root);
+
+    Assert.False(Directory.Exists(root));
+  }
+
+  [Fact]
   public async Task MissingVersionDownloadsVerifiesAndThenReusesCache()
   {
     using var root = new TemporaryDirectory();

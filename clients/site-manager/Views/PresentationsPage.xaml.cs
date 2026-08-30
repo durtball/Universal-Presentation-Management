@@ -10,7 +10,7 @@ using UPM.Windows.SiteApi;
 namespace UPM.SiteManager.Views;
 public sealed partial class PresentationsPage : Page
 {
-  private readonly PresentationOpenService opener = new();
+  private PresentationOpenService? opener;
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly ObservableCollection<PresentationRow> rows = [];
   private readonly List<PresentationRow> allRows = [];
@@ -83,7 +83,7 @@ public sealed partial class PresentationsPage : Page
         StateBar.Severity = InfoBarSeverity.Informational;
         StateBar.IsOpen = true;
       });
-      var result = await opener.OpenAsync(api, new(versionId, row.Filename == "—" ? $"{row.Title}.pptx" : row.Filename, row.SizeBytes, row.Hash == "—" ? null : row.Hash), progress, CancellationToken.None);
+      var result = await (opener ??= new PresentationOpenService()).OpenAsync(api, new(versionId, row.Filename == "—" ? $"{row.Title}.pptx" : row.Filename, row.SizeBytes, row.Hash == "—" ? null : row.Hash), progress, CancellationToken.None);
       StateBar.Title = result.Launched ? "OPENED HERE" : "OPEN FAILED";
       StateBar.Message = result.Message;
       StateBar.Severity = result.Launched ? InfoBarSeverity.Success : InfoBarSeverity.Warning;

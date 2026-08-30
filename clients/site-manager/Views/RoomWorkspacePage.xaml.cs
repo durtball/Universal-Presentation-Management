@@ -10,7 +10,7 @@ namespace UPM.SiteManager.Views;
 
 public sealed partial class RoomWorkspacePage : Page
 {
-  private readonly PresentationOpenService opener = new();
+  private PresentationOpenService? opener;
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly ObservableCollection<RoomScheduleRow> rows = [];
   private Guid roomId;
@@ -145,7 +145,7 @@ public sealed partial class RoomWorkspacePage : Page
     {
       var progress = new Progress<PresentationOpenProgress>(update =>
           Show(update.Percent.HasValue ? $"{update.State} {update.Percent:0}%" : update.State, InfoBarSeverity.Informational));
-      var result = await opener.OpenAsync(api, new(versionId, row.Filename, row.SizeBytes, string.IsNullOrWhiteSpace(row.Sha256) ? null : row.Sha256), progress, CancellationToken.None);
+      var result = await (opener ??= new PresentationOpenService()).OpenAsync(api, new(versionId, row.Filename, row.SizeBytes, string.IsNullOrWhiteSpace(row.Sha256) ? null : row.Sha256), progress, CancellationToken.None);
       Show(result.Message, result.Launched ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
     }
     catch (SiteEndpointException exception) { Show($"MEDIA NOT AVAILABLE LOCALLY — {exception.Message}", InfoBarSeverity.Error); }
