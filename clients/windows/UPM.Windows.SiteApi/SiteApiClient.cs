@@ -373,6 +373,27 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     return await ReadAsync<JsonElement>(response, cancellationToken);
   }
 
+  public Task<JsonElement> GetProgramImportAsync(Guid batchId, CancellationToken cancellationToken) =>
+      GetAsync<JsonElement>($"api/v1/program-imports/{batchId}", cancellationToken);
+
+  public async Task<JsonElement> UpdateProgramImportRowAsync(
+      Guid batchId,
+      Guid rowId,
+      IReadOnlyDictionary<string, object?> correctedValues,
+      bool reject,
+      CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(
+        HttpMethod.Patch,
+        $"api/v1/program-imports/{batchId}/rows/{rowId}");
+    request.Content = JsonContent.Create(
+        new { corrected_values = correctedValues, reject },
+        options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, reject ? "program row rejection" : "program row correction");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
   public Task<JsonElement> GetMediaStorageAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/media-storage", cancellationToken);
 
@@ -585,15 +606,32 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public async Task CopyPresentationVersionAsync(
       Guid presentationVersionId,
       Stream destination,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      IProgress<double>? progress = null)
   {
     using var response = await http.GetAsync(
         $"api/v1/presentation-versions/{presentationVersionId}/download",
         HttpCompletionOption.ResponseHeadersRead,
         cancellationToken);
+    if (response.StatusCode == HttpStatusCode.NotFound)
+      throw new SiteEndpointException(
+          "MEDIA NOT AVAILABLE LOCALLY — the current version has no committed canonical Site bytes.",
+          SiteConnectionState.Error);
     EnsureSiteSuccess(response, "presentation download");
     await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-    await source.CopyToAsync(destination, cancellationToken);
+    var expected = response.Content.Headers.ContentLength;
+    var buffer = new byte[1024 * 128];
+    long copied = 0;
+    while (true)
+    {
+      var read = await source.ReadAsync(buffer, cancellationToken);
+      if (read == 0) break;
+      await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+      copied += read;
+      if (expected > 0) progress?.Report(100d * copied / expected.Value);
+    }
+    if (expected.HasValue && copied != expected.Value)
+      throw new EndOfStreamException($"Site download ended at {copied} of {expected.Value} bytes.");
   }
 
   public async Task<JsonElement> UpdatePresentationAssignmentAsync(

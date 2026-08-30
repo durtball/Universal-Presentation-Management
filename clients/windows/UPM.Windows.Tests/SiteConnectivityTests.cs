@@ -154,6 +154,41 @@ public sealed class SiteConnectivityTests
   }
 
   [Fact]
+  public async Task CanonicalPresentationDownloadStreamsAndReportsProgress()
+  {
+    var versionId = Guid.NewGuid();
+    var bytes = Enumerable.Range(0, 300_000).Select(value => (byte)(value % 251)).ToArray();
+    var handler = new RecordingHandler(request =>
+        request.RequestUri!.AbsolutePath == $"/api/v1/presentation-versions/{versionId}/download"
+            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) }
+            : throw new InvalidOperationException(request.RequestUri.AbsolutePath));
+    var api = CreateApi(handler);
+    await using var destination = new MemoryStream();
+    var reported = new List<double>();
+
+    await api.CopyPresentationVersionAsync(
+        versionId,
+        destination,
+        CancellationToken.None,
+        new SynchronousProgress<double>(reported.Add));
+
+    Assert.Equal(bytes, destination.ToArray());
+    Assert.Equal(100, reported[^1]);
+  }
+
+  [Fact]
+  public async Task MissingCanonicalPresentationHasActionableError()
+  {
+    var versionId = Guid.NewGuid();
+    var api = CreateApi(new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
+
+    var error = await Assert.ThrowsAsync<SiteEndpointException>(() =>
+        api.CopyPresentationVersionAsync(versionId, new MemoryStream(), CancellationToken.None));
+
+    Assert.Contains("MEDIA NOT AVAILABLE LOCALLY", error.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task IdentityMismatchIsRejectedAndTransferKeepsOwningProfile()
   {
     var expectedSite = Guid.NewGuid();
@@ -217,6 +252,10 @@ public sealed class SiteConnectivityTests
           Json("""{"import_batch_id":"019b5555-5555-7555-8555-555555555555"}"""),
       "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555/commit" =>
           Json("""{"status":"committed"}"""),
+      "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555" =>
+          Json("""{"status":"review","rows":[]}"""),
+      "/api/v1/program-imports/019b5555-5555-7555-8555-555555555555/rows/019b7777-7777-7777-8777-777777777777" =>
+          Json("""{"validation_state":"valid"}"""),
       "/api/v1/presentations/019b6666-6666-7666-8666-666666666666/assignment" =>
           Json("""{"revision":2}"""),
       _ => throw new InvalidOperationException(request.RequestUri.AbsolutePath),
@@ -234,6 +273,13 @@ public sealed class SiteConnectivityTests
         new MemoryStream("Session Title\nOpening"u8.ToArray()),
         CancellationToken.None);
     await api.CommitProgramImportAsync(batchId, CancellationToken.None);
+    await api.GetProgramImportAsync(batchId, CancellationToken.None);
+    await api.UpdateProgramImportRowAsync(
+        batchId,
+        Guid.Parse("019b7777-7777-7777-8777-777777777777"),
+        new Dictionary<string, object?> { ["session_title"] = "Corrected" },
+        false,
+        CancellationToken.None);
     await api.UpdatePresentationAssignmentAsync(
         presentationId,
         Guid.NewGuid(),
@@ -303,6 +349,11 @@ public sealed class SiteConnectivityTests
       Requests.Add(request);
       return Task.FromResult(response(request));
     }
+  }
+
+  private sealed class SynchronousProgress<T>(Action<T> report) : IProgress<T>
+  {
+    public void Report(T value) => report(value);
   }
 
   private sealed class FakeFactory : ISiteClientFactory
