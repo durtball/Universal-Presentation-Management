@@ -491,10 +491,17 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
       string reason,
       CancellationToken cancellationToken)
   {
-    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/rejection");
+    using var request = CreateWriteRequest(HttpMethod.Post, $"api/v1/media/{mediaId}/reject");
     request.Content = JsonContent.Create(new { reason }, options: JsonOptions);
     using var response = await http.SendAsync(request, cancellationToken);
     EnsureSiteSuccess(response, "intake rejection");
+  }
+
+  public async Task DeleteMediaIntakeAsync(Guid mediaId, CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Delete, $"api/v1/media/{mediaId}");
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "intake deletion");
   }
 
   public async Task RetryMediaCommitAsync(Guid mediaId, CancellationToken cancellationToken)

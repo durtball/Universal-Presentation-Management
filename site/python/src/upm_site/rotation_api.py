@@ -15,7 +15,9 @@ from upm_site.persistence.models import (
     AuditRecord,
     Event,
     LocalSiteIdentity,
+    MediaObject,
     Presentation,
+    PresentationAsset,
     PresentationVersion,
     RotationAssignment,
 )
@@ -61,10 +63,10 @@ def register_rotation_routes(
         )
         return {
             "central_defaults": [
-                _view(item) for item in rows if item.source_authority == "central"
+                _view(session, item) for item in rows if item.source_authority == "central"
             ],
-            "site_overrides": [_view(item) for item in rows if item.source_authority == "site"],
-            "effective": _view(
+            "site_overrides": [_view(session, item) for item in rows if item.source_authority == "site"],
+            "effective": _view(session,
                 next(
                     item for item in rows if item.rotation_assignment_id == effective.assignment_id
                 )
@@ -114,7 +116,7 @@ def register_rotation_routes(
         session.flush()
         _audit(session, request, item, "site.rotation_override.configured")
         touch_site_recovery_snapshot(session, event)
-        return _view(item)
+        return _view(session, item)
 
     @app.delete("/api/v1/rotating-slides/overrides/{assignment_id}", tags=["rotating-slides"])
     def clear_override(assignment_id: UUID, request: Request, session: Write):
@@ -163,8 +165,8 @@ def _candidate(item):
     )
 
 
-def _view(item):
-    return {
+def _view(session, item):
+    view = {
         name: getattr(item, name)
         for name in (
             "rotation_assignment_id",
@@ -181,6 +183,21 @@ def _view(item):
             "revision",
         )
     }
+    version = session.get(PresentationVersion, item.presentation_version_id) if item.presentation_version_id else None
+    asset = session.scalar(
+        select(PresentationAsset).where(
+            PresentationAsset.presentation_version_id == item.presentation_version_id
+        ).order_by(PresentationAsset.created_at.desc())
+    ) if version else None
+    media = session.get(MediaObject, asset.media_object_id) if asset else None
+    view.update({
+        "presentation_id": version.presentation_id if version else None,
+        "version_number": version.version_number if version else None,
+        "filename": asset.original_filename if asset else None,
+        "availability": media.availability if media else None,
+        "authority": item.source_authority,
+    })
+    return view
 
 
 def _audit(session, request, item, action):
@@ -193,6 +210,6 @@ def _audit(session, request, item, action):
             action=action,
             target_type="rotation_assignment",
             target_id=item.rotation_assignment_id,
-            after_context=_view(item),
+            after_context=_view(session, item),
         )
     )
