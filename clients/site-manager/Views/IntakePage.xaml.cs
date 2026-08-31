@@ -16,7 +16,7 @@ public sealed partial class IntakePage : Page
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly LocalStateStore store = App.Services.GetRequiredService<LocalStateStore>();
   private readonly List<SiteIntakeRow> siteIntake = [];
-  private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+  private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(12) };
   private bool reloading;
   private bool assignmentEditing;
 
@@ -150,8 +150,6 @@ public sealed partial class IntakePage : Page
   {
     if (assignmentEditing) return;
     var selectedMediaId = (SiteIntakeList.SelectedItem as SiteIntakeRow)?.MediaId;
-    siteIntake.Clear();
-    SiteIntakeList.Items.Clear();
     if (context.ActiveClient is not { } api || context.SelectedEventId is not Guid eventId)
     {
       return;
@@ -180,8 +178,18 @@ public sealed partial class IntakePage : Page
             ? $"{string.Join(", ", assigned.Items("presenters").Select(value => value.ToString()))}\n{assigned.Text("title")}\n{assigned.Text("session_title")}  •  {assigned.Text("room")}  •  {JsonProjection.LocalTime(assigned.Text("starts_at", ""))}\nPresentation: {assigned.Text("presentation_identifier")}"
             : "Not explicitly assigned",
       };
-      siteIntake.Add(row);
-      SiteIntakeList.Items.Add(row);
+      var existing = siteIntake.FirstOrDefault(value => value.MediaId == row.MediaId);
+      if (existing is null)
+      {
+        siteIntake.Add(row);
+        SiteIntakeList.Items.Add(row);
+      }
+      else
+      {
+        var index = SiteIntakeList.Items.IndexOf(existing);
+        siteIntake[siteIntake.IndexOf(existing)] = row;
+        SiteIntakeList.Items[index] = row;
+      }
     }
     if (selectedMediaId.HasValue)
       SiteIntakeList.SelectedItem = siteIntake.FirstOrDefault(item => item.MediaId == selectedMediaId);
@@ -195,6 +203,7 @@ public sealed partial class IntakePage : Page
       AssignButton.IsEnabled = false;
       CreateEntryButton.IsEnabled = false;
       RejectButton.IsEnabled = false;
+      DeleteButton.IsEnabled = false;
       RetryCommitButton.IsEnabled = false;
       return;
     }
@@ -208,6 +217,7 @@ public sealed partial class IntakePage : Page
     AssignButton.IsEnabled = row.MediaId.HasValue;
     CreateEntryButton.IsEnabled = row.MediaId.HasValue;
     RejectButton.IsEnabled = row.MediaId.HasValue;
+    DeleteButton.IsEnabled = row.MediaId.HasValue;
     RetryCommitButton.IsEnabled = row.MediaId.HasValue && row.CanRetry;
   }
 
@@ -325,6 +335,22 @@ public sealed partial class IntakePage : Page
     if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
     try { await api.RejectMediaIntakeAsync(mediaId, reason.Text, CancellationToken.None); await ReloadSiteIntakeAsync(); }
     catch (Exception exception) { await ShowErrorAsync("REJECTION FAILED", exception.Message); }
+  }
+
+  private async void OnDelete(object sender, RoutedEventArgs args)
+  {
+    if (SiteIntakeList.SelectedItem is not SiteIntakeRow row || row.MediaId is not Guid mediaId || context.ActiveClient is not { } api) return;
+    var confirmation = new TextBox { Header = $"Type {row.Filename} to confirm" };
+    var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "DELETE UNCONFIRMED INTAKE", Content = confirmation, PrimaryButtonText = "DELETE", CloseButtonText = "CANCEL" };
+    assignmentEditing = true;
+    try
+    {
+      if (await dialog.ShowAsync() != ContentDialogResult.Primary || confirmation.Text != row.Filename) return;
+      await api.DeleteMediaIntakeAsync(mediaId, CancellationToken.None);
+    }
+    catch (Exception exception) { await ShowErrorAsync("DELETION FAILED", exception.Message); }
+    finally { assignmentEditing = false; }
+    await ReloadSiteIntakeAsync();
   }
 
   private async void OnRetryCommit(object sender, RoutedEventArgs args)

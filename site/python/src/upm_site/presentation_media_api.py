@@ -106,6 +106,7 @@ class SitePresentationAssignmentUpdate(BaseModel):
 ASSET_RECONCILIATION_JOB = "presentation_media.assets.reconcile"
 INTAKE_PROMOTE_JOB = "presentation_media.intake.promote"
 INTAKE_REJECT_JOB = "presentation_media.intake.reject"
+INTAKE_DELETE_JOB = "lifecycle.delete_media_objects"
 
 
 def _enqueue_operational_reconciliation(session: Session, event: Event) -> bool:
@@ -1373,6 +1374,45 @@ def register_presentation_media_routes(
                 max_attempts=5,
             )
         return {"media_object_id": media_id, "status": "queued"}
+
+    @app.delete("/api/v1/media/{media_id}", tags=["media"])
+    def delete_intake_media(media_id: UUID, request: Request, session: WriteSession):
+        """Logically delete unconfirmed intake and durably schedule byte removal."""
+        media = session.get(MediaObject, media_id, with_for_update=True)
+        if media is None:
+            raise HTTPException(404, "media intake item not found")
+        if media.deleted_at is not None:
+            return {"media_object_id": media_id, "status": "deleted"}
+        if session.scalar(select(PresentationAsset.presentation_asset_id).where(
+            PresentationAsset.media_object_id == media_id
+        )):
+            raise HTTPException(409, "confirmed media cannot be deleted")
+        media.deleted_at = utc_now()
+        media.disposition = "deleted"
+        for job in session.scalars(select(ProcessingJob).where(
+            ProcessingJob.media_object_id == media_id,
+            ProcessingJob.status.in_(["pending", "retry_wait"]),
+        )):
+            job.status = JobStatus.CANCELLED
+            job.error_metadata = {"superseded_by": "intake deletion"}
+        session.add(AuditRecord(
+            actor_id=getattr(request.state, "site_user_id", None) or "site-operator",
+            action="site.presentation_media.deleted",
+            target_type="media_object", target_id=media_id,
+            site_id=media.site_id, event_id=media.event_id,
+            after_context={"deleted_at": media.deleted_at.isoformat()},
+        ))
+        SiteQueue(session).enqueue_processing(
+            site_id=media.site_id,
+            media_object_id=media_id,
+            job_type=INTAKE_DELETE_JOB,
+            payload={"data": {"event_id": str(media.event_id), "objects": [{
+                "storage_target_id": str(media.storage_target_id), "object_key": media.object_key
+            }]}},
+            idempotency_key=f"intake-delete:{media_id}",
+            required_capabilities=["storage"], max_attempts=10,
+        )
+        return {"media_object_id": media_id, "status": "deleted"}
 
     @app.get("/api/v1/events/{event_id}/media", tags=["media"])
     def event_media(

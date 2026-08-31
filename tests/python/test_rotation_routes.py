@@ -27,3 +27,4 @@ def test_site_intake_supports_create_with_media_and_reassignment_without_upload(
 
     assert methods(site, "/api/v1/events/{event_id}/presentations") == {"POST"}
     assert methods(site, "/api/v1/media/{media_id}/reassignment") == {"POST"}
+    assert methods(site, "/api/v1/media/{media_id}") == {"DELETE"}
