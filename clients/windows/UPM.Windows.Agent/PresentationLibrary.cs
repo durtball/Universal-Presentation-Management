@@ -66,7 +66,16 @@ public sealed class PresentationLibrary(string root)
     }
   }
 
-  private static bool FilesEqual(string first, string second) =>
-      new FileInfo(first).Length == new FileInfo(second).Length &&
-      File.ReadAllBytes(first).AsSpan().SequenceEqual(File.ReadAllBytes(second));
+  private static bool FilesEqual(string first, string second)
+  {
+    if (new FileInfo(first).Length != new FileInfo(second).Length) return false;
+    using var left = File.OpenRead(first); using var right = File.OpenRead(second);
+    var leftBuffer = new byte[64 * 1024]; var rightBuffer = new byte[64 * 1024];
+    while (true)
+    {
+      var leftRead = left.Read(leftBuffer); var rightRead = right.Read(rightBuffer);
+      if (leftRead != rightRead || !leftBuffer[..leftRead].SequenceEqual(rightBuffer[..rightRead])) return false;
+      if (leftRead == 0) return true;
+    }
+  }
 }

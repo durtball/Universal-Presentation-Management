@@ -6,7 +6,7 @@ namespace UPM.Windows.Agent;
 
 public sealed class AgentStateStore(string databasePath)
 {
-  public const int SchemaVersion = 1;
+  public const int SchemaVersion = 2;
   private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
   private string ConnectionString => new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
 
@@ -36,6 +36,10 @@ public sealed class AgentStateStore(string databasePath)
         base_version_id TEXT, idempotency_key TEXT NOT NULL UNIQUE, original_filename TEXT NOT NULL,
         managed_path TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, state INTEGER NOT NULL,
         created_at TEXT NOT NULL, error TEXT);
+      CREATE TABLE IF NOT EXISTS library_paths(
+        asset_id TEXT NOT NULL, session_id TEXT NOT NULL, visible_path TEXT NOT NULL,
+        PRIMARY KEY(asset_id, session_id));
+      UPDATE schema_info SET version=2 WHERE version<2;
       """;
     await command.ExecuteNonQueryAsync(cancellationToken);
   }
@@ -47,6 +51,19 @@ public sealed class AgentStateStore(string databasePath)
       await GetAsync<SyncRevisions>("revisions", ct) ?? new(0, 0, 0, 0);
   public Task SetLastSuccessfulSyncAsync(DateTimeOffset value, CancellationToken ct = default) => SetAsync("last_sync", value, ct);
   public Task<DateTimeOffset?> GetLastSuccessfulSyncAsync(CancellationToken ct = default) => GetAsync<DateTimeOffset?>("last_sync", ct);
+  public Task SaveSettingsAsync(AgentSettings value, CancellationToken ct = default) => SetAsync("settings", value, ct);
+  public Task<AgentSettings?> GetSettingsAsync(CancellationToken ct = default) => GetAsync<AgentSettings>("settings", ct);
+  public Task SaveBrandingAsync(BrandingState value, CancellationToken ct = default) => SetAsync("branding", value, ct);
+  public Task<BrandingState?> GetBrandingAsync(CancellationToken ct = default) => GetAsync<BrandingState>("branding", ct);
+  public Task SetSiteConnectedAsync(bool value, CancellationToken ct = default) => SetAsync("site_connected", value, ct);
+  public async Task<bool> GetSiteConnectedAsync(CancellationToken ct = default) => await GetAsync<bool?>("site_connected", ct) ?? false;
+
+  public async Task ClearProvisioningAsync(CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var cmd = db.CreateCommand();
+    cmd.CommandText = "DELETE FROM singleton_state WHERE key IN ('provisioning','site_connected','last_sync','revisions')";
+    await cmd.ExecuteNonQueryAsync(ct);
+  }
 
   public async Task UpsertSessionAsync(AgentSession session, CancellationToken ct = default)
   {
@@ -93,6 +110,31 @@ public sealed class AgentStateStore(string databasePath)
     await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
     command.CommandText = "SELECT * FROM assets WHERE version_id=$id AND verified=1 ORDER BY authoritative DESC,created_at DESC LIMIT 1"; Add(command, "$id", versionId);
     await using var reader = await command.ExecuteReaderAsync(ct); return await reader.ReadAsync(ct) ? ReadAsset(reader) : null;
+  }
+
+  public async Task<IReadOnlyList<AgentAsset>> ListAssetsAsync(CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "SELECT * FROM assets ORDER BY created_at DESC";
+    await using var reader = await command.ExecuteReaderAsync(ct); var result = new List<AgentAsset>();
+    while (await reader.ReadAsync(ct)) result.Add(ReadAsset(reader));
+    return result;
+  }
+
+  public async Task<string?> GetLibraryPathAsync(Guid assetId, Guid? sessionId, CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "SELECT visible_path FROM library_paths WHERE asset_id=$asset AND session_id=$session";
+    Add(command, "$asset", assetId); Add(command, "$session", sessionId?.ToString() ?? string.Empty);
+    return (string?)await command.ExecuteScalarAsync(ct);
+  }
+
+  public async Task SetLibraryPathAsync(Guid assetId, Guid? sessionId, string path, CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "INSERT INTO library_paths VALUES($asset,$session,$path) ON CONFLICT(asset_id,session_id) DO UPDATE SET visible_path=excluded.visible_path";
+    Add(command, "$asset", assetId); Add(command, "$session", sessionId?.ToString() ?? string.Empty); Add(command, "$path", path);
+    await command.ExecuteNonQueryAsync(ct);
   }
 
   public async Task EnqueueChangeAsync(PendingLocalChange change, CancellationToken ct = default)

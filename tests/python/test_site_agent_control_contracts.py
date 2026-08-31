@@ -6,8 +6,10 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from upm_site.agent_control import (
+    AgentConfigurationWrite,
     CommandCreate,
     CommandUpdate,
+    EventBrandingWrite,
     Heartbeat,
     LocalChanges,
     register_agent_control_routes,
@@ -61,3 +63,32 @@ def test_review_collection_registers_get_and_post_together():
     }
 
     assert methods == {"GET", "POST"}
+
+
+def test_agent_configuration_has_closed_role_vocabulary():
+    event_id = uuid4()
+    assert (
+        AgentConfigurationWrite(event_id=event_id, agent_role="room_agent_kiosk").event_id
+        == event_id
+    )
+    with pytest.raises(ValidationError):
+        AgentConfigurationWrite(event_id=event_id, agent_role="signage")
+
+
+def test_room_agent_sync_and_media_routes_are_registered():
+    app = FastAPI()
+
+    def unused_db():
+        raise AssertionError("route registration must not access the database")
+
+    register_agent_control_routes(app, unused_db, unused_db)
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert "/api/v1/agent/bootstrap" in paths
+    assert "/api/v1/agent/changes" in paths
+    assert "/api/v1/agent/presentation-versions/{version_id}/download" in paths
+    assert "/api/v1/agent/branding-assets/{asset_id}/download" in paths
+
+
+def test_branding_contract_rejects_unknown_asset_slots():
+    with pytest.raises(ValidationError):
+        EventBrandingWrite(source="site_managed", assets={"executable": uuid4()})

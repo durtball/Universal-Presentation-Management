@@ -22,7 +22,8 @@ public sealed record ProvisioningState(
     DeviceRole Role,
     Guid? RoomId,
     string? RoomName,
-    DateTimeOffset ProvisionedAt);
+    DateTimeOffset ProvisionedAt,
+    string? SiteName = null);
 
 public sealed record AgentSession(
     Guid SessionId,
@@ -70,3 +71,133 @@ public sealed record PendingLocalChange(
     LocalChangeState State,
     DateTimeOffset CreatedAt,
     string? Error = null);
+
+public enum ReadinessState { Ready, Downloading, Waiting, Offline, Failed, NotAvailable }
+
+public sealed record PresentationView(
+    Guid PresentationId,
+    Guid VersionId,
+    string Title,
+    string OriginalFilename,
+    ReadinessState Readiness,
+    double TransferPercent,
+    string? Error);
+
+public sealed record SessionView(
+    Guid SessionId,
+    string? SessionIdentifier,
+    string Title,
+    string? Presenter,
+    DateTimeOffset StartsAt,
+    DateTimeOffset EndsAt,
+    PresentationView? Presentation,
+    string RotatingSlideSource);
+
+public sealed record BrandingState(
+    long Revision,
+    string Source,
+    string EventName,
+    string? EventLogoPath,
+    string? ClientLogoPath,
+    string? KioskLogoPath,
+    string? KioskBackgroundPath,
+    string? RoomClientBackgroundPath,
+    string? AccentColor,
+    string? PrimaryColor,
+    string? WelcomeMessage,
+    string? UploadInstructions,
+    string? Footer,
+    string? SponsorPath,
+    DateTimeOffset? UpdatedAt);
+
+public sealed record AgentSettings(
+    bool PresentationLibraryEnabled,
+    bool PresentationLibraryVisible,
+    string PresentationLibraryPath,
+    int KeepCompletedDays,
+    int RetainPreviousVersionsDays,
+    bool AutomaticDownloads,
+    bool AutomaticActivation,
+    string? DefaultPresentationApplication,
+    bool AutoLaunchPresentation,
+    int CacheRetentionDays,
+    int TransferConcurrency,
+    bool KioskEnabled,
+    bool KioskAutoLaunch,
+    bool KioskFullscreen,
+    int KioskMonitor,
+    bool KioskStartWithWindows,
+    bool KioskOfflineAvailable)
+{
+  public static AgentSettings Default(string libraryPath) => new(
+      true, true, libraryPath, 7, 7, true, true, null, false, 30, 2,
+      false, false, true, 0, false, true);
+}
+
+public sealed record AgentDashboard(
+    bool AgentConnected,
+    bool SiteConnected,
+    string SiteStatus,
+    string? SiteName,
+    string? EventName,
+    string? RoomName,
+    DeviceRole Role,
+    SessionView? CurrentSession,
+    SessionView? NextSession,
+    DateTimeOffset? LastSiteSync,
+    BrandingState Branding,
+    AgentSettings Settings,
+    string AgentVersion,
+    string WindowsVersion,
+    long FreeDiskBytes,
+    long CacheBytes,
+    int FailedTransfers,
+    bool PowerPointDetected);
+
+public sealed record ProvisioningRequest(
+    Uri SiteAddress,
+    Guid DeviceId,
+    string EnrollmentCredential,
+    string DeviceName);
+
+public sealed record SiteSyncEnvelope(
+    Guid SiteId,
+    string SiteName,
+    Guid EventId,
+    string EventName,
+    Guid? RoomId,
+    string? RoomName,
+    DeviceRole Role,
+    SyncRevisions Revisions,
+    IReadOnlyList<AgentSession> Sessions,
+    IReadOnlyList<SiteAssetDescriptor> Assets,
+    BrandingManifest Branding,
+    AgentSettings? Settings);
+
+public sealed record SiteAssetDescriptor(
+    Guid AssetId,
+    AssetKind Kind,
+    Guid VersionId,
+    Guid? PresentationId,
+    Guid? SessionId,
+    Guid? RoomId,
+    DateOnly? EventDay,
+    RotationScope? RotationScope,
+    string Title,
+    string OriginalFilename,
+    string Sha256,
+    long Size,
+    Uri DownloadUri,
+    long Revision);
+
+public sealed record BrandingAssetDescriptor(string Slot, string OriginalFilename, string Sha256, long Size, Uri DownloadUri);
+public sealed record BrandingManifest(
+    long Revision,
+    string Source,
+    string EventName,
+    string? AccentColor,
+    string? PrimaryColor,
+    string? WelcomeMessage,
+    string? UploadInstructions,
+    string? Footer,
+    IReadOnlyList<BrandingAssetDescriptor> Assets);

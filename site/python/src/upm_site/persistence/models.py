@@ -804,11 +804,54 @@ class Device(SiteRecordMixin, SiteBase):
         ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
     )
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("events.event_id", ondelete="RESTRICT")
+    )
+    agent_role: Mapped[str] = mapped_column(String(32), default="room_agent", nullable=False)
+    agent_configuration: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, nullable=False
+    )
     enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     agent_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
 
     assignments: Mapped[list["DeviceAssignment"]] = relationship(back_populates="device")
+
+
+class EventBranding(SiteRecordMixin, SiteBase):
+    """Site-owned effective branding; Central defaults and local overrides stay explicit."""
+
+    __tablename__ = "event_branding"
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("events.event_id", ondelete="CASCADE"), primary_key=True
+    )
+    source: Mapped[str] = mapped_column(String(32), default="central_default", nullable=False)
+    local_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    configuration: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
+class EventBrandingAsset(SiteRecordMixin, SiteBase):
+    __tablename__ = "event_branding_assets"
+    __table_args__ = (UniqueConstraint("event_id", "slot"),)
+    event_branding_asset_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=new_uuid7
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        ForeignKey("event_branding.event_id", ondelete="CASCADE"), nullable=False
+    )
+    slot: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_object_id: Mapped[UUID] = mapped_column(
+        ForeignKey("media_objects.media_object_id", ondelete="RESTRICT"), nullable=False
+    )
+
+
+class AgentChangeFeed(SiteBase):
+    __tablename__ = "agent_change_feed"
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    operation: Mapped[str] = mapped_column(String(8), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class DeviceRuntimeState(SiteBase):

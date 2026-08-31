@@ -7,12 +7,12 @@ public sealed class LocalIntakeService(AgentStorage storage, AgentStateStore sta
 {
   private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase) { ".ppt", ".pptx", ".pps", ".ppsx" };
 
-  public async Task<PendingLocalChange> IngestAsync(Guid sessionId, Guid? presentationId, Guid? baseVersionId, string selectedPath, CancellationToken ct = default)
+  public async Task<PendingLocalChange> IngestAsync(Guid sessionId, Guid? presentationId, Guid? baseVersionId, string selectedPath, CancellationToken ct = default, string? originalFilename = null)
   {
     var source = Path.GetFullPath(selectedPath); var info = new FileInfo(source);
     if (!info.Exists || !Supported.Contains(info.Extension)) throw new InvalidDataException("Select a supported PowerPoint presentation.");
     storage.EnsureCreated();
-    var original = info.Name; var localVersion = Guid.CreateVersion7();
+    var original = originalFilename ?? info.Name; _ = WindowsPathPolicy.UploadedFilename(original); var localVersion = Guid.CreateVersion7();
     var directory = WindowsPathPolicy.EnsureContained(storage.Pending, localVersion.ToString("N")); Directory.CreateDirectory(directory);
     var managed = WindowsPathPolicy.EnsureContained(directory, WindowsPathPolicy.UploadedFilename(original));
     await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true))

@@ -927,7 +927,7 @@ const rows=await r.json(),out=document.querySelector('#o');out.replaceChildren()
 for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
-    register_agent_control_routes(app, get_session, transaction)
+    register_agent_control_routes(app, get_session, transaction, settings=get_settings)
     register_program_routes(app, get_session)
     register_program_import_routes(app, get_session, transaction)
     register_operations_routes(app, get_session, transaction)

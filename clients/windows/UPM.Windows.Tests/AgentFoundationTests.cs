@@ -72,6 +72,15 @@ public sealed class AgentFoundationTests
   }
 
   [Fact]
+  public async Task IntakeTransportTemporaryNameDoesNotReplaceOriginalFilenameProvenance()
+  {
+    using var root = Temp(); var storage = new AgentStorage(Path.Combine(root.Path, "managed")); storage.EnsureCreated();
+    var store = new AgentStateStore(storage.DatabasePath); await store.InitializeAsync(); var temporary = Path.Combine(root.Path, "transport.tmp.pptx"); await File.WriteAllTextAsync(temporary, "deck");
+    var change = await new LocalIntakeService(storage, store).IngestAsync(Guid.NewGuid(), null, null, temporary, originalFilename: "CON.pptx");
+    Assert.Equal("CON.pptx", change.OriginalFilename); Assert.Equal("_CON.pptx", Path.GetFileName(change.ManagedPath));
+  }
+
+  [Fact]
   public async Task RotatingSlideHierarchyAndDuplicateNamesAreSafe()
   {
     using var root = Temp(); var managed = Path.Combine(root.Path, "cache"); Directory.CreateDirectory(managed);
@@ -82,6 +91,17 @@ public sealed class AgentFoundationTests
     var path1 = await library.PublishAsync(one, session); var path2 = await library.PublishAsync(two, session);
     Assert.EndsWith(Path.Combine("Venetian G", "Rotating Slides", "Loop.pptx"), path1);
     Assert.EndsWith("Loop (2).pptx", path2);
+  }
+
+  [Fact]
+  public async Task LibraryIdentityPathSurvivesScheduleFolderRename()
+  {
+    using var root = Temp(); var store = new AgentStateStore(Path.Combine(root.Path, "agent.db")); await store.InitializeAsync();
+    var asset = Guid.NewGuid(); var session = Guid.NewGuid(); var old = Path.Combine(root.Path, "10-15 AM - Session - 123", "Deck.pptx");
+    await store.SetLibraryPathAsync(asset, session, old);
+    var reopened = new AgentStateStore(Path.Combine(root.Path, "agent.db")); await reopened.InitializeAsync();
+    Assert.Equal(old, await reopened.GetLibraryPathAsync(asset, session));
+    Assert.Equal(2, await reopened.GetSchemaVersionAsync());
   }
 
   private static AgentSession Session(string? identifier = "3489435") => new(Guid.NewGuid(), identifier, "Agentic Model Risk Management", "Presenter", Guid.NewGuid(), "Venetian G", new DateTimeOffset(2026, 8, 31, 10, 15, 0, TimeSpan.Zero), new DateTimeOffset(2026, 8, 31, 11, 0, 0, TimeSpan.Zero), false, 1);
