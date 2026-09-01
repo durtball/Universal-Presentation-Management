@@ -77,6 +77,15 @@ export const siteApi = {
       },
     ),
   devices: (signal?: AbortSignal) => get<SiteDevice[]>("/api/v1/devices", signal),
+  assignRoomAgent: (deviceId: string, eventId: string, roomId: string | null, role: string) =>
+    siteClient.request<SiteDevice>(`/api/v1/devices/${deviceId}/room-agent-assignment`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event_id: eventId, room_id: roomId, role }),
+    }),
+  clearRoomAgentAssignment: (deviceId: string) =>
+    siteClient.request<SiteDevice>(`/api/v1/devices/${deviceId}/room-agent-assignment`, {
+      method: "DELETE",
+    }),
   assignDevice: (roomId: string, role: "primary" | "backup", deviceId: string | null) =>
     siteClient.request<RoomDetail>(
       `/api/v1/rooms/${roomId}/device-assignments/${role}`,

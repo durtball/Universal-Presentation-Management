@@ -27,6 +27,19 @@ function stored<T extends string>(key: string, allowed: T[], fallback: T): T {
   }
 }
 
+export function applyStoredPreferences() {
+  document.documentElement.dataset.theme = stored(
+    "upm.theme",
+    ["glass", "classic"],
+    "glass",
+  );
+  document.documentElement.dataset.motion = stored(
+    "upm.motion",
+    ["full", "reduced", "off"],
+    "full",
+  );
+}
+
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() =>
     stored("upm.theme", ["glass", "classic"], "glass"),

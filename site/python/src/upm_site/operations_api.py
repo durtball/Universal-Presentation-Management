@@ -78,6 +78,36 @@ def register_operations_routes(
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Site identity is not configured")
         return identity
 
+    def operational_event_id(session: Session, room: Room) -> UUID:
+        event_ids = {room.event_id} if room.event_id else set()
+        event_ids.update(
+            session.scalars(
+                select(ProgramRoomMapping.event_id).where(
+                    ProgramRoomMapping.room_id == room.room_id
+                )
+            ).all()
+        )
+        if len(event_ids) != 1:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="room must map to exactly one operational event before Agent assignment",
+            )
+        return next(iter(event_ids))
+
+    def clear_device_assignment_state(session: Session, device_id: UUID) -> None:
+        if session.scalar(
+            select(DeviceAssignment.device_assignment_id).where(
+                DeviceAssignment.device_id == device_id,
+                DeviceAssignment.active.is_(True),
+            )
+        ) is not None:
+            return
+        device = session.get(Device, device_id)
+        if device is not None:
+            device.event_id = None
+            device.enrollment_state = "unassigned"
+            device.revision += 1
+
     def required_room(session: Session, room_id: UUID) -> Room:
         room = session.get(Room, room_id)
         if room is None:
@@ -274,6 +304,7 @@ def register_operations_routes(
             raise HTTPException(
                 status.HTTP_409_CONFLICT, detail="cannot assign an endpoint to a disabled room"
             )
+        event_id = operational_event_id(session, room)
         current = session.scalar(
             select(DeviceAssignment)
             .where(
@@ -288,6 +319,8 @@ def register_operations_routes(
                 current.active = False
                 current.ends_at = utc_now()
                 current.revision += 1
+                session.flush()
+                clear_device_assignment_state(session, current.device_id)
                 session.flush()
             detail = room_detail(session, room_id)
             assert detail is not None
@@ -311,22 +344,24 @@ def register_operations_routes(
             )
             .with_for_update()
         )
-        if existing_assignment is not None and (
-            existing_assignment.room_id != room_id or existing_assignment.role != role
-        ):
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail="device already has an active room assignment",
-            )
         if current is not None and current.device_id == device.device_id:
+            if device.event_id != event_id or device.enrollment_state != "assigned":
+                device.event_id = event_id
+                device.enrollment_state = "assigned"
+                device.revision += 1
             detail = room_detail(session, room_id)
             assert detail is not None
             return detail
+        if existing_assignment is not None:
+            existing_assignment.active = False
+            existing_assignment.ends_at = utc_now()
+            existing_assignment.revision += 1
         if current is not None:
             current.active = False
             current.ends_at = utc_now()
             current.revision += 1
             session.flush()
+            clear_device_assignment_state(session, current.device_id)
         session.add(
             DeviceAssignment(
                 device_id=device.device_id,
@@ -336,6 +371,9 @@ def register_operations_routes(
                 active=True,
             )
         )
+        device.event_id = event_id
+        device.enrollment_state = "assigned"
+        device.revision += 1
         session.flush()
         detail = room_detail(session, room_id)
         assert detail is not None

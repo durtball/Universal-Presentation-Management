@@ -1,13 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "../App";
-import { PreferencesProvider } from "../state/preferences";
+import { applyStoredPreferences, PreferencesProvider } from "../state/preferences";
 import { SessionProvider } from "../state/session";
 
 const roomId = "01900000-0000-7000-8000-000000000101";
 const eventId = "01900000-0000-7000-8000-000000000201";
 
 test("renders the room-centered Site operational workflow", async () => {
+  localStorage.setItem("upm.theme", "classic");
+  applyStoredPreferences();
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const path = new URL(String(input), "http://test").pathname;
     let data: unknown;
@@ -107,6 +109,8 @@ test("renders the room-centered Site operational workflow", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByRole("heading", { name: "Room 101" })).toBeInTheDocument();
+  expect(document.documentElement).toHaveAttribute("data-theme", "classic");
+  expect(screen.getByRole("link", { name: "Rooms" })).toHaveClass("nav-link--active");
   expect(screen.getByRole("heading", { name: "Opening Session" })).toBeInTheDocument();
   expect(screen.getByText("Opening deck")).toBeInTheDocument();
   expect(screen.getByText("Missing")).toBeInTheDocument();
@@ -114,5 +118,4 @@ test("renders the room-centered Site operational workflow", async () => {
     await screen.findByRole("button", { name: "Map to Room 101" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Primary Presentation Agent")).toBeInTheDocument();
-  expect(screen.getByText(/Agent enrollment and heartbeat reporting remain outside/)).toBeInTheDocument();
 });

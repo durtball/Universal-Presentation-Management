@@ -29,7 +29,9 @@ def upgrade() -> None:
         "kind IN ('original','derivative','image','video','document','other')",
     )
     op.drop_constraint(
-        "ck_site_presentation_assets_derivative_source", "presentation_assets", type_="check"
+        op.f("ck_site_presentation_assets_derivative_source"),
+        "presentation_assets",
+        type_="check",
     )
     op.create_check_constraint(
         "ck_site_presentation_assets_derivative_source",

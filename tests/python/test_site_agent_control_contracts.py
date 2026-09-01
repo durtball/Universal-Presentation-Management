@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -6,10 +7,13 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from upm_site.agent_control import (
+    AgentConfigurationWrite,
     CommandCreate,
     CommandUpdate,
+    EventBrandingWrite,
     Heartbeat,
     LocalChanges,
+    discovery_signature,
     register_agent_control_routes,
 )
 
@@ -61,3 +65,75 @@ def test_review_collection_registers_get_and_post_together():
     }
 
     assert methods == {"GET", "POST"}
+
+
+def test_agent_configuration_has_closed_role_vocabulary():
+    event_id = uuid4()
+    assert (
+        AgentConfigurationWrite(event_id=event_id, agent_role="room_agent_kiosk").event_id
+        == event_id
+    )
+    with pytest.raises(ValidationError):
+        AgentConfigurationWrite(event_id=event_id, agent_role="signage")
+
+
+def test_room_agent_sync_and_media_routes_are_registered():
+    app = FastAPI()
+
+    def unused_db():
+        raise AssertionError("route registration must not access the database")
+
+    register_agent_control_routes(app, unused_db, unused_db)
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert "/api/v1/agent/bootstrap" in paths
+    assert "/api/v1/agent/discovery-metadata" in paths
+    assert "/api/v1/agent/enroll" in paths
+    assert "/api/v1/agent/changes" in paths
+    assert "/api/v1/agent/presentation-versions/{version_id}/download" in paths
+    assert "/api/v1/agent/branding-assets/{asset_id}/download" in paths
+    assert "/api/v1/devices/{device_id}/room-agent-assignment" in paths
+
+
+def test_room_agent_assignment_supports_put_and_clear_without_reenrollment():
+    app = FastAPI()
+
+    def unused_db():
+        raise AssertionError("route registration must not access the database")
+
+    register_agent_control_routes(app, unused_db, unused_db)
+    methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None)
+        == "/api/v1/devices/{device_id}/room-agent-assignment"
+        for method in getattr(route, "methods", set())
+    }
+    assert methods == {"PUT", "DELETE"}
+
+
+def test_agent_change_feed_repair_uses_jsonb_and_tracks_device_assignments():
+    source = Path(
+        "database/site/migrations/versions/"
+        "a73c5e91f204_repair_agent_change_feed_assignments.py"
+    ).read_text()
+    assert "to_jsonb(OLD)" in source
+    assert "to_jsonb(NEW)" in source
+    assert '"device_assignments": "device_assignment_id"' in source
+    assert "tr_device_assignments_agent_change" in source
+    assert "row_record.session_id" not in source
+
+
+def test_branding_contract_rejects_unknown_asset_slots():
+    with pytest.raises(ValidationError):
+        EventBrandingWrite(source="site_managed", assets={"executable": uuid4()})
+
+
+def test_discovery_ticket_signature_is_stable_and_binds_endpoint():
+    site_id = uuid4()
+    first = discovery_signature("s" * 32, site_id, "http://10.0.0.8:9080/", 123, "nonce-value")
+    assert first == discovery_signature(
+        "s" * 32, site_id, "http://10.0.0.8:9080/", 123, "nonce-value"
+    )
+    assert first != discovery_signature(
+        "s" * 32, site_id, "http://10.0.0.9:9080/", 123, "nonce-value"
+    )

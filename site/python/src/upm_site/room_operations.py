@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from upm_shared.enums import (
 from upm_site.persistence.models import (
     Device,
     DeviceAssignment,
+    DeviceRuntimeState,
     Event,
     EventParticipation,
     MediaObject,
@@ -322,25 +323,35 @@ def program_locations(session: Session, event_id: UUID) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: str(item["imported_label"]).casefold())
 
 
-def _device_view(device: Device, assignment: DeviceAssignment | None = None) -> dict[str, Any]:
+def _device_view(
+    device: Device,
+    assignment: DeviceAssignment | None = None,
+    runtime: DeviceRuntimeState | None = None,
+) -> dict[str, Any]:
     if device.revoked_at is not None:
         status = "revoked"
     elif device.enrolled_at is None:
         status = "not_enrolled"
-    else:
+    elif runtime is None:
         status = "unknown"
+    else:
+        status = (
+            "online"
+            if runtime.last_heartbeat_at >= utc_now() - timedelta(seconds=90)
+            else "offline"
+        )
     return {
         "device_id": device.device_id,
         "name": device.display_name,
         "role": assignment.role if assignment else None,
         "assignment_id": assignment.device_assignment_id if assignment else None,
         "status": status,
-        "online": None,
-        "last_heartbeat": None,
-        "ip_address": None,
-        "interface": None,
-        "version": None,
-        "telemetry_available": False,
+        "online": status == "online" if runtime else None,
+        "last_heartbeat": runtime.last_heartbeat_at if runtime else None,
+        "ip_address": runtime.ip_address if runtime else None,
+        "interface": runtime.hostname if runtime else None,
+        "version": runtime.agent_version if runtime else None,
+        "telemetry_available": runtime is not None,
         "enrolled_at": device.enrolled_at,
         "revoked_at": device.revoked_at,
     }
@@ -353,23 +364,33 @@ def list_devices(session: Session) -> list[dict[str, Any]]:
             select(DeviceAssignment).where(DeviceAssignment.active.is_(True))
         )
     }
-    return [
-        {
-            **_device_view(item, active_assignments.get(item.device_id)),
-            "site_id": item.site_id,
-            "assignable": (
-                item.enrolled_at is not None
-                and item.revoked_at is None
-                and item.device_id not in active_assignments
-            ),
-            "assigned_room_id": (
-                active_assignments[item.device_id].room_id
-                if item.device_id in active_assignments
-                else None
-            ),
-        }
-        for item in session.scalars(select(Device).order_by(Device.display_name))
-    ]
+    result = []
+    for item in session.scalars(select(Device).order_by(Device.display_name)):
+        assignment = active_assignments.get(item.device_id)
+        room = session.get(Room, assignment.room_id) if assignment else None
+        event = session.get(Event, item.event_id) if item.event_id else None
+        runtime = session.get(DeviceRuntimeState, item.device_id)
+        result.append(
+            {
+                **_device_view(item, assignment, runtime),
+                "site_id": item.site_id,
+                "agent_identity": item.agent_identity,
+                "machine_name": item.machine_name,
+                "enrollment_state": item.enrollment_state,
+                "agent_role": item.agent_role,
+                "event_id": item.event_id,
+                "event_name": event.name if event else None,
+                "assigned_room_id": room.room_id if room else None,
+                "assigned_room_name": room.label if room else None,
+                "assignable": item.enrolled_at is not None and item.revoked_at is None,
+                "ip_address": runtime.ip_address if runtime else None,
+                "agent_version": runtime.agent_version if runtime else None,
+                "windows_version": runtime.windows_version if runtime else None,
+                "last_seen": runtime.last_heartbeat_at if runtime else None,
+                "sync_status": (runtime.metadata_json or {}).get("last_sync") if runtime else None,
+            }
+        )
+    return result
 
 
 def _presentation_state(
@@ -609,12 +630,15 @@ def _presentations_for_sessions(
 
 def _room_endpoint_map(session: Session, room_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
     result: dict[UUID, dict[str, Any]] = defaultdict(dict)
-    for assignment, device in session.execute(
-        select(DeviceAssignment, Device)
+    for assignment, device, runtime in session.execute(
+        select(DeviceAssignment, Device, DeviceRuntimeState)
         .join(Device, Device.device_id == DeviceAssignment.device_id)
+        .outerjoin(DeviceRuntimeState, DeviceRuntimeState.device_id == Device.device_id)
         .where(DeviceAssignment.room_id.in_(room_ids), DeviceAssignment.active.is_(True))
     ):
-        result[assignment.room_id][assignment.role.value] = _device_view(device, assignment)
+        result[assignment.room_id][assignment.role.value] = _device_view(
+            device, assignment, runtime
+        )
     return dict(result)
 
 

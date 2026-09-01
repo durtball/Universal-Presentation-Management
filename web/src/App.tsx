@@ -29,6 +29,7 @@ import {
   SiteProgram,
   SiteRoomDetail,
   SiteRooms,
+  SiteDevices,
 } from "./pages/site/SitePages";
 
 export function App({ deployment }: { deployment: Deployment }) {
@@ -115,6 +116,7 @@ function SiteApp() {
         <Route path="/admin/central" element={<SiteCentralConnection />} />
         <Route path="/admin/program" element={<SiteProgram />} />
         <Route path="/admin/rooms" element={<SiteRooms />} />
+        <Route path="/admin/devices" element={<SiteDevices />} />
         <Route path="/admin/users" element={<UsersPage mode="site" />} />
         <Route path="/admin/rooms/:roomId" element={<SiteRoomDetail />} />
         <Route path="/admin/storage" element={<StoragePage mode="site" />} />

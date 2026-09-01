@@ -509,6 +509,62 @@ export function SiteRooms() {
   );
 }
 
+export function SiteDevices() {
+  const devices = useApi((signal) => siteApi.devices(signal), []);
+  const deployments = useApi((signal) => siteApi.deployments(signal), []);
+  const rooms = useApi((signal) => siteApi.rooms(signal), []);
+  return (
+    <Page eyebrow="Site operations" title="UPM Room Agents"
+      description="Discovered computers enroll automatically. Assign operational context without entering identifiers on the room PC.">
+      {devices.loading ? <Loading /> : devices.error ? <ErrorSurface error={devices.error} onRetry={devices.refresh} /> : (
+        <div className="stack">
+          {(devices.data || []).map((device) => (
+            <RoomAgentAssignment key={device.device_id} device={device}
+              events={deployments.data || []} rooms={rooms.data || []} onSaved={devices.refresh} />
+          ))}
+          {!devices.data?.length ? <Empty title="Waiting for UPM Room Agents on this LAN" /> : null}
+        </div>
+      )}
+    </Page>
+  );
+}
+
+function RoomAgentAssignment({ device, events, rooms, onSaved }: {
+  device: SiteDevice; events: SiteDeployment[]; rooms: SiteRoom[]; onSaved: () => void;
+}) {
+  const [eventId, setEventId] = useState(device.event_id || events[0]?.central_event_id || "");
+  const [roomId, setRoomId] = useState(device.assigned_room_id || "");
+  const [role, setRole] = useState(device.agent_role || "room_agent");
+  const [saving, setSaving] = useState(false); const [error, setError] = useState<unknown>();
+  const save = async () => {
+    setSaving(true); setError(undefined);
+    try { await siteApi.assignRoomAgent(device.device_id, eventId, roomId || null, role); onSaved(); }
+    catch (caught) { setError(caught); } finally { setSaving(false); }
+  };
+  const clear = async () => {
+    if (!window.confirm("Clear this Room Agent assignment? The endpoint remains enrolled.")) return;
+    setSaving(true); setError(undefined);
+    try { await siteApi.clearRoomAgentAssignment(device.device_id); onSaved(); }
+    catch (caught) { setError(caught); } finally { setSaving(false); }
+  };
+  return <Panel title={device.name || device.machine_name || "New Room Agent"}
+    description={`${(device.enrollment_state || "unknown").toUpperCase()} • ${device.machine_name || "Unknown machine"} • ${device.ip_address || "Address pending"} • Agent ${device.agent_version || "unknown"} • Last seen ${when(device.last_seen)}`}>
+    <div className="inline-form">
+      <label className="field">Event<select className="input" value={eventId} onChange={(e) => setEventId(e.target.value)}>
+        <option value="">Select event</option>{events.map((item) => <option key={item.deployment_id} value={item.central_event_id}>{item.event_name || item.central_event_id}</option>)}
+      </select></label>
+      <label className="field">Room<select className="input" value={roomId} onChange={(e) => setRoomId(e.target.value)} disabled={role === "upload_kiosk"}>
+        <option value="">None</option>{rooms.map((room) => <option key={room.room_id} value={room.room_id}>{room.label}</option>)}
+      </select></label>
+      <label className="field">Role<select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+        <option value="room_agent">Room Agent</option><option value="upload_kiosk">Upload Kiosk</option><option value="room_agent_kiosk">Room Agent + Kiosk</option>
+      </select></label>
+      <button className="button button--primary" disabled={saving || !eventId || (role !== "upload_kiosk" && !roomId)} onClick={save}>{saving ? "Assigning…" : "Assign"}</button>
+      {device.enrollment_state === "assigned" ? <button className="button" disabled={saving} onClick={clear}>Clear assignment</button> : null}
+    </div>{error != null ? <ErrorSurface error={error} /> : null}
+  </Panel>;
+}
+
 export function SiteRoomDetail() {
   const { roomId = "" } = useParams();
   const room = useApi((signal) => siteApi.room(roomId, signal), [roomId]);
@@ -663,8 +719,8 @@ export function SiteRoomDetail() {
                 {devices.error ? <ErrorSurface error={devices.error} onRetry={devices.refresh} /> : null}
                 {!devices.loading && !devices.error && !devices.data?.length ? (
                   <p className="muted">
-                    No enrolled Agent endpoints exist yet. Agent enrollment and heartbeat reporting
-                    remain outside this milestone.
+                    No enrolled Agent endpoints exist yet. Launch UPM Room Agent on a LAN computer;
+                    it will discover and register with this Site automatically.
                   </p>
                 ) : null}
               </div>
