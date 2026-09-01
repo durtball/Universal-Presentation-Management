@@ -57,6 +57,17 @@ public sealed class AgentStateStore(string databasePath)
   public Task<BrandingState?> GetBrandingAsync(CancellationToken ct = default) => GetAsync<BrandingState>("branding", ct);
   public Task SetSiteConnectedAsync(bool value, CancellationToken ct = default) => SetAsync("site_connected", value, ct);
   public async Task<bool> GetSiteConnectedAsync(CancellationToken ct = default) => await GetAsync<bool?>("site_connected", ct) ?? false;
+  public Task SetConnectionPhaseAsync(AgentConnectionPhase value, CancellationToken ct = default) => SetAsync("connection_phase", value, ct);
+  public async Task<AgentConnectionPhase> GetConnectionPhaseAsync(CancellationToken ct = default) => await GetAsync<AgentConnectionPhase?>("connection_phase", ct) ?? AgentConnectionPhase.Starting;
+
+  public async Task<LocalAgentIdentity> GetOrCreateIdentityAsync(CancellationToken ct = default)
+  {
+    var existing = await GetAsync<LocalAgentIdentity>("local_agent_identity", ct);
+    if (existing is not null) return existing;
+    var created = new LocalAgentIdentity(Guid.CreateVersion7(), Environment.MachineName, DateTimeOffset.UtcNow);
+    await SetAsync("local_agent_identity", created, ct);
+    return created;
+  }
 
   public async Task ClearProvisioningAsync(CancellationToken ct = default)
   {

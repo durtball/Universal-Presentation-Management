@@ -804,6 +804,11 @@ class Device(SiteRecordMixin, SiteBase):
         ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=False
     )
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent_identity: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
+    machine_name: Mapped[str | None] = mapped_column(String(255))
+    enrollment_state: Mapped[str] = mapped_column(
+        String(24), default="configured", nullable=False
+    )
     event_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("events.event_id", ondelete="RESTRICT")
     )

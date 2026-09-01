@@ -29,7 +29,7 @@ services:
       timeout: 3s
       retries: 5
 
-  site-discovery:
+  site-wsdd:
     image: ghcr.io/christgau/wsdd:0.8
     restart: unless-stopped
     network_mode: host
@@ -52,6 +52,20 @@ services:
         condition: service_healthy
     networks:
       - site-edge
+
+  site-discovery:
+    image: ${UPM_SITE_API_IMAGE:-upm-site-api:local}
+    restart: unless-stopped
+    network_mode: host
+    command: ["python", "-m", "upm_site.discovery"]
+    environment:
+      UPM_SITE_DISCOVERY_SECRET: ${UPM_SITE_DISCOVERY_SECRET:?Set UPM_SITE_DISCOVERY_SECRET}
+      UPM_SITE_DISCOVERY_API_URL: http://127.0.0.1:${SITE_HTTP_PORT:-9080}
+      UPM_SITE_DISCOVERY_PUBLIC_PORT: ${SITE_HTTP_PORT:-9080}
+      UPM_SITE_DISCOVERY_SCHEME: ${UPM_SITE_DISCOVERY_SCHEME:-http}
+    depends_on:
+      caddy:
+        condition: service_started
 
   site-api:
     build:
@@ -77,6 +91,7 @@ services:
       UPM_SITE_SESSION_COOKIE_SECURE: ${UPM_SITE_SESSION_COOKIE_SECURE:-false}
       UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
       UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
+      UPM_SITE_DISCOVERY_SECRET: ${UPM_SITE_DISCOVERY_SECRET:?Set UPM_SITE_DISCOVERY_SECRET}
       UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
       UPM_SITE_SMB_INTAKE_STABILITY_SECONDS: ${UPM_SITE_SMB_INTAKE_STABILITY_SECONDS:-10}
       UPM_SITE_SMB_CONTROL_URL: http://site-smb:8080

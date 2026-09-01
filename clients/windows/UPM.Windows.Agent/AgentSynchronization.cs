@@ -36,6 +36,26 @@ public sealed class SiteAgentClient(HttpClient http)
         ?? throw new InvalidDataException("Site returned an empty Agent bootstrap.");
   }
 
+  public async Task<AutomaticEnrollmentResponse> EnrollAsync(
+      DiscoveredSite discovered,
+      LocalAgentIdentity identity,
+      CancellationToken ct)
+  {
+    using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(discovered.Endpoint, "api/v1/agent/enroll"));
+    request.Content = JsonContent.Create(new AutomaticEnrollmentRequest(
+        identity.AgentId, identity.MachineName, identity.MachineName,
+        typeof(SiteAgentClient).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+        Environment.OSVersion.VersionString,
+        ["room-agent", "upload-kiosk", "offline", "verified-transfer"],
+        ["room_agent", "upload_kiosk", "room_agent_kiosk"],
+        discovered.IssuedAt, discovered.Nonce, discovered.Signature, discovered.Endpoint),
+        options: SiteJson);
+    using var response = await http.SendAsync(request, ct);
+    response.EnsureSuccessStatusCode();
+    return await response.Content.ReadFromJsonAsync<AutomaticEnrollmentResponse>(SiteJson, ct)
+        ?? throw new InvalidDataException("Site returned an empty enrollment response.");
+  }
+
   public async Task<SiteSyncEnvelope> ChangesAsync(ProvisioningState p, string credential, SyncRevisions revisions, CancellationToken ct)
   {
     var path = $"api/v1/agent/changes?schedule={revisions.Schedule}&presentations={revisions.Presentations}&branding={revisions.Branding}&rotating_slides={revisions.RotatingSlides}";
@@ -102,18 +122,59 @@ public sealed class SiteAgentClient(HttpClient http)
 public sealed class AgentSyncWorker(
     AgentStateStore state, IAgentCredentialStore credentials, SiteAgentClient site,
     AgentStorage storage, AgentDashboardService dashboards, AgentSyncSignal signal,
+    SiteDiscoveryService discovery,
     ILogger<AgentSyncWorker> logger) : BackgroundService
 {
   private readonly VerifiedTransferEngine transfers = new(storage);
+  private DateTimeOffset nextDiscoveryAt = DateTimeOffset.MinValue;
   protected override async Task ExecuteAsync(CancellationToken stoppingToken)
   {
     while (!stoppingToken.IsCancellationRequested)
     {
-      try { await SynchronizeAsync(stoppingToken); }
+      try
+      {
+        if (DateTimeOffset.UtcNow >= nextDiscoveryAt)
+        {
+          await DiscoverAsync(stoppingToken);
+          nextDiscoveryAt = DateTimeOffset.UtcNow.AddMinutes(1);
+        }
+        await SynchronizeAsync(stoppingToken);
+      }
       catch (Exception exception) when (exception is not OperationCanceledException)
       { await state.SetSiteConnectedAsync(false, stoppingToken); logger.LogWarning(exception, "Agent Site synchronization failed; cached state remains active"); }
       await signal.WaitAsync(TimeSpan.FromSeconds(30), stoppingToken);
     }
+  }
+
+  public async Task DiscoverAsync(CancellationToken ct)
+  {
+    var identity = await state.GetOrCreateIdentityAsync(ct);
+    var current = await state.GetProvisioningAsync(ct);
+    await state.SetConnectionPhaseAsync(AgentConnectionPhase.Discovering, ct);
+    var sites = await discovery.DiscoverAsync(TimeSpan.FromSeconds(3), ct);
+    var found = current is null
+        ? sites.Count == 1 ? sites[0] : null
+        : sites.SingleOrDefault(candidate => candidate.SiteId == current.SiteId);
+    if (found is null)
+    {
+      if (current is not null) await state.SetConnectionPhaseAsync(AgentConnectionPhase.Offline, ct);
+      return;
+    }
+    await state.SetConnectionPhaseAsync(AgentConnectionPhase.SiteFound, ct);
+    if (current is not null)
+    {
+      if (current.SiteAddress != found.Endpoint)
+        await state.SaveProvisioningAsync(current with { SiteAddress = found.Endpoint, SiteName = found.SiteName }, ct);
+      return;
+    }
+    await state.SetConnectionPhaseAsync(AgentConnectionPhase.Registering, ct);
+    var enrolled = await site.EnrollAsync(found, identity, ct);
+    await credentials.SaveAsync(enrolled.AgentCredential, ct);
+    await state.SaveProvisioningAsync(new(identity.AgentId, enrolled.DeviceId, identity.MachineName,
+        enrolled.SiteId, found.Endpoint, enrolled.EventId, enrolled.Role, enrolled.RoomId,
+        enrolled.RoomName, DateTimeOffset.UtcNow, enrolled.SiteName), ct);
+    await state.SetConnectionPhaseAsync(enrolled.Assigned
+        ? AgentConnectionPhase.Synchronizing : AgentConnectionPhase.WaitingForAssignment, ct);
   }
 
   public async Task ProvisionAsync(ProvisioningRequest request, CancellationToken ct)
@@ -131,8 +192,20 @@ public sealed class AgentSyncWorker(
     var p = await state.GetProvisioningAsync(ct); var credential = await credentials.ReadAsync(ct);
     if (p is null || string.IsNullOrEmpty(credential)) return;
     var envelope = await site.ChangesAsync(p, credential, await state.GetRevisionsAsync(ct), ct);
+    p = p with
+    {
+      EventId = envelope.EventId,
+      Role = envelope.Role,
+      RoomId = envelope.RoomId,
+      RoomName = envelope.RoomName,
+      SiteName = envelope.SiteName,
+      SiteAddress = p.SiteAddress
+    };
+    await state.SaveProvisioningAsync(p, ct);
     await ApplyAsync(envelope, credential, p.SiteAddress, ct);
     await site.HeartbeatAsync(p, credential, await dashboards.GetAsync(ct: ct), ct);
+    await state.SetConnectionPhaseAsync(envelope.Assigned
+        ? AgentConnectionPhase.Connected : AgentConnectionPhase.WaitingForAssignment, ct);
   }
 
   private async Task ApplyAsync(SiteSyncEnvelope envelope, string credential, Uri siteAddress, CancellationToken ct)

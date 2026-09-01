@@ -263,6 +263,17 @@ export interface SiteDevice extends RoomEndpoint {
   site_id: string;
   assignable: boolean;
   assigned_room_id?: string | null;
+  assigned_room_name?: string | null;
+  machine_name?: string | null;
+  enrollment_state?: string;
+  agent_role?: string;
+  event_id?: string | null;
+  event_name?: string | null;
+  ip_address?: string | null;
+  agent_version?: string | null;
+  windows_version?: string | null;
+  last_seen?: string | null;
+  sync_status?: string | null;
 }
 export interface SiteMedia extends Row {
   media_object_id: string;

@@ -18,11 +18,27 @@ public sealed class AgentDashboardService(AgentStateStore state, AgentStorage st
     var library = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "UPM Presentations");
     var settings = await state.GetSettingsAsync(ct) ?? AgentSettings.Default(library);
     var drive = new DriveInfo(Path.GetPathRoot(storage.Root)!);
-    return new(true, await state.GetSiteConnectedAsync(ct), await state.GetSiteConnectedAsync(ct) ? "CONNECTED" : "SITE OFFLINE — Using cached data",
+    var connected = await state.GetSiteConnectedAsync(ct); var phase = await state.GetConnectionPhaseAsync(ct);
+    if (!connected && provisioning is not null && phase == AgentConnectionPhase.Starting)
+      phase = AgentConnectionPhase.Offline;
+    var status = phase switch
+    {
+      AgentConnectionPhase.Starting => "STARTING UPM ROOM AGENT",
+      AgentConnectionPhase.Discovering => "DISCOVERING UPM SITE…",
+      AgentConnectionPhase.SiteFound => "UPM SITE FOUND",
+      AgentConnectionPhase.Registering => "REGISTERING THIS COMPUTER…",
+      AgentConnectionPhase.WaitingForAssignment => "CONNECTED TO UPM SITE — Waiting for room assignment",
+      AgentConnectionPhase.Synchronizing => "CONNECTED — Synchronizing…",
+      AgentConnectionPhase.Connected => "CONNECTED",
+      _ => "OFFLINE — Using cached Site configuration",
+    };
+    var identity = await state.GetOrCreateIdentityAsync(ct);
+    return new(true, connected, status,
         provisioning?.SiteName, branding.EventName, provisioning?.RoomName, provisioning?.Role ?? DeviceRole.None,
         Project(current, assets), Project(next, assets), await state.GetLastSuccessfulSyncAsync(ct), branding, settings,
         Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0", Environment.OSVersion.VersionString,
-        drive.AvailableFreeSpace, DirectorySize(storage.Cache), assets.Count(row => !row.Verified), DetectPowerPoint());
+        drive.AvailableFreeSpace, DirectorySize(storage.Cache), assets.Count(row => !row.Verified), DetectPowerPoint(),
+        phase, identity.AgentId, provisioning?.SiteId);
   }
 
   private static SessionView? Project(AgentSession? session, IReadOnlyList<AgentAsset> assets)

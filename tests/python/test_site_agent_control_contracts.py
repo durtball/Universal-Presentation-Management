@@ -12,6 +12,7 @@ from upm_site.agent_control import (
     EventBrandingWrite,
     Heartbeat,
     LocalChanges,
+    discovery_signature,
     register_agent_control_routes,
 )
 
@@ -84,11 +85,25 @@ def test_room_agent_sync_and_media_routes_are_registered():
     register_agent_control_routes(app, unused_db, unused_db)
     paths = {getattr(route, "path", None) for route in app.routes}
     assert "/api/v1/agent/bootstrap" in paths
+    assert "/api/v1/agent/discovery-metadata" in paths
+    assert "/api/v1/agent/enroll" in paths
     assert "/api/v1/agent/changes" in paths
     assert "/api/v1/agent/presentation-versions/{version_id}/download" in paths
     assert "/api/v1/agent/branding-assets/{asset_id}/download" in paths
+    assert "/api/v1/devices/{device_id}/room-agent-assignment" in paths
 
 
 def test_branding_contract_rejects_unknown_asset_slots():
     with pytest.raises(ValidationError):
         EventBrandingWrite(source="site_managed", assets={"executable": uuid4()})
+
+
+def test_discovery_ticket_signature_is_stable_and_binds_endpoint():
+    site_id = uuid4()
+    first = discovery_signature("s" * 32, site_id, "http://10.0.0.8:9080/", 123, "nonce-value")
+    assert first == discovery_signature(
+        "s" * 32, site_id, "http://10.0.0.8:9080/", 123, "nonce-value"
+    )
+    assert first != discovery_signature(
+        "s" * 32, site_id, "http://10.0.0.9:9080/", 123, "nonce-value"
+    )

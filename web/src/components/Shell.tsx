@@ -25,6 +25,7 @@ const siteNav = [
   ["/admin/central", "Central Connection"],
   ["/admin/program", "Program"],
   ["/admin/rooms", "Rooms"],
+  ["/admin/devices", "Devices"],
   ["/admin/users", "Users"],
   ["/admin/storage", "Storage"],
   ["/admin/media", "Presentation Media"],

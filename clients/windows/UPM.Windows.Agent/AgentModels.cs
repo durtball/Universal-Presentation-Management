@@ -18,12 +18,62 @@ public sealed record ProvisioningState(
     string DeviceName,
     Guid SiteId,
     Uri SiteAddress,
-    Guid EventId,
+    Guid? EventId,
     DeviceRole Role,
     Guid? RoomId,
     string? RoomName,
     DateTimeOffset ProvisionedAt,
     string? SiteName = null);
+
+public sealed record LocalAgentIdentity(
+    Guid AgentId,
+    string MachineName,
+    DateTimeOffset CreatedAt);
+
+public enum AgentConnectionPhase
+{
+  Starting,
+  Discovering,
+  SiteFound,
+  Registering,
+  WaitingForAssignment,
+  Synchronizing,
+  Connected,
+  Offline,
+}
+
+public sealed record DiscoveredSite(
+    Guid SiteId,
+    string SiteName,
+    Uri Endpoint,
+    long IssuedAt,
+    string Nonce,
+    string Signature);
+
+public sealed record AutomaticEnrollmentRequest(
+    Guid AgentId,
+    string MachineName,
+    string DeviceName,
+    string AgentVersion,
+    string WindowsVersion,
+    string[] Capabilities,
+    string[] SupportedRoles,
+    long DiscoveryIssuedAt,
+    string DiscoveryNonce,
+    string DiscoverySignature,
+    Uri DiscoveredEndpoint);
+
+public sealed record AutomaticEnrollmentResponse(
+    Guid SiteId,
+    string SiteName,
+    Guid DeviceId,
+    string AgentCredential,
+    bool Assigned,
+    Guid? EventId,
+    string? EventName,
+    Guid? RoomId,
+    string? RoomName,
+    DeviceRole Role);
 
 public sealed record AgentSession(
     Guid SessionId,
@@ -127,7 +177,8 @@ public sealed record AgentSettings(
     bool KioskFullscreen,
     int KioskMonitor,
     bool KioskStartWithWindows,
-    bool KioskOfflineAvailable)
+    bool KioskOfflineAvailable,
+    bool StartWithWindows = false)
 {
   public static AgentSettings Default(string libraryPath) => new(
       true, true, libraryPath, 7, 7, true, true, null, false, 30, 2,
@@ -152,7 +203,10 @@ public sealed record AgentDashboard(
     long FreeDiskBytes,
     long CacheBytes,
     int FailedTransfers,
-    bool PowerPointDetected);
+    bool PowerPointDetected,
+    AgentConnectionPhase ConnectionPhase = AgentConnectionPhase.Starting,
+    Guid? AgentId = null,
+    Guid? SiteId = null);
 
 public sealed record ProvisioningRequest(
     Uri SiteAddress,
@@ -163,8 +217,8 @@ public sealed record ProvisioningRequest(
 public sealed record SiteSyncEnvelope(
     Guid SiteId,
     string SiteName,
-    Guid EventId,
-    string EventName,
+    Guid? EventId,
+    string? EventName,
     Guid? RoomId,
     string? RoomName,
     DeviceRole Role,
@@ -172,7 +226,8 @@ public sealed record SiteSyncEnvelope(
     IReadOnlyList<AgentSession> Sessions,
     IReadOnlyList<SiteAssetDescriptor> Assets,
     BrandingManifest Branding,
-    AgentSettings? Settings);
+    AgentSettings? Settings,
+    bool Assigned = true);
 
 public sealed record SiteAssetDescriptor(
     Guid AssetId,

@@ -21,6 +21,7 @@ from upm_shared.enums import (
 from upm_site.persistence.models import (
     Device,
     DeviceAssignment,
+    DeviceRuntimeState,
     Event,
     EventParticipation,
     MediaObject,
@@ -353,23 +354,33 @@ def list_devices(session: Session) -> list[dict[str, Any]]:
             select(DeviceAssignment).where(DeviceAssignment.active.is_(True))
         )
     }
-    return [
-        {
-            **_device_view(item, active_assignments.get(item.device_id)),
-            "site_id": item.site_id,
-            "assignable": (
-                item.enrolled_at is not None
-                and item.revoked_at is None
-                and item.device_id not in active_assignments
-            ),
-            "assigned_room_id": (
-                active_assignments[item.device_id].room_id
-                if item.device_id in active_assignments
-                else None
-            ),
-        }
-        for item in session.scalars(select(Device).order_by(Device.display_name))
-    ]
+    result = []
+    for item in session.scalars(select(Device).order_by(Device.display_name)):
+        assignment = active_assignments.get(item.device_id)
+        room = session.get(Room, assignment.room_id) if assignment else None
+        event = session.get(Event, item.event_id) if item.event_id else None
+        runtime = session.get(DeviceRuntimeState, item.device_id)
+        result.append(
+            {
+                **_device_view(item, assignment),
+                "site_id": item.site_id,
+                "agent_identity": item.agent_identity,
+                "machine_name": item.machine_name,
+                "enrollment_state": item.enrollment_state,
+                "agent_role": item.agent_role,
+                "event_id": item.event_id,
+                "event_name": event.name if event else None,
+                "assigned_room_id": room.room_id if room else None,
+                "assigned_room_name": room.label if room else None,
+                "assignable": item.enrolled_at is not None and item.revoked_at is None,
+                "ip_address": runtime.ip_address if runtime else None,
+                "agent_version": runtime.agent_version if runtime else None,
+                "windows_version": runtime.windows_version if runtime else None,
+                "last_seen": runtime.last_heartbeat_at if runtime else None,
+                "sync_status": (runtime.metadata_json or {}).get("last_sync") if runtime else None,
+            }
+        )
+    return result
 
 
 def _presentation_state(

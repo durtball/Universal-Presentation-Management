@@ -1,6 +1,7 @@
 """Durable Site/Agent command, telemetry, review, and saveback HTTP contracts."""
 
 import hashlib
+import hmac
 import secrets
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from upm_shared.enums import AssetKind, MediaAvailability, SyncState
+from upm_shared.enums import DeviceRole as EndpointRole
 from upm_shared.identifiers import new_uuid7
 from upm_shared.media_storage_client import AsyncMediaStorageClient
 from upm_site.persistence.models import (
@@ -54,6 +56,11 @@ COMMAND_STATES = {
     "cancelled",
 }
 TERMINAL = {"succeeded", "failed", "expired", "cancelled"}
+
+
+def discovery_signature(secret: str, site_id: UUID, endpoint: str, issued_at: int, nonce: str):
+    signed = f"{site_id}|{endpoint}|{issued_at}|{nonce}".encode()
+    return hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
 
 
 class CommandCreate(BaseModel):
@@ -116,6 +123,28 @@ class EventBrandingWrite(BaseModel):
         ],
         UUID,
     ] = Field(default_factory=dict)
+
+
+class AutomaticAgentEnrollment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: UUID
+    machine_name: str = Field(min_length=1, max_length=255)
+    device_name: str = Field(min_length=1, max_length=255)
+    agent_version: str = Field(min_length=1, max_length=64)
+    windows_version: str = Field(min_length=1, max_length=255)
+    capabilities: list[str] = Field(max_length=32)
+    supported_roles: list[str] = Field(max_length=16)
+    discovery_issued_at: int
+    discovery_nonce: str = Field(min_length=16, max_length=128)
+    discovery_signature: str = Field(pattern=r"^[0-9a-f]{64}$")
+    discovered_endpoint: str = Field(min_length=8, max_length=2048)
+
+
+class RoomAgentAssignmentWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: UUID
+    room_id: UUID | None = None
+    role: Literal["room_agent", "upload_kiosk", "room_agent_kiosk"]
 
 
 class ReviewCreate(BaseModel):
@@ -223,6 +252,105 @@ def register_agent_control_routes(
             raise HTTPException(401, "invalid Agent credential")
         return d
 
+    def discovery_settings():
+        if settings is None:
+            raise HTTPException(503, "Site discovery is not configured")
+        configured = settings()
+        if not configured.discovery_secret:
+            raise HTTPException(503, "Site discovery is disabled")
+        return configured
+
+    @app.get("/api/v1/agent/discovery-metadata", tags=["agent"])
+    def discovery_metadata(s: Read, x_upm_discovery_secret: Annotated[str | None, Header()] = None):
+        configured = discovery_settings()
+        if not secrets.compare_digest(x_upm_discovery_secret or "", configured.discovery_secret):
+            raise HTTPException(401, "invalid discovery service credential")
+        local = identity(s)
+        return {"site_id": local.site_id, "site_name": local.display_name}
+
+    @app.post("/api/v1/agent/enroll", tags=["agent"])
+    def automatic_enrollment(payload: AutomaticAgentEnrollment, request: Request, s: Write):
+        configured = discovery_settings()
+        local = identity(s)
+        now = int(utc_now().timestamp())
+        if abs(now - payload.discovery_issued_at) > configured.discovery_ticket_seconds:
+            raise HTTPException(401, "discovery ticket expired")
+        expected = discovery_signature(
+            configured.discovery_secret,
+            local.site_id,
+            payload.discovered_endpoint,
+            payload.discovery_issued_at,
+            payload.discovery_nonce,
+        )
+        if not secrets.compare_digest(expected, payload.discovery_signature):
+            raise HTTPException(401, "invalid discovery ticket")
+        device = s.scalar(select(Device).where(Device.agent_identity == payload.agent_id))
+        if device is None:
+            exact = s.scalars(
+                select(Device).where(
+                    func.lower(Device.display_name) == payload.machine_name.casefold(),
+                    Device.agent_identity.is_(None),
+                )
+            ).all()
+            device = exact[0] if len(exact) == 1 else None
+        if device is None:
+            device = Device(
+                site_id=local.site_id,
+                display_name=payload.device_name,
+                enrollment_state="unassigned",
+            )
+            s.add(device)
+            s.flush()
+        device.agent_identity = payload.agent_id
+        device.machine_name = payload.machine_name
+        device.enrolled_at = device.enrolled_at or utc_now()
+        device.revoked_at = None
+        token = secrets.token_urlsafe(48)
+        device.agent_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        assignment = s.scalar(
+            select(DeviceAssignment).where(
+                DeviceAssignment.device_id == device.device_id,
+                DeviceAssignment.active.is_(True),
+            )
+        )
+        room = s.get(Room, assignment.room_id) if assignment else None
+        assigned = device.event_id is not None and (
+            device.agent_role == "upload_kiosk" or room is not None
+        )
+        device.enrollment_state = "assigned" if assigned else "unassigned"
+        runtime = s.get(DeviceRuntimeState, device.device_id)
+        metadata = {
+            "capabilities": payload.capabilities,
+            "supported_roles": payload.supported_roles,
+            "enrollment_remote_address": request.client.host if request.client else None,
+        }
+        if runtime is None:
+            runtime = DeviceRuntimeState(
+                device_id=device.device_id,
+                connected_at=utc_now(),
+                last_heartbeat_at=utc_now(),
+                hostname=payload.machine_name,
+                display_name=payload.device_name,
+                windows_version=payload.windows_version,
+                agent_version=payload.agent_version,
+                metadata_json=metadata,
+            )
+            s.add(runtime)
+        return {
+            "site_id": local.site_id,
+            "site_name": local.display_name,
+            "device_id": device.device_id,
+            "agent_credential": token,
+            "assigned": assigned,
+            "event_id": device.event_id,
+            "event_name": s.get(Event, device.event_id).name if device.event_id else None,
+            "room_id": room.room_id if room else None,
+            "room_name": room.label if room else None,
+            "role": {"room_agent": 1, "upload_kiosk": 2, "room_agent_kiosk": 3}.get(
+                device.agent_role, 1
+            ),
+        }
+
     def envelope(s: Session, d: Device, after: int = -1):
         sequence = s.scalar(select(func.max(AgentChangeFeed.sequence))) or 0
         assignment = s.scalar(
@@ -234,7 +362,33 @@ def register_agent_control_routes(
         event_id = d.event_id or (room.event_id if room else None)
         event = s.get(Event, event_id) if event_id else None
         if event is None:
-            raise HTTPException(409, "Agent device has no assigned event")
+            return {
+                "site_id": d.site_id,
+                "site_name": identity(s).display_name,
+                "event_id": None,
+                "event_name": None,
+                "room_id": None,
+                "room_name": None,
+                "role": {"room_agent": 1, "upload_kiosk": 2, "room_agent_kiosk": 3}.get(
+                    d.agent_role, 1
+                ),
+                "revisions": {
+                    "schedule": sequence,
+                    "presentations": sequence,
+                    "branding": sequence,
+                    "rotating_slides": sequence,
+                },
+                "sessions": [],
+                "assets": [],
+                "branding": {
+                    "revision": 0,
+                    "source": "Site Managed",
+                    "event_name": "",
+                    "assets": [],
+                },
+                "settings": None,
+                "assigned": False,
+            }
         changed = after < 0 or sequence > after
         room_rows = s.scalars(
             select(RoomAssignment)
@@ -427,6 +581,7 @@ def register_agent_control_routes(
                 "assets": branding_assets,
             },
             "settings": None,
+            "assigned": True,
         }
 
     @app.get("/api/v1/agent/bootstrap", tags=["agent"])
@@ -545,6 +700,75 @@ def register_agent_control_routes(
             "event_id": d.event_id,
             "agent_role": d.agent_role,
             "revision": d.revision,
+        }
+
+    @app.put("/api/v1/devices/{device_id}/room-agent-assignment", tags=["devices"])
+    def assign_room_agent(
+        device_id: UUID, payload: RoomAgentAssignmentWrite, request: Request, s: Write
+    ):
+        device = s.get(Device, device_id)
+        event = s.get(Event, payload.event_id)
+        room = s.get(Room, payload.room_id) if payload.room_id else None
+        if device is None:
+            raise HTTPException(404, "device not found")
+        if event is None or event.site_id != device.site_id:
+            raise HTTPException(422, "event is not owned by this Site")
+        if payload.role != "upload_kiosk" and room is None:
+            raise HTTPException(422, "Room Agent roles require a room")
+        if room and (room.site_id != device.site_id or room.event_id not in {None, event.event_id}):
+            raise HTTPException(422, "room is not available for this event")
+        prior = s.scalar(
+            select(DeviceAssignment).where(
+                DeviceAssignment.device_id == device_id,
+                DeviceAssignment.active.is_(True),
+            )
+        )
+        if prior and (room is None or prior.room_id != room.room_id):
+            prior.active = False
+            prior.ends_at = utc_now()
+            prior.revision += 1
+        if room and (prior is None or prior.room_id != room.room_id):
+            occupied = s.scalar(
+                select(DeviceAssignment).where(
+                    DeviceAssignment.room_id == room.room_id,
+                    DeviceAssignment.role == EndpointRole.PRIMARY,
+                    DeviceAssignment.active.is_(True),
+                )
+            )
+            if occupied:
+                raise HTTPException(409, "room already has a primary Agent")
+            s.add(
+                DeviceAssignment(
+                    device_id=device_id,
+                    room_id=room.room_id,
+                    role=EndpointRole.PRIMARY,
+                    starts_at=utc_now(),
+                    active=True,
+                )
+            )
+        device.event_id = event.event_id
+        device.agent_role = payload.role
+        device.enrollment_state = "assigned"
+        device.revision += 1
+        audit(
+            s,
+            device.site_id,
+            request.state.site_user_id,
+            "device.room_agent_assignment.updated",
+            "device",
+            device.device_id,
+            {
+                "event_id": event.event_id,
+                "room_id": room.room_id if room else None,
+                "role": payload.role,
+            },
+            event.event_id,
+        )
+        return {
+            "device_id": device.device_id,
+            "event_id": event.event_id,
+            "room_id": room.room_id if room else None,
+            "role": payload.role,
         }
 
     @app.put("/api/v1/events/{event_id}/branding", tags=["branding"])

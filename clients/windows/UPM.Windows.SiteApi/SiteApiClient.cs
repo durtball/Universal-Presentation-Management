@@ -403,6 +403,16 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public Task<JsonElement> GetDeviceRuntimeAsync(Guid deviceId, CancellationToken cancellationToken) =>
       GetAsync<JsonElement>($"api/v1/devices/{deviceId}/runtime", cancellationToken);
 
+  public async Task<JsonElement> AssignRoomAgentAsync(
+      Guid deviceId, Guid eventId, Guid? roomId, string role, CancellationToken cancellationToken)
+  {
+    using var request = CreateWriteRequest(HttpMethod.Put, $"api/v1/devices/{deviceId}/room-agent-assignment");
+    request.Content = JsonContent.Create(new { event_id = eventId, room_id = roomId, role }, options: JsonOptions);
+    using var response = await http.SendAsync(request, cancellationToken);
+    EnsureSiteSuccess(response, "Room Agent assignment");
+    return await ReadAsync<JsonElement>(response, cancellationToken);
+  }
+
   public Task<JsonElement[]> GetRoomsAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement[]>("api/v1/rooms", cancellationToken);
 

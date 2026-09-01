@@ -43,8 +43,27 @@ public sealed class AgentSynchronizationTests
 
     Assert.True(dashboard.AgentConnected);
     Assert.False(dashboard.SiteConnected);
-    Assert.Contains("Using cached data", dashboard.SiteStatus, StringComparison.Ordinal);
+    Assert.Contains("Using cached", dashboard.SiteStatus, StringComparison.Ordinal);
     Assert.Equal("AI4 2026", dashboard.EventName);
+  }
+
+  [Fact]
+  public async Task DurableAgentIdentityIsCreatedOnceAndSurvivesRestart()
+  {
+    using var root = new TemporaryDirectory(); var path = Path.Combine(root.Path, "agent.db");
+    var firstStore = new AgentStateStore(path); await firstStore.InitializeAsync();
+    var first = await firstStore.GetOrCreateIdentityAsync();
+    var reopened = new AgentStateStore(path); await reopened.InitializeAsync();
+    var second = await reopened.GetOrCreateIdentityAsync();
+    Assert.Equal(first, second); Assert.Equal(Environment.MachineName, second.MachineName);
+  }
+
+  [Fact]
+  public void SignedDiscoveryResponseParsesWithoutExposingOperatorInputs()
+  {
+    var json = $$"""{"site_id":"{{SiteId}}","site_name":"Main Site","endpoint":"http://10.0.0.8:9080/","issued_at":123,"nonce":"0123456789abcdef","signature":"{{new string('a', 64)}}"}""";
+    var site = SiteDiscoveryService.Parse(Encoding.UTF8.GetBytes(json));
+    Assert.NotNull(site); Assert.Equal(SiteId, site.SiteId); Assert.Equal("10.0.0.8", site.Endpoint.Host);
   }
 
   private static readonly Guid SiteId = Guid.Parse("019b1111-1111-7111-8111-111111111111");

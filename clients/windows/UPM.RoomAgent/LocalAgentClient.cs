@@ -1,7 +1,7 @@
 using System.Net.Http.Json;
 using UPM.Windows.Agent;
 
-namespace UPM.RoomClient;
+namespace UPM.RoomAgent;
 
 public sealed class LocalAgentClient
 {
@@ -9,6 +9,7 @@ public sealed class LocalAgentClient
   public Task<AgentDashboard?> DashboardAsync(CancellationToken ct = default) => http.GetFromJsonAsync<AgentDashboard>("api/v1/dashboard", ct);
   public Task<IReadOnlyList<AgentSession>?> SessionsAsync(CancellationToken ct = default) => http.GetFromJsonAsync<IReadOnlyList<AgentSession>>("api/v1/sessions", ct);
   public async Task SyncAsync(CancellationToken ct = default) { using var response = await http.PostAsync("api/v1/sync", null, ct); response.EnsureSuccessStatusCode(); }
+  public async Task ResetDiscoveryAsync(CancellationToken ct = default) { using var response = await http.PostAsync("api/v1/discovery/reset", null, ct); response.EnsureSuccessStatusCode(); }
   public async Task LaunchAsync(Guid version, CancellationToken ct = default) { using var response = await http.PostAsync($"api/v1/presentations/{version}/launch", null, ct); response.EnsureSuccessStatusCode(); }
   public async Task ProvisionAsync(ProvisioningRequest request, CancellationToken ct = default) { using var response = await http.PostAsJsonAsync("api/v1/provisioning", request, ct); response.EnsureSuccessStatusCode(); }
   public async Task UnprovisionAsync(CancellationToken ct = default) { using var response = await http.DeleteAsync("api/v1/provisioning", ct); response.EnsureSuccessStatusCode(); }

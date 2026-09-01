@@ -15,6 +15,7 @@ dependencies = [
   "sqlalchemy>=2.0.41,<3",
   "upm-shared",
   "uvicorn>=0.35,<1",
+  "zeroconf>=0.147,<1",
 ]
 
 [tool.uv.sources]

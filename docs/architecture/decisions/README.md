@@ -28,3 +28,4 @@ New decisions must not silently weaken Central/Site separation, Site offline aut
 
 - [ADR-0018: Row Presentation Entries and Rotating-Slide Inheritance](ADR-0018-row-presentation-entries-and-rotating-slides.md)
 - [ADR-0019: Site-Originated Events and Complete Recovery Snapshots](ADR-0019-site-originated-event-recovery-snapshots.md)
+- [ADR-0020: Single-process UPM Room Agent product and zero-configuration enrollment](ADR-0020-single-process-room-agent-product.md) — embeds the Agent runtime in the tray WinUI product and uses signed LAN discovery with exact machine-name enrollment.
