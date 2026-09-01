@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -91,6 +92,35 @@ def test_room_agent_sync_and_media_routes_are_registered():
     assert "/api/v1/agent/presentation-versions/{version_id}/download" in paths
     assert "/api/v1/agent/branding-assets/{asset_id}/download" in paths
     assert "/api/v1/devices/{device_id}/room-agent-assignment" in paths
+
+
+def test_room_agent_assignment_supports_put_and_clear_without_reenrollment():
+    app = FastAPI()
+
+    def unused_db():
+        raise AssertionError("route registration must not access the database")
+
+    register_agent_control_routes(app, unused_db, unused_db)
+    methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None)
+        == "/api/v1/devices/{device_id}/room-agent-assignment"
+        for method in getattr(route, "methods", set())
+    }
+    assert methods == {"PUT", "DELETE"}
+
+
+def test_agent_change_feed_repair_uses_jsonb_and_tracks_device_assignments():
+    source = Path(
+        "database/site/migrations/versions/"
+        "a73c5e91f204_repair_agent_change_feed_assignments.py"
+    ).read_text()
+    assert "to_jsonb(OLD)" in source
+    assert "to_jsonb(NEW)" in source
+    assert '"device_assignments": "device_assignment_id"' in source
+    assert "tr_device_assignments_agent_change" in source
+    assert "row_record.session_id" not in source
 
 
 def test_branding_contract_rejects_unknown_asset_slots():

@@ -54,6 +54,14 @@ public sealed partial class DevicesPage : Page
     }
     catch (Exception ex) { Show(ex.Message, InfoBarSeverity.Error); }
   }
+  private async void OnClear(object sender, RoutedEventArgs e)
+  {
+    if (sender is not Button { Tag: Guid deviceId } || deviceId == Guid.Empty || context.ActiveClient is not { } api) return;
+    var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Clear Room Agent assignment?", Content = "The endpoint remains enrolled and keeps its credential, but returns to Waiting for room assignment.", PrimaryButtonText = "CLEAR", CloseButtonText = "CANCEL", DefaultButton = ContentDialogButton.Close };
+    if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+    try { await api.ClearRoomAgentAssignmentAsync(deviceId, CancellationToken.None); await RefreshAsync(); }
+    catch (Exception ex) { Show(ex.Message, InfoBarSeverity.Error); }
+  }
   private void Show(string message, InfoBarSeverity severity) { StateBar.Title = severity == InfoBarSeverity.Error ? "DEVICE API ERROR" : "DEVICES"; StateBar.Message = message; StateBar.Severity = severity; StateBar.IsOpen = true; }
 }
 public sealed record AssignmentChoice(Guid Id, string Name);

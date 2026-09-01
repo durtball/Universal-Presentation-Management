@@ -59,6 +59,8 @@ public sealed class AgentStateStore(string databasePath)
   public async Task<bool> GetSiteConnectedAsync(CancellationToken ct = default) => await GetAsync<bool?>("site_connected", ct) ?? false;
   public Task SetConnectionPhaseAsync(AgentConnectionPhase value, CancellationToken ct = default) => SetAsync("connection_phase", value, ct);
   public async Task<AgentConnectionPhase> GetConnectionPhaseAsync(CancellationToken ct = default) => await GetAsync<AgentConnectionPhase?>("connection_phase", ct) ?? AgentConnectionPhase.Starting;
+  public Task SetPresentationLibraryErrorAsync(string? value, CancellationToken ct = default) => SetAsync("presentation_library_error", value, ct);
+  public Task<string?> GetPresentationLibraryErrorAsync(CancellationToken ct = default) => GetAsync<string>("presentation_library_error", ct);
 
   public async Task<LocalAgentIdentity> GetOrCreateIdentityAsync(CancellationToken ct = default)
   {
@@ -107,7 +109,9 @@ public sealed class AgentStateStore(string databasePath)
     await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
     command.CommandText = """
       INSERT INTO assets VALUES($id,$kind,$version,$presentation,$session,$room,$day,$scope,$original,$effective,$hash,$size,$path,$verified,$authoritative,$created)
-      ON CONFLICT(asset_id) DO UPDATE SET version_id=excluded.version_id,original_filename=excluded.original_filename,
+      ON CONFLICT(asset_id) DO UPDATE SET version_id=excluded.version_id,presentation_id=excluded.presentation_id,
+      session_id=excluded.session_id,room_id=excluded.room_id,event_day=excluded.event_day,rotation_scope=excluded.rotation_scope,
+      original_filename=excluded.original_filename,
       effective_filename=excluded.effective_filename,sha256=excluded.sha256,expected_size=excluded.expected_size,
       managed_path=excluded.managed_path,verified=excluded.verified,authoritative=excluded.authoritative
       """;
@@ -145,6 +149,14 @@ public sealed class AgentStateStore(string databasePath)
     await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
     command.CommandText = "INSERT INTO library_paths VALUES($asset,$session,$path) ON CONFLICT(asset_id,session_id) DO UPDATE SET visible_path=excluded.visible_path";
     Add(command, "$asset", assetId); Add(command, "$session", sessionId?.ToString() ?? string.Empty); Add(command, "$path", path);
+    await command.ExecuteNonQueryAsync(ct);
+  }
+
+  public async Task DeleteLibraryPathAsync(Guid assetId, Guid? sessionId, CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "DELETE FROM library_paths WHERE asset_id=$asset AND session_id=$session";
+    Add(command, "$asset", assetId); Add(command, "$session", sessionId?.ToString() ?? string.Empty);
     await command.ExecuteNonQueryAsync(ct);
   }
 

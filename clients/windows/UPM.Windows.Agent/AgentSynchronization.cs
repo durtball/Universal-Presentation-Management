@@ -172,7 +172,7 @@ public sealed class AgentSyncWorker(
     await credentials.SaveAsync(enrolled.AgentCredential, ct);
     await state.SaveProvisioningAsync(new(identity.AgentId, enrolled.DeviceId, identity.MachineName,
         enrolled.SiteId, found.Endpoint, enrolled.EventId, enrolled.Role, enrolled.RoomId,
-        enrolled.RoomName, DateTimeOffset.UtcNow, enrolled.SiteName), ct);
+        enrolled.RoomName, DateTimeOffset.UtcNow, enrolled.SiteName, enrolled.EventName), ct);
     await state.SetConnectionPhaseAsync(enrolled.Assigned
         ? AgentConnectionPhase.Synchronizing : AgentConnectionPhase.WaitingForAssignment, ct);
   }
@@ -182,7 +182,7 @@ public sealed class AgentSyncWorker(
     var envelope = await site.BootstrapAsync(request.SiteAddress, request.EnrollmentCredential, ct);
     await credentials.SaveAsync(request.EnrollmentCredential, ct);
     await state.SaveProvisioningAsync(new(Guid.CreateVersion7(), request.DeviceId, request.DeviceName, envelope.SiteId, request.SiteAddress,
-        envelope.EventId, envelope.Role, envelope.RoomId, envelope.RoomName, DateTimeOffset.UtcNow, envelope.SiteName), ct);
+        envelope.EventId, envelope.Role, envelope.RoomId, envelope.RoomName, DateTimeOffset.UtcNow, envelope.SiteName, envelope.EventName), ct);
     await ApplyAsync(envelope, request.EnrollmentCredential, request.SiteAddress, ct);
     signal.Request();
   }
@@ -199,11 +199,19 @@ public sealed class AgentSyncWorker(
       RoomId = envelope.RoomId,
       RoomName = envelope.RoomName,
       SiteName = envelope.SiteName,
+      EventName = envelope.EventName,
       SiteAddress = p.SiteAddress
     };
     await state.SaveProvisioningAsync(p, ct);
     await ApplyAsync(envelope, credential, p.SiteAddress, ct);
-    await site.HeartbeatAsync(p, credential, await dashboards.GetAsync(ct: ct), ct);
+    try
+    {
+      await site.HeartbeatAsync(p, credential, await dashboards.GetAsync(ct: ct), ct);
+    }
+    catch (Exception exception) when (exception is not OperationCanceledException)
+    {
+      logger.LogWarning(exception, "Agent heartbeat failed after a successful Site synchronization");
+    }
     await state.SetConnectionPhaseAsync(envelope.Assigned
         ? AgentConnectionPhase.Connected : AgentConnectionPhase.WaitingForAssignment, ct);
   }
@@ -220,9 +228,49 @@ public sealed class AgentSyncWorker(
     var settings = envelope.Settings ?? await state.GetSettingsAsync(ct) ?? AgentSettings.Default(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "UPM Presentations"));
     await state.SaveSettingsAsync(settings, ct);
     var library = new PresentationLibrary(settings.PresentationLibraryPath);
+    if (settings.PresentationLibraryEnabled)
+    {
+      try
+      {
+        library.EnsureRoot();
+        await state.SetPresentationLibraryErrorAsync(null, ct);
+      }
+      catch (IOException exception)
+      {
+        await state.SetPresentationLibraryErrorAsync(exception.Message, ct);
+        throw;
+      }
+    }
+    else
+    {
+      await state.SetPresentationLibraryErrorAsync(null, ct);
+    }
+    if (settings.PresentationLibraryEnabled)
+    {
+      var removedSessionIds = sessions
+          .Where(session => session.Cancelled && !incomingIds.Contains(session.SessionId))
+          .Select(session => session.SessionId)
+          .ToHashSet();
+      foreach (var cachedAsset in (await state.ListAssetsAsync(ct))
+          .Where(asset => asset.SessionId is not null && removedSessionIds.Contains(asset.SessionId.Value)))
+      {
+        var cancelledSession = sessions.First(session => session.SessionId == cachedAsset.SessionId);
+        var oldPath = await state.GetLibraryPathAsync(cachedAsset.AssetId, cachedAsset.SessionId, ct);
+        var archivedPath = await library.PublishAsync(cachedAsset, cancelledSession, ct);
+        await state.SetLibraryPathAsync(cachedAsset.AssetId, cachedAsset.SessionId, archivedPath, ct);
+        if (oldPath is not null
+            && !oldPath.Equals(archivedPath, StringComparison.OrdinalIgnoreCase)
+            && File.Exists(oldPath))
+        {
+          File.Delete(oldPath);
+          RemoveEmptyParents(Path.GetDirectoryName(oldPath), settings.PresentationLibraryPath);
+        }
+      }
+    }
     foreach (var descriptor in envelope.Assets)
     {
       var asset = await state.GetVerifiedVersionAsync(descriptor.VersionId, ct);
+      var priorSessionId = asset?.SessionId;
       if (asset is null)
       {
         await using var stream = await site.DownloadAsync(siteAddress, descriptor.DownloadUri, credential, ct);
@@ -231,11 +279,27 @@ public sealed class AgentSyncWorker(
             descriptor.EventDay, descriptor.RotationScope, descriptor.OriginalFilename, Path.GetFileName(path), descriptor.Sha256, descriptor.Size, path, true, true, DateTimeOffset.UtcNow);
         await state.UpsertAssetAsync(asset, ct);
       }
+      else
+      {
+        asset = asset with
+        {
+          PresentationId = descriptor.PresentationId,
+          SessionId = descriptor.SessionId,
+          RoomId = descriptor.RoomId,
+          EventDay = descriptor.EventDay,
+          RotationScope = descriptor.RotationScope,
+          OriginalFilename = descriptor.OriginalFilename,
+          Authoritative = true,
+        };
+        await state.UpsertAssetAsync(asset, ct);
+      }
       if (settings.PresentationLibraryEnabled)
       {
-        var oldPath = await state.GetLibraryPathAsync(asset.AssetId, asset.SessionId, ct);
+        var oldPath = await state.GetLibraryPathAsync(asset.AssetId, priorSessionId, ct);
         var visible = await library.PublishAsync(asset, sessions.FirstOrDefault(row => row.SessionId == asset.SessionId), ct);
         await state.SetLibraryPathAsync(asset.AssetId, asset.SessionId, visible, ct);
+        if (priorSessionId != asset.SessionId)
+          await state.DeleteLibraryPathAsync(asset.AssetId, priorSessionId, ct);
         if (oldPath is not null && !oldPath.Equals(visible, StringComparison.OrdinalIgnoreCase) && File.Exists(oldPath))
         {
           File.Delete(oldPath); RemoveEmptyParents(Path.GetDirectoryName(oldPath), settings.PresentationLibraryPath);
@@ -258,7 +322,22 @@ public sealed class AgentSyncWorker(
 
   private async Task ApplyBrandingAsync(BrandingManifest manifest, Uri address, string credential, CancellationToken ct)
   {
-    var current = await state.GetBrandingAsync(ct); if (current?.Revision == manifest.Revision) return;
+    var current = await state.GetBrandingAsync(ct);
+    if (current?.Revision == manifest.Revision)
+    {
+      var refreshed = current with
+      {
+        Source = manifest.Source,
+        EventName = manifest.EventName,
+        AccentColor = manifest.AccentColor,
+        PrimaryColor = manifest.PrimaryColor,
+        WelcomeMessage = manifest.WelcomeMessage,
+        UploadInstructions = manifest.UploadInstructions,
+        Footer = manifest.Footer,
+      };
+      if (refreshed != current) await state.SaveBrandingAsync(refreshed, ct);
+      return;
+    }
     var staging = Path.Combine(storage.Downloads, $"branding-{manifest.Revision}"); Directory.CreateDirectory(staging);
     var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     try

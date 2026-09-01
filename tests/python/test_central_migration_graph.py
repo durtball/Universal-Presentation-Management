@@ -70,9 +70,12 @@ def test_storage_root_revision_upgrade_is_reversible() -> None:
     assert 'op.drop_column("storage_roots", "revision")' in source
 
 
-def test_site_media_storage_reference_has_one_head() -> None:
+def test_site_agent_change_feed_repair_has_one_head() -> None:
     script = site_script()
-    assert script.get_heads() == ["b82f7a19d340"]
+    assert script.get_heads() == ["a73c5e91f204"]
+    assert script.get_revision("a73c5e91f204").down_revision == "d12a9f73bc21"
+    assert script.get_revision("d12a9f73bc21").down_revision == "c91e72f04a11"
+    assert script.get_revision("c91e72f04a11").down_revision == "b82f7a19d340"
     assert script.get_revision("b82f7a19d340").down_revision == "94e2c173a8f0"
     assert script.get_revision("94e2c173a8f0").down_revision == "7c4a91e2d5f0"
     assert script.get_revision("7c4a91e2d5f0").down_revision == "2f6c1e9a4b70"

@@ -82,6 +82,10 @@ export const siteApi = {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event_id: eventId, room_id: roomId, role }),
     }),
+  clearRoomAgentAssignment: (deviceId: string) =>
+    siteClient.request<SiteDevice>(`/api/v1/devices/${deviceId}/room-agent-assignment`, {
+      method: "DELETE",
+    }),
   assignDevice: (roomId: string, role: "primary" | "backup", deviceId: string | null) =>
     siteClient.request<RoomDetail>(
       `/api/v1/rooms/${roomId}/device-assignments/${role}`,

@@ -6,7 +6,7 @@
    <StackPanel><TextBlock FontSize="18" Text="{Binding Name}"/><TextBlock Foreground="{StaticResource MutedBrush}" Text="{Binding Hostname}"/><TextBlock Foreground="{StaticResource AccentBrush}" Text="{Binding OnlineState}"/></StackPanel>
    <StackPanel Grid.Column="1"><TextBlock Foreground="{StaticResource MutedBrush}" Text="ASSIGNMENT"/><TextBlock Text="{Binding Assignment}"/><TextBlock Text="{Binding Role}"/></StackPanel>
    <StackPanel Grid.Column="2"><TextBlock Foreground="{StaticResource MutedBrush}" Text="RUNTIME"/><TextBlock Text="{Binding Agent}"/><TextBlock Text="{Binding PowerPoint}"/><TextBlock Text="{Binding Disk}"/></StackPanel>
-   <StackPanel Grid.Column="3"><TextBlock Foreground="{StaticResource MutedBrush}" Text="ACTIVITY"/><TextBlock Text="{Binding Heartbeat}"/><TextBlock Text="{Binding Current}"/><TextBlock Foreground="#FFCF6679" Text="{Binding Error}" TextWrapping="Wrap"/></StackPanel><Button Grid.Column="4" Content="ASSIGN" Tag="{Binding DeviceId}" Click="OnAssign" VerticalAlignment="Center"/>
+   <StackPanel Grid.Column="3"><TextBlock Foreground="{StaticResource MutedBrush}" Text="ACTIVITY"/><TextBlock Text="{Binding Heartbeat}"/><TextBlock Text="{Binding Current}"/><TextBlock Foreground="#FFCF6679" Text="{Binding Error}" TextWrapping="Wrap"/></StackPanel><StackPanel Grid.Column="4" Spacing="6" VerticalAlignment="Center"><Button Content="ASSIGN" Tag="{Binding DeviceId}" Click="OnAssign"/><Button Content="CLEAR" Tag="{Binding DeviceId}" Click="OnClear"/></StackPanel>
   </Grid></Border></DataTemplate></ListView.ItemTemplate></ListView>
  </Grid>
 </Page>

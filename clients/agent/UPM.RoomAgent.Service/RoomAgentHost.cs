@@ -33,6 +33,27 @@ public static class RoomAgentHost
     var app = builder.Build();
     var state = app.Services.GetRequiredService<AgentStateStore>();
     await state.InitializeAsync();
+    var settings = await state.GetSettingsAsync(cancellationToken)
+        ?? AgentSettings.Default(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            "UPM Presentations"));
+    if (settings.PresentationLibraryEnabled)
+    {
+      try
+      {
+        new PresentationLibrary(settings.PresentationLibraryPath).EnsureRoot();
+        await state.SetPresentationLibraryErrorAsync(null, cancellationToken);
+      }
+      catch (IOException exception)
+      {
+        await state.SetPresentationLibraryErrorAsync(exception.Message, cancellationToken);
+      }
+    }
+    else
+    {
+      await state.SetPresentationLibraryErrorAsync(null, cancellationToken);
+    }
+    await state.SaveSettingsAsync(settings, cancellationToken);
 
     app.Use(async (context, next) =>
     {
@@ -64,7 +85,27 @@ public static class RoomAgentHost
     app.MapGet("/api/v1/settings", async (AgentStateStore store, AgentDashboardService dashboard, CancellationToken ct) =>
         (await dashboard.GetAsync(ct: ct)).Settings);
     app.MapPut("/api/v1/settings", async (AgentSettings settings, AgentStateStore store, CancellationToken ct) =>
-    { await store.SaveSettingsAsync(settings, ct); return Results.NoContent(); });
+    {
+      if (settings.PresentationLibraryEnabled)
+      {
+        try
+        {
+          new PresentationLibrary(settings.PresentationLibraryPath).EnsureRoot();
+          await store.SetPresentationLibraryErrorAsync(null, ct);
+        }
+        catch (IOException exception)
+        {
+          await store.SetPresentationLibraryErrorAsync(exception.Message, ct);
+          return Results.Problem(exception.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
+      }
+      else
+      {
+        await store.SetPresentationLibraryErrorAsync(null, ct);
+      }
+      await store.SaveSettingsAsync(settings, ct);
+      return Results.NoContent();
+    });
     app.MapPost("/api/v1/provisioning", async (ProvisioningRequest request, AgentSyncWorker sync, CancellationToken ct) =>
     { await sync.ProvisionAsync(request, ct); return Results.NoContent(); });
     app.MapDelete("/api/v1/provisioning", async (AgentStateStore store, IAgentCredentialStore credentials, CancellationToken ct) =>

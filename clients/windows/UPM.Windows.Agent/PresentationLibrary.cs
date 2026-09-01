@@ -2,9 +2,33 @@ using System.Globalization;
 
 namespace UPM.Windows.Agent;
 
-public sealed class PresentationLibrary(string root)
+public sealed class PresentationLibrary
 {
-  public string Root { get; } = Path.GetFullPath(root);
+  public PresentationLibrary(string root)
+  {
+    try
+    {
+      Root = Path.GetFullPath(root);
+    }
+    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+    {
+      throw new IOException($"'{root}' is not a valid presentation library path.", exception);
+    }
+  }
+
+  public string Root { get; }
+
+  public void EnsureRoot()
+  {
+    try
+    {
+      Directory.CreateDirectory(Root);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+    {
+      throw new IOException($"UPM could not create or access the presentation library at '{Root}'.", exception);
+    }
+  }
 
   public string DayPath(DateOnly day) => WindowsPathPolicy.EnsureContained(
       Root, $"{day:yyyy-MM-dd} - {day.ToString("dddd", CultureInfo.InvariantCulture)}");
@@ -32,6 +56,7 @@ public sealed class PresentationLibrary(string root)
   public async Task<string> PublishAsync(AgentAsset asset, AgentSession? session, CancellationToken ct = default)
   {
     if (!asset.Verified || !File.Exists(asset.ManagedPath)) throw new InvalidOperationException("Only a verified managed asset can be published.");
+    EnsureRoot();
     string directory;
     if (asset.Kind == AssetKind.RotatingSlide)
     {

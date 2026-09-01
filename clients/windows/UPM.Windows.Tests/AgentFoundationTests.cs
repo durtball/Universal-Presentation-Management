@@ -42,6 +42,38 @@ public sealed class AgentFoundationTests
   }
 
   [Fact]
+  public void EnabledLibraryCreatesMissingDefaultOrCustomRootImmediately()
+  {
+    using var root = Temp();
+    var defaultPath = Path.Combine(root.Path, "Desktop", "UPM Presentations");
+    var customPath = Path.Combine(root.Path, "operator", "custom-library");
+    new PresentationLibrary(defaultPath).EnsureRoot();
+    new PresentationLibrary(customPath).EnsureRoot();
+    Assert.True(Directory.Exists(defaultPath)); Assert.True(Directory.Exists(customPath));
+  }
+
+  [Fact]
+  public void InvalidLibraryPathProducesOperatorFacingError()
+  {
+    var error = Assert.Throws<IOException>(() => new PresentationLibrary("invalid\0path"));
+    Assert.Contains("not a valid presentation library path", error.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task DisabledLibrarySettingPersistsWithoutCreatingOrDeletingOperatorFolder()
+  {
+    using var root = Temp(); var database = Path.Combine(root.Path, "agent.db");
+    var visible = Path.Combine(root.Path, "visible"); Directory.CreateDirectory(visible);
+    var operatorFile = Path.Combine(visible, "operator-note.txt"); await File.WriteAllTextAsync(operatorFile, "keep");
+    var store = new AgentStateStore(database); await store.InitializeAsync();
+    await store.SaveSettingsAsync(AgentSettings.Default(visible) with { PresentationLibraryEnabled = false });
+    var reopened = new AgentStateStore(database); await reopened.InitializeAsync();
+    var settings = await reopened.GetSettingsAsync();
+    Assert.False(settings!.PresentationLibraryEnabled); Assert.Equal(visible, settings.PresentationLibraryPath);
+    Assert.True(File.Exists(operatorFile));
+  }
+
+  [Fact]
   public async Task VerifiedDownloadPreservesFilenameAndAtomicActivation()
   {
     using var root = Temp(); var storage = new AgentStorage(root.Path); var bytes = Encoding.UTF8.GetBytes("valid deck");
@@ -102,6 +134,23 @@ public sealed class AgentFoundationTests
     var reopened = new AgentStateStore(Path.Combine(root.Path, "agent.db")); await reopened.InitializeAsync();
     Assert.Equal(old, await reopened.GetLibraryPathAsync(asset, session));
     Assert.Equal(2, await reopened.GetSchemaVersionAsync());
+  }
+
+  [Fact]
+  public async Task PublishingAfterRoomAndScheduleRenameReusesManagedMediaAndOriginalFilename()
+  {
+    using var root = Temp(); var managed = Path.Combine(root.Path, "cache", "Presenter FINAL.pptx");
+    Directory.CreateDirectory(Path.GetDirectoryName(managed)!); await File.WriteAllTextAsync(managed, "deck");
+    var library = new PresentationLibrary(Path.Combine(root.Path, "library"));
+    var first = Session(); var asset = new AgentAsset(Guid.NewGuid(), AssetKind.Presentation, Guid.NewGuid(), Guid.NewGuid(), first.SessionId, first.RoomId,
+        null, null, "Presenter FINAL.pptx", "Presenter FINAL.pptx", "hash", new FileInfo(managed).Length, managed, true, true, DateTimeOffset.UtcNow);
+    var oldPath = await library.PublishAsync(asset, first);
+    var changed = first with { RoomName = "Bellini", Title = "Updated Session", StartsAt = first.StartsAt.AddMinutes(30), Revision = 2 };
+    var newPath = await library.PublishAsync(asset with { RoomId = changed.RoomId }, changed);
+    Assert.True(File.Exists(oldPath)); Assert.True(File.Exists(newPath));
+    Assert.Equal("Presenter FINAL.pptx", Path.GetFileName(newPath));
+    Assert.Contains("Bellini", newPath, StringComparison.Ordinal);
+    Assert.Contains("10-45 AM - Updated Session - 3489435", newPath, StringComparison.Ordinal);
   }
 
   private static AgentSession Session(string? identifier = "3489435") => new(Guid.NewGuid(), identifier, "Agentic Model Risk Management", "Presenter", Guid.NewGuid(), "Venetian G", new DateTimeOffset(2026, 8, 31, 10, 15, 0, TimeSpan.Zero), new DateTimeOffset(2026, 8, 31, 11, 0, 0, TimeSpan.Zero), false, 1);

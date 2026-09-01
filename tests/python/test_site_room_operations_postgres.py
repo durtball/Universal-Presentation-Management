@@ -196,6 +196,7 @@ def room_factory() -> Iterator[tuple[sessionmaker[Session], SiteSettings, dict[s
                     size_bytes=2048,
                     mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     availability=MediaAvailability.AVAILABLE,
+                    disposition="authoritative",
                 )
             )
             session.flush()
@@ -250,6 +251,7 @@ def room_factory() -> Iterator[tuple[sessionmaker[Session], SiteSettings, dict[s
                         site_id=site.site_id,
                         display_name="Agent Primary B",
                         enrolled_at=now,
+                        agent_token_hash="a" * 64,
                     ),
                 ]
             )
@@ -338,11 +340,13 @@ def test_room_program_media_device_dashboard_and_restart_workflow(
             json={"device_id": str(device_ids[2])},
         )
         assert invalid.status_code == 422
-        duplicate = client.put(
+        moved_role = client.put(
             f"/api/v1/rooms/{room_id}/device-assignments/primary",
             json={"device_id": str(device_ids[1])},
         )
-        assert duplicate.status_code == 409
+        assert moved_role.status_code == 200, moved_role.text
+        assert moved_role.json()["endpoints"]["primary"]["device_id"] == str(device_ids[1])
+        assert "backup" not in moved_role.json()["endpoints"]
         changed = client.put(
             f"/api/v1/rooms/{room_id}/device-assignments/primary",
             json={"device_id": str(device_ids[3])},
@@ -372,13 +376,30 @@ def test_room_program_media_device_dashboard_and_restart_workflow(
         assert detail.json()["label"] == "Room 101 - Main"
         assert detail.json()["endpoints"]["primary"]["device_id"] == str(device_ids[3])
         assert len(detail.json()["sessions"]) == 2
+        with factory() as session:
+            assigned = session.get(Device, device_ids[3])
+            assert assigned is not None
+            assert assigned.event_id == context["event_id"]
+            assert assigned.enrollment_state == "assigned"
+            assert assigned.agent_token_hash == "a" * 64
+        cleared = restarted.put(
+            f"/api/v1/rooms/{room_id}/device-assignments/primary",
+            json={"device_id": None},
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert "primary" not in cleared.json()["endpoints"]
     with factory() as session:
         room = session.get(Room, room_id)
         assert room is not None and str(room.room_id) == room_id
         assignments = session.scalars(
             select(DeviceAssignment).where(DeviceAssignment.room_id == room.room_id)
         ).all()
-        assert len([item for item in assignments if item.active]) == 2
+        assert len([item for item in assignments if item.active]) == 0
+        cleared_device = session.get(Device, device_ids[3])
+        assert cleared_device is not None
+        assert cleared_device.event_id is None
+        assert cleared_device.enrollment_state == "unassigned"
+        assert cleared_device.agent_token_hash == "a" * 64
 
 
 def test_room_readiness_uses_canonical_media_and_counts_presentations_once(
@@ -461,6 +482,7 @@ def test_room_readiness_uses_canonical_media_and_counts_presentations_once(
                             hash_algorithm="sha256",
                             size_bytes=1024,
                             availability=MediaAvailability.AVAILABLE,
+                            disposition="authoritative",
                         )
                     )
                     session.add(

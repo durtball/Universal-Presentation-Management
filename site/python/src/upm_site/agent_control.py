@@ -659,7 +659,7 @@ def register_agent_control_routes(
         audit(
             s,
             d.site_id,
-            request.state.site_user_id,
+            getattr(request.state, "site_user_id", "system"),
             "device.agent_credential.rotated",
             "device",
             d.device_id,
@@ -684,7 +684,7 @@ def register_agent_control_routes(
         audit(
             s,
             d.site_id,
-            request.state.site_user_id,
+            getattr(request.state, "site_user_id", "system"),
             "device.agent_configuration.updated",
             "device",
             d.device_id,
@@ -717,23 +717,37 @@ def register_agent_control_routes(
             raise HTTPException(422, "Room Agent roles require a room")
         if room and (room.site_id != device.site_id or room.event_id not in {None, event.event_id}):
             raise HTTPException(422, "room is not available for this event")
-        prior = s.scalar(
-            select(DeviceAssignment).where(
+        active_assignments = s.scalars(
+            select(DeviceAssignment)
+            .where(
                 DeviceAssignment.device_id == device_id,
                 DeviceAssignment.active.is_(True),
             )
+            .with_for_update()
+        ).all()
+        retained = next(
+            (
+                assignment
+                for assignment in active_assignments
+                if room and assignment.room_id == room.room_id
+            ),
+            None,
         )
-        if prior and (room is None or prior.room_id != room.room_id):
-            prior.active = False
-            prior.ends_at = utc_now()
-            prior.revision += 1
-        if room and (prior is None or prior.room_id != room.room_id):
+        for assignment in active_assignments:
+            if assignment is retained:
+                continue
+            assignment.active = False
+            assignment.ends_at = utc_now()
+            assignment.revision += 1
+        if room and retained is None:
             occupied = s.scalar(
-                select(DeviceAssignment).where(
+                select(DeviceAssignment)
+                .where(
                     DeviceAssignment.room_id == room.room_id,
                     DeviceAssignment.role == EndpointRole.PRIMARY,
                     DeviceAssignment.active.is_(True),
                 )
+                .with_for_update()
             )
             if occupied:
                 raise HTTPException(409, "room already has a primary Agent")
@@ -753,7 +767,7 @@ def register_agent_control_routes(
         audit(
             s,
             device.site_id,
-            request.state.site_user_id,
+            getattr(request.state, "site_user_id", "system"),
             "device.room_agent_assignment.updated",
             "device",
             device.device_id,
@@ -769,6 +783,46 @@ def register_agent_control_routes(
             "event_id": event.event_id,
             "room_id": room.room_id if room else None,
             "role": payload.role,
+        }
+
+    @app.delete("/api/v1/devices/{device_id}/room-agent-assignment", tags=["devices"])
+    def clear_room_agent_assignment(device_id: UUID, request: Request, s: Write):
+        device = s.get(Device, device_id)
+        if device is None:
+            raise HTTPException(404, "device not found")
+        cleared = s.scalars(
+            select(DeviceAssignment)
+            .where(
+                DeviceAssignment.device_id == device_id,
+                DeviceAssignment.active.is_(True),
+            )
+            .with_for_update()
+        ).all()
+        now = utc_now()
+        for assignment in cleared:
+            assignment.active = False
+            assignment.ends_at = now
+            assignment.revision += 1
+        prior_event_id = device.event_id
+        device.event_id = None
+        device.enrollment_state = "unassigned"
+        device.revision += 1
+        audit(
+            s,
+            device.site_id,
+            getattr(request.state, "site_user_id", "system"),
+            "device.room_agent_assignment.cleared",
+            "device",
+            device.device_id,
+            {"event_id": None, "room_id": None, "role": device.agent_role},
+            prior_event_id,
+        )
+        return {
+            "device_id": device.device_id,
+            "event_id": None,
+            "room_id": None,
+            "role": device.agent_role,
+            "enrollment_state": device.enrollment_state,
         }
 
     @app.put("/api/v1/events/{event_id}/branding", tags=["branding"])
@@ -920,6 +974,9 @@ def register_agent_control_routes(
         return {
             "device_id": device_id,
             "online_state": "online" if online else "offline",
+            "event_id": d.event_id,
+            "agent_role": d.agent_role,
+            "metadata": r.metadata_json,
             **{
                 x: getattr(r, x)
                 for x in (

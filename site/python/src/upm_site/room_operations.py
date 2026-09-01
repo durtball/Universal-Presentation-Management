@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -323,25 +323,35 @@ def program_locations(session: Session, event_id: UUID) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: str(item["imported_label"]).casefold())
 
 
-def _device_view(device: Device, assignment: DeviceAssignment | None = None) -> dict[str, Any]:
+def _device_view(
+    device: Device,
+    assignment: DeviceAssignment | None = None,
+    runtime: DeviceRuntimeState | None = None,
+) -> dict[str, Any]:
     if device.revoked_at is not None:
         status = "revoked"
     elif device.enrolled_at is None:
         status = "not_enrolled"
-    else:
+    elif runtime is None:
         status = "unknown"
+    else:
+        status = (
+            "online"
+            if runtime.last_heartbeat_at >= utc_now() - timedelta(seconds=90)
+            else "offline"
+        )
     return {
         "device_id": device.device_id,
         "name": device.display_name,
         "role": assignment.role if assignment else None,
         "assignment_id": assignment.device_assignment_id if assignment else None,
         "status": status,
-        "online": None,
-        "last_heartbeat": None,
-        "ip_address": None,
-        "interface": None,
-        "version": None,
-        "telemetry_available": False,
+        "online": status == "online" if runtime else None,
+        "last_heartbeat": runtime.last_heartbeat_at if runtime else None,
+        "ip_address": runtime.ip_address if runtime else None,
+        "interface": runtime.hostname if runtime else None,
+        "version": runtime.agent_version if runtime else None,
+        "telemetry_available": runtime is not None,
         "enrolled_at": device.enrolled_at,
         "revoked_at": device.revoked_at,
     }
@@ -362,7 +372,7 @@ def list_devices(session: Session) -> list[dict[str, Any]]:
         runtime = session.get(DeviceRuntimeState, item.device_id)
         result.append(
             {
-                **_device_view(item, assignment),
+                **_device_view(item, assignment, runtime),
                 "site_id": item.site_id,
                 "agent_identity": item.agent_identity,
                 "machine_name": item.machine_name,
@@ -620,12 +630,15 @@ def _presentations_for_sessions(
 
 def _room_endpoint_map(session: Session, room_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
     result: dict[UUID, dict[str, Any]] = defaultdict(dict)
-    for assignment, device in session.execute(
-        select(DeviceAssignment, Device)
+    for assignment, device, runtime in session.execute(
+        select(DeviceAssignment, Device, DeviceRuntimeState)
         .join(Device, Device.device_id == DeviceAssignment.device_id)
+        .outerjoin(DeviceRuntimeState, DeviceRuntimeState.device_id == Device.device_id)
         .where(DeviceAssignment.room_id.in_(room_ids), DeviceAssignment.active.is_(True))
     ):
-        result[assignment.room_id][assignment.role.value] = _device_view(device, assignment)
+        result[assignment.room_id][assignment.role.value] = _device_view(
+            device, assignment, runtime
+        )
     return dict(result)
 
 

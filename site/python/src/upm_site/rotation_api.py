@@ -65,8 +65,11 @@ def register_rotation_routes(
             "central_defaults": [
                 _view(session, item) for item in rows if item.source_authority == "central"
             ],
-            "site_overrides": [_view(session, item) for item in rows if item.source_authority == "site"],
-            "effective": _view(session,
+            "site_overrides": [
+                _view(session, item) for item in rows if item.source_authority == "site"
+            ],
+            "effective": _view(
+                session,
                 next(
                     item for item in rows if item.rotation_assignment_id == effective.assignment_id
                 )
@@ -183,7 +186,11 @@ def _view(session, item):
             "revision",
         )
     }
-    version = session.get(PresentationVersion, item.presentation_version_id) if item.presentation_version_id else None
+    version = (
+        session.get(PresentationVersion, item.presentation_version_id)
+        if item.presentation_version_id
+        else None
+    )
     asset = session.scalar(
         select(PresentationAsset).where(
             PresentationAsset.presentation_version_id == item.presentation_version_id

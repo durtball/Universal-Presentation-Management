@@ -34,11 +34,11 @@ public sealed class AgentDashboardService(AgentStateStore state, AgentStorage st
     };
     var identity = await state.GetOrCreateIdentityAsync(ct);
     return new(true, connected, status,
-        provisioning?.SiteName, branding.EventName, provisioning?.RoomName, provisioning?.Role ?? DeviceRole.None,
+        provisioning?.SiteName, provisioning?.EventName, provisioning?.RoomName, provisioning?.Role ?? DeviceRole.None,
         Project(current, assets), Project(next, assets), await state.GetLastSuccessfulSyncAsync(ct), branding, settings,
         Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0", Environment.OSVersion.VersionString,
         drive.AvailableFreeSpace, DirectorySize(storage.Cache), assets.Count(row => !row.Verified), DetectPowerPoint(),
-        phase, identity.AgentId, provisioning?.SiteId);
+        phase, identity.AgentId, provisioning?.SiteId, await state.GetPresentationLibraryErrorAsync(ct));
   }
 
   private static SessionView? Project(AgentSession? session, IReadOnlyList<AgentAsset> assets)

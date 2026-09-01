@@ -23,7 +23,8 @@ public sealed record ProvisioningState(
     Guid? RoomId,
     string? RoomName,
     DateTimeOffset ProvisionedAt,
-    string? SiteName = null);
+    string? SiteName = null,
+    string? EventName = null);
 
 public sealed record LocalAgentIdentity(
     Guid AgentId,
@@ -206,7 +207,8 @@ public sealed record AgentDashboard(
     bool PowerPointDetected,
     AgentConnectionPhase ConnectionPhase = AgentConnectionPhase.Starting,
     Guid? AgentId = null,
-    Guid? SiteId = null);
+    Guid? SiteId = null,
+    string? PresentationLibraryError = null);
 
 public sealed record ProvisioningRequest(
     Uri SiteAddress,

@@ -541,6 +541,12 @@ function RoomAgentAssignment({ device, events, rooms, onSaved }: {
     try { await siteApi.assignRoomAgent(device.device_id, eventId, roomId || null, role); onSaved(); }
     catch (caught) { setError(caught); } finally { setSaving(false); }
   };
+  const clear = async () => {
+    if (!window.confirm("Clear this Room Agent assignment? The endpoint remains enrolled.")) return;
+    setSaving(true); setError(undefined);
+    try { await siteApi.clearRoomAgentAssignment(device.device_id); onSaved(); }
+    catch (caught) { setError(caught); } finally { setSaving(false); }
+  };
   return <Panel title={device.name || device.machine_name || "New Room Agent"}
     description={`${(device.enrollment_state || "unknown").toUpperCase()} • ${device.machine_name || "Unknown machine"} • ${device.ip_address || "Address pending"} • Agent ${device.agent_version || "unknown"} • Last seen ${when(device.last_seen)}`}>
     <div className="inline-form">
@@ -554,6 +560,7 @@ function RoomAgentAssignment({ device, events, rooms, onSaved }: {
         <option value="room_agent">Room Agent</option><option value="upload_kiosk">Upload Kiosk</option><option value="room_agent_kiosk">Room Agent + Kiosk</option>
       </select></label>
       <button className="button button--primary" disabled={saving || !eventId || (role !== "upload_kiosk" && !roomId)} onClick={save}>{saving ? "Assigning…" : "Assign"}</button>
+      {device.enrollment_state === "assigned" ? <button className="button" disabled={saving} onClick={clear}>Clear assignment</button> : null}
     </div>{error != null ? <ErrorSurface error={error} /> : null}
   </Panel>;
 }

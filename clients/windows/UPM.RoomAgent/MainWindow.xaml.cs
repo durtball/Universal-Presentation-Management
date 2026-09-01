@@ -83,7 +83,7 @@ public sealed partial class MainWindow : Window
     StartWithWindows.IsOn = value.StartWithWindows;
     SyncSettingsStatus.Text = $"{state.SiteStatus}\nLast sync: {state.LastSiteSync:g}\nFailed transfers: {state.FailedTransfers}"; ProvisioningSummary.Text = $"Site: {state.SiteName ?? "Not provisioned"}\nEvent: {state.EventName ?? "—"}\nRoom: {state.RoomName ?? "—"}\nRole: {state.Role}";
     BrandingSummary.Text = $"Source: {state.Branding.Source}\nRevision: {state.Branding.Revision}\nLogo cached: {File.Exists(state.Branding.EventLogoPath)}\nBackground cached: {File.Exists(state.Branding.KioskBackgroundPath)}";
-    DiagnosticsText.Text = $"Agent {state.AgentVersion}\n{state.WindowsVersion}\nFree disk: {state.FreeDiskBytes / 1_073_741_824d:F1} GiB\nCache: {state.CacheBytes / 1_048_576d:F1} MiB\nPowerPoint: {(state.PowerPointDetected ? "Detected" : "Not detected")}\nFailed transfers: {state.FailedTransfers}";
+    DiagnosticsText.Text = $"Agent {state.AgentVersion}\n{state.WindowsVersion}\nFree disk: {state.FreeDiskBytes / 1_073_741_824d:F1} GiB\nCache: {state.CacheBytes / 1_048_576d:F1} MiB\nPowerPoint: {(state.PowerPointDetected ? "Detected" : "Not detected")}\nFailed transfers: {state.FailedTransfers}\nPresentation library: {state.PresentationLibraryError ?? "Ready"}";
   }
 
   private void ApplyBranding(BrandingState value)
