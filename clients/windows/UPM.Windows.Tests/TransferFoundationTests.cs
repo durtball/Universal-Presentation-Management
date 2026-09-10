@@ -89,4 +89,68 @@ public sealed class TransferFoundationTests
       root.Delete(true);
     }
   }
+
+  [Fact]
+  public async Task DurableByteReceiptIsNotReplayedAfterRestart()
+  {
+    var root = Directory.CreateTempSubdirectory();
+    try
+    {
+      var path = Path.Combine(root.FullName, "state.db");
+      var store = new LocalStateStore(path); await store.InitializeAsync();
+      var receiptId = Guid.NewGuid();
+      var item = new TransferItem(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "deck.pptx",
+          "deck.pptx", Path.Combine("room", "deck.pptx"), null, 3, DateTimeOffset.UtcNow, "receipt-key");
+      await store.EnqueueAsync(item);
+      await store.UpdateAsync(item.TransferId, TransferState.ReceivedBySite, 3, new string('a', 64),
+          receiptId: receiptId);
+
+      var reopened = new LocalStateStore(path); await reopened.InitializeAsync();
+      var pending = new List<TransferItem>();
+      await foreach (var row in reopened.LoadPendingAsync()) pending.Add(row);
+
+      Assert.Empty(pending);
+      var saved = Assert.Single(await reopened.ListTransfersAsync());
+      Assert.Equal(receiptId, saved.ReceiptId);
+      Assert.Equal(TransferState.ReceivedBySite, saved.State);
+    }
+    finally { root.Delete(true); }
+  }
+
+  [Fact]
+  public async Task FutureRetryIsDurablyScheduledRatherThanImmediatelyLoaded()
+  {
+    var root = Directory.CreateTempSubdirectory();
+    try
+    {
+      var store = new LocalStateStore(Path.Combine(root.FullName, "state.db")); await store.InitializeAsync();
+      var item = new TransferItem(Guid.NewGuid(), Guid.NewGuid(), null, "deck.pptx", "deck.pptx",
+          "deck.pptx", null, 3, DateTimeOffset.UtcNow, "due-key");
+      await store.EnqueueAsync(item);
+      await store.UpdateAsync(item.TransferId, TransferState.RetryWaiting, retry: 1,
+          retryAt: DateTimeOffset.UtcNow.AddMinutes(1), error: "temporary");
+      var pending = new List<TransferItem>();
+      await foreach (var row in store.LoadPendingAsync()) pending.Add(row);
+      Assert.Empty(pending);
+    }
+    finally { root.Delete(true); }
+  }
+
+  [Fact]
+  public async Task DispatcherClaimFindsWorkEnqueuedAfterAnEmptyPoll()
+  {
+    var root = Directory.CreateTempSubdirectory();
+    try
+    {
+      var store = new LocalStateStore(Path.Combine(root.FullName, "state.db")); await store.InitializeAsync();
+      Assert.Null(await store.ClaimDueAsync());
+      var item = new TransferItem(Guid.NewGuid(), Guid.NewGuid(), null, "deck.pptx", "deck.pptx",
+          "deck.pptx", null, 3, DateTimeOffset.UtcNow, "after-start-key");
+      await store.EnqueueAsync(item);
+      var claimed = await store.ClaimDueAsync();
+      Assert.Equal(item.TransferId, claimed!.TransferId);
+      Assert.Equal(TransferState.Hashing, claimed.State);
+    }
+    finally { root.Delete(true); }
+  }
 }

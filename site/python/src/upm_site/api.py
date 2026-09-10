@@ -490,6 +490,32 @@ def create_app(
             )
         return IngestionResponse(**response.model_dump(), duplicate_retry=result.duplicate_retry)
 
+    @app.get(
+        "/api/v1/media/ingestions/receipt",
+        response_model=IngestionStatusResponse,
+        tags=["media"],
+    )
+    def ingestion_receipt(
+        site_id: Annotated[UUID, Query()],
+        idempotency_key: Annotated[str, Query(min_length=1, max_length=255)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> IngestionStatusResponse:
+        media = session.scalar(
+            select(MediaObject).where(
+                MediaObject.site_id == site_id,
+                MediaObject.ingestion_idempotency_key == idempotency_key,
+            )
+        )
+        if media is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "ingestion receipt not found")
+        return IngestionStatusResponse(
+            media_object_id=media.media_object_id,
+            availability=media.availability,
+            failure_reason=media.failure_reason,
+            size_bytes=media.size_bytes,
+            content_hash=media.content_hash,
+        )
+
     @app.get("/api/v1/media/{media_object_id}", response_model=MediaResponse, tags=["media"])
     def get_media(
         media_object_id: UUID, session: Annotated[Session, Depends(get_session)]

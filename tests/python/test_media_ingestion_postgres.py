@@ -644,6 +644,19 @@ def test_site_api_upload_metadata_status_and_storage_health_without_central(
         assert payload["original_filename"] == "walk-in.pdf"
         assert payload["source_relative_path"] == "Event Slides/day1/walk-in.pdf"
 
+        receipt = client.get(
+            "/api/v1/media/ingestions/receipt",
+            params={"site_id": str(media_context["site_id"]), "idempotency_key": "api-upload"},
+        )
+        assert receipt.status_code == 200
+        assert receipt.json() == {
+            "media_object_id": payload["media_object_id"],
+            "availability": "available",
+            "failure_reason": None,
+            "size_bytes": 8,
+            "content_hash": hashlib.sha256(b"%PDF-1.7").hexdigest(),
+        }
+
         metadata = client.get(f"/api/v1/media/{payload['media_object_id']}")
         assert metadata.status_code == 200
         assert metadata.json()["content_hash"] == hashlib.sha256(b"%PDF-1.7").hexdigest()

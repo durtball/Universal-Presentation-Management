@@ -24,8 +24,9 @@ public sealed class VerifiedTransferEngine(AgentStorage storage)
         await source.CopyToAsync(output, ct);
       var info = new FileInfo(partial);
       if (info.Length != request.ExpectedSize) throw new InvalidDataException($"Expected {request.ExpectedSize} bytes but received {info.Length}.");
-      await using var verify = new FileStream(partial, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-      var actual = Convert.ToHexString(await SHA256.HashDataAsync(verify, ct)).ToLowerInvariant();
+      string actual;
+      await using (var verify = new FileStream(partial, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        actual = Convert.ToHexString(await SHA256.HashDataAsync(verify, ct)).ToLowerInvariant();
       if (!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(actual), Convert.FromHexString(request.ExpectedSha256)))
         throw new InvalidDataException("Downloaded presentation SHA-256 did not match Site metadata.");
       File.Move(partial, final, true);

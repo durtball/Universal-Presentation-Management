@@ -51,7 +51,10 @@ public sealed record TransferItem(
     string? Sha256 = null,
     int RetryCount = 0,
     DateTimeOffset? RetryAt = null,
-    string? Error = null);
+    string? Error = null,
+    Guid? ReceiptId = null);
+
+public sealed record ByteTransferReceipt(Guid ReceiptId, long Size, string Sha256);
 
 public static class TransferIdentity
 {

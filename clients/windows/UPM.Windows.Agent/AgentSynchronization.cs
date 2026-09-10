@@ -345,12 +345,25 @@ public sealed class AgentSyncWorker(
       foreach (var asset in manifest.Assets)
       {
         var path = WindowsPathPolicy.EnsureContained(staging, WindowsPathPolicy.UploadedFilename(asset.OriginalFilename));
-        await using var input = await site.DownloadAsync(address, asset.DownloadUri, credential, ct); await using var output = File.Create(path); await input.CopyToAsync(output, ct); await output.FlushAsync(ct);
-        await using var verify = File.OpenRead(path); var hash = Convert.ToHexString(await SHA256.HashDataAsync(verify, ct)).ToLowerInvariant();
+        await using (var input = await site.DownloadAsync(address, asset.DownloadUri, credential, ct))
+        await using (var output = File.Create(path))
+        { await input.CopyToAsync(output, ct); await output.FlushAsync(ct); }
+        string hash;
+        await using (var verify = File.OpenRead(path))
+          hash = Convert.ToHexString(await SHA256.HashDataAsync(verify, ct)).ToLowerInvariant();
         if (new FileInfo(path).Length != asset.Size || !hash.Equals(asset.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Branding asset verification failed.");
         paths[asset.Slot] = path;
       }
-      var active = Path.Combine(storage.Branding, manifest.Revision.ToString()); if (Directory.Exists(active)) Directory.Delete(active, true); Directory.Move(staging, active);
+      var active = Path.Combine(storage.Branding, manifest.Revision.ToString());
+      if (Directory.Exists(active))
+      {
+        var prior = active + ".prior";
+        if (Directory.Exists(prior)) Directory.Delete(prior, true);
+        Directory.Move(active, prior);
+        try { Directory.Move(staging, active); Directory.Delete(prior, true); }
+        catch { if (!Directory.Exists(active)) Directory.Move(prior, active); throw; }
+      }
+      else Directory.Move(staging, active);
       string? Slot(string name) => paths.TryGetValue(name, out var value) ? Path.Combine(active, Path.GetFileName(value)) : null;
       await state.SaveBrandingAsync(new(manifest.Revision, manifest.Source, manifest.EventName, Slot("event-logo"), Slot("client-logo"), Slot("kiosk-logo"), Slot("kiosk-background"), Slot("room-client-background"), manifest.AccentColor, manifest.PrimaryColor, manifest.WelcomeMessage, manifest.UploadInstructions, manifest.Footer, Slot("sponsor"), DateTimeOffset.UtcNow), ct);
     }
