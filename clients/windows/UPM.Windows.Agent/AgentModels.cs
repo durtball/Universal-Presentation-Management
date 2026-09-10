@@ -11,6 +11,7 @@ public enum DeviceRole
 public enum AssetKind { Presentation, RotatingSlide, Branding }
 public enum RotationScope { Day, Room, Session }
 public enum LocalChangeState { Pending, Uploading, Reconciled, Conflict, Failed }
+public enum AgentCommandState { Pending, Acknowledged, Running, Succeeded, Failed, OutcomeUncertain, Reported }
 
 public sealed record ProvisioningState(
     Guid AgentId,
@@ -122,6 +123,14 @@ public sealed record PendingLocalChange(
     LocalChangeState State,
     DateTimeOffset CreatedAt,
     string? Error = null);
+
+public sealed record AgentCommand(
+    Guid CommandId, Guid SiteId, Guid DeviceId, Guid? RoomId, string CommandType,
+    System.Text.Json.JsonElement Payload, string IdempotencyKey, AgentCommandState State,
+    int RetryCount = 0, DateTimeOffset? RetryAt = null, string? Error = null);
+
+public sealed record SiteCommand(Guid CommandId, Guid SiteId, Guid DeviceId, Guid? RoomId,
+    string CommandType, System.Text.Json.JsonElement Payload, string IdempotencyKey);
 
 public enum ReadinessState { Ready, Downloading, Waiting, Offline, Failed, NotAvailable }
 

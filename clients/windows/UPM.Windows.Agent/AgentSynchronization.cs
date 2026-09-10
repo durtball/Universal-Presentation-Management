@@ -105,6 +105,21 @@ public sealed class SiteAgentClient(HttpClient http)
     using var response = await http.SendAsync(request, ct); response.EnsureSuccessStatusCode();
   }
 
+  public async Task<IReadOnlyList<SiteCommand>> CommandsAsync(ProvisioningState p, string credential, CancellationToken ct)
+  {
+    using var request = Request(p.SiteAddress, "api/v1/agent/commands", credential);
+    using var response = await http.SendAsync(request, ct); response.EnsureSuccessStatusCode();
+    return await response.Content.ReadFromJsonAsync<IReadOnlyList<SiteCommand>>(SiteJson, ct) ?? [];
+  }
+
+  public async Task ReportCommandAsync(ProvisioningState p, string credential, AgentCommand command, string status, CancellationToken ct)
+  {
+    using var request = Request(p.SiteAddress, $"api/v1/agent/commands/{command.CommandId}/state", credential, HttpMethod.Post);
+    request.Content = JsonContent.Create(new { status, error_code = command.Error is null ? null : "agent_error", error_message = command.Error, detail = new { command.IdempotencyKey } }, options: SiteJson);
+    using var response = await http.SendAsync(request, ct);
+    if (response.StatusCode != System.Net.HttpStatusCode.Conflict) response.EnsureSuccessStatusCode();
+  }
+
   private static HttpRequestMessage Request(Uri site, string path, string credential, HttpMethod? method = null)
   { var result = new HttpRequestMessage(method ?? HttpMethod.Get, new Uri(site, path)); result.Headers.Authorization = new("Bearer", credential); return result; }
   private sealed class ResponseStream(Stream stream, HttpResponseMessage response) : Stream
@@ -119,9 +134,79 @@ public sealed class SiteAgentClient(HttpClient http)
   }
 }
 
+public sealed class AgentCommandWorker(
+    AgentStateStore state, IAgentCredentialStore credentials, SiteAgentClient site,
+    PresentationLauncher launcher, ILogger<AgentCommandWorker> logger) : BackgroundService
+{
+  protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+  {
+    while (!stoppingToken.IsCancellationRequested)
+    {
+      try { await RunOnceAsync(stoppingToken); }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      { logger.LogWarning(exception, "Agent command polling failed; durable command journal retained"); }
+      await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+    }
+  }
+
+  public async Task RunOnceAsync(CancellationToken ct)
+  {
+    var provisioning = await state.GetProvisioningAsync(ct); var credential = await credentials.ReadAsync(ct);
+    if (provisioning is null || string.IsNullOrEmpty(credential)) return;
+    foreach (var incoming in await site.CommandsAsync(provisioning, credential, ct))
+      await state.SaveCommandAsync(new(incoming.CommandId, incoming.SiteId, incoming.DeviceId,
+          incoming.RoomId, incoming.CommandType, incoming.Payload, incoming.IdempotencyKey,
+          AgentCommandState.Pending), ct);
+    foreach (var command in await state.ListRecoverableCommandsAsync(ct))
+    {
+      if (command.State is AgentCommandState.Succeeded or AgentCommandState.Failed)
+      {
+        await site.ReportCommandAsync(provisioning, credential, command,
+            command.State == AgentCommandState.Succeeded ? "succeeded" : "failed", ct);
+        await state.UpdateCommandAsync(command.CommandId, AgentCommandState.Reported, command.Error, ct);
+        continue;
+      }
+      try
+      {
+        ValidateAssignment(provisioning, command);
+        var version = command.Payload.GetProperty("presentation_version_id").GetGuid();
+        if (await state.GetVerifiedVersionAsync(version, ct) is null)
+          throw new InvalidOperationException("Requested immutable presentation version is not verified locally.");
+        await site.ReportCommandAsync(provisioning, credential, command, "acknowledged", ct);
+        // Persist the uncertain boundary before invoking an external interactive process. A crash
+        // after this point requires operator recovery and must never launch the deck a second time.
+        await state.UpdateCommandAsync(command.CommandId, AgentCommandState.OutcomeUncertain,
+            "Launch outcome requires operator confirmation after interruption.", ct);
+        await site.ReportCommandAsync(provisioning, credential, command, "running", ct);
+        await launcher.LaunchAsync(version, ct);
+        await state.UpdateCommandAsync(command.CommandId, AgentCommandState.Succeeded, ct: ct);
+        await site.ReportCommandAsync(provisioning, credential, command with { State = AgentCommandState.Succeeded }, "succeeded", ct);
+        await state.UpdateCommandAsync(command.CommandId, AgentCommandState.Reported, ct: ct);
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        await state.UpdateCommandAsync(command.CommandId, AgentCommandState.Failed, exception.Message, ct);
+      }
+    }
+  }
+
+  private static void ValidateAssignment(ProvisioningState p, AgentCommand command)
+  {
+    if (command.SiteId != p.SiteId || command.DeviceId != p.DeviceId ||
+        command.RoomId.HasValue && command.RoomId != p.RoomId)
+      throw new InvalidOperationException("Command does not match the Agent's authoritative Site/device/room assignment.");
+    if (command.Payload.TryGetProperty("event_id", out var eventValue) && eventValue.GetGuid() != p.EventId)
+      throw new InvalidOperationException("Command Event does not match the Agent assignment.");
+    if (command.Payload.TryGetProperty("room_id", out var roomValue) && roomValue.GetGuid() != p.RoomId)
+      throw new InvalidOperationException("Command room does not match the Agent assignment.");
+    if (command.CommandType is not ("open" or "open_review" or "push_and_open"))
+      throw new InvalidOperationException($"Unsupported interactive command type: {command.CommandType}");
+  }
+}
+
 public sealed class AgentSyncWorker(
     AgentStateStore state, IAgentCredentialStore credentials, SiteAgentClient site,
-    AgentStorage storage, AgentDashboardService dashboards, AgentSyncSignal signal,
+    AgentStorage storage, AgentSyncSignal signal,
     SiteDiscoveryService discovery,
     ILogger<AgentSyncWorker> logger) : BackgroundService
 {
@@ -204,14 +289,6 @@ public sealed class AgentSyncWorker(
     };
     await state.SaveProvisioningAsync(p, ct);
     await ApplyAsync(envelope, credential, p.SiteAddress, ct);
-    try
-    {
-      await site.HeartbeatAsync(p, credential, await dashboards.GetAsync(ct: ct), ct);
-    }
-    catch (Exception exception) when (exception is not OperationCanceledException)
-    {
-      logger.LogWarning(exception, "Agent heartbeat failed after a successful Site synchronization");
-    }
     await state.SetConnectionPhaseAsync(envelope.Assigned
         ? AgentConnectionPhase.Connected : AgentConnectionPhase.WaitingForAssignment, ct);
   }
@@ -222,7 +299,7 @@ public sealed class AgentSyncWorker(
     var incomingIds = envelope.Sessions.Select(row => row.SessionId).ToHashSet();
     if (envelope.Revisions.Schedule > (await state.GetRevisionsAsync(ct)).Schedule)
       foreach (var removed in priorSessions.Where(row => !row.Cancelled && !incomingIds.Contains(row.SessionId)))
-        await state.UpsertSessionAsync(removed with { Cancelled = true, Revision = removed.Revision + 1 }, ct);
+        await state.UpsertSessionAsync(removed with { Cancelled = true }, ct);
     foreach (var session in envelope.Sessions) await state.UpsertSessionAsync(session, ct);
     var sessions = await state.ListSessionsAsync(ct);
     var settings = envelope.Settings ?? await state.GetSettingsAsync(ct) ?? AgentSettings.Default(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "UPM Presentations"));
@@ -368,5 +445,27 @@ public sealed class AgentSyncWorker(
       await state.SaveBrandingAsync(new(manifest.Revision, manifest.Source, manifest.EventName, Slot("event-logo"), Slot("client-logo"), Slot("kiosk-logo"), Slot("kiosk-background"), Slot("room-client-background"), manifest.AccentColor, manifest.PrimaryColor, manifest.WelcomeMessage, manifest.UploadInstructions, manifest.Footer, Slot("sponsor"), DateTimeOffset.UtcNow), ct);
     }
     catch { if (Directory.Exists(staging)) Directory.Delete(staging, true); throw; }
+  }
+}
+
+public sealed class AgentHeartbeatWorker(
+    AgentStateStore state, IAgentCredentialStore credentials, SiteAgentClient site,
+    AgentDashboardService dashboards, ILogger<AgentHeartbeatWorker> logger) : BackgroundService
+{
+  protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+  {
+    while (!stoppingToken.IsCancellationRequested)
+    {
+      try
+      {
+        var provisioning = await state.GetProvisioningAsync(stoppingToken);
+        var credential = await credentials.ReadAsync(stoppingToken);
+        if (provisioning is not null && !string.IsNullOrEmpty(credential))
+          await site.HeartbeatAsync(provisioning, credential, await dashboards.GetAsync(ct: stoppingToken), stoppingToken);
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      { logger.LogWarning(exception, "Independent Agent heartbeat failed; synchronization and cached operation continue"); }
+      await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+    }
   }
 }

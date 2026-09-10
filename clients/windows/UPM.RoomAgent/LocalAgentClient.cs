@@ -8,6 +8,7 @@ public sealed class LocalAgentClient
   private readonly HttpClient http = new() { BaseAddress = new Uri("http://127.0.0.1:43821"), Timeout = TimeSpan.FromSeconds(10) };
   public Task<AgentDashboard?> DashboardAsync(CancellationToken ct = default) => http.GetFromJsonAsync<AgentDashboard>("api/v1/dashboard", ct);
   public Task<IReadOnlyList<AgentSession>?> SessionsAsync(CancellationToken ct = default) => http.GetFromJsonAsync<IReadOnlyList<AgentSession>>("api/v1/sessions", ct);
+  public Task<IReadOnlyList<AgentAsset>?> PresentationsAsync(Guid sessionId, CancellationToken ct = default) => http.GetFromJsonAsync<IReadOnlyList<AgentAsset>>($"api/v1/sessions/{sessionId}/presentations", ct);
   public async Task SyncAsync(CancellationToken ct = default) { using var response = await http.PostAsync("api/v1/sync", null, ct); response.EnsureSuccessStatusCode(); }
   public async Task ResetDiscoveryAsync(CancellationToken ct = default) { using var response = await http.PostAsync("api/v1/discovery/reset", null, ct); response.EnsureSuccessStatusCode(); }
   public async Task LaunchAsync(Guid version, CancellationToken ct = default) { using var response = await http.PostAsync($"api/v1/presentations/{version}/launch", null, ct); response.EnsureSuccessStatusCode(); }

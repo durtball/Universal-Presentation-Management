@@ -6,7 +6,7 @@ namespace UPM.Windows.Agent;
 
 public sealed class AgentStateStore(string databasePath)
 {
-  public const int SchemaVersion = 2;
+  public const int SchemaVersion = 3;
   private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
   private string ConnectionString => new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
 
@@ -39,7 +39,13 @@ public sealed class AgentStateStore(string databasePath)
       CREATE TABLE IF NOT EXISTS library_paths(
         asset_id TEXT NOT NULL, session_id TEXT NOT NULL, visible_path TEXT NOT NULL,
         PRIMARY KEY(asset_id, session_id));
-      UPDATE schema_info SET version=2 WHERE version<2;
+      CREATE TABLE IF NOT EXISTS command_journal(
+        command_id TEXT PRIMARY KEY, site_id TEXT NOT NULL, device_id TEXT NOT NULL, room_id TEXT,
+        command_type TEXT NOT NULL, payload TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+        state INTEGER NOT NULL, retry_count INTEGER NOT NULL, retry_at TEXT, error TEXT);
+      DROP INDEX IF EXISTS uq_agent_asset_version;
+      CREATE INDEX IF NOT EXISTS ix_agent_asset_version ON assets(version_id, kind);
+      UPDATE schema_info SET version=3 WHERE version<3;
       """;
     await command.ExecuteNonQueryAsync(cancellationToken);
   }
@@ -169,12 +175,46 @@ public sealed class AgentStateStore(string databasePath)
     for (var i = 0; i < names.Length; i++) Add(command, names[i], values[i]); await command.ExecuteNonQueryAsync(ct);
   }
 
+  public async Task SaveCommandAsync(AgentCommand value, CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = """
+      INSERT INTO command_journal VALUES($id,$site,$device,$room,$type,$payload,$key,$state,$retry,$due,$error)
+      ON CONFLICT(command_id) DO UPDATE SET payload=excluded.payload
+      """;
+    object?[] values = [value.CommandId, value.SiteId, value.DeviceId, value.RoomId, value.CommandType,
+      value.Payload.GetRawText(), value.IdempotencyKey, (int)value.State, value.RetryCount,
+      value.RetryAt is null ? null : Format(value.RetryAt.Value), value.Error];
+    string[] names = ["$id", "$site", "$device", "$room", "$type", "$payload", "$key", "$state", "$retry", "$due", "$error"];
+    for (var i = 0; i < names.Length; i++) Add(command, names[i], values[i]);
+    await command.ExecuteNonQueryAsync(ct);
+  }
+
+  public async Task<IReadOnlyList<AgentCommand>> ListRecoverableCommandsAsync(CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "SELECT * FROM command_journal WHERE state NOT IN ($reported,$uncertain) AND (retry_at IS NULL OR retry_at<=$now) ORDER BY rowid";
+    Add(command, "$reported", (int)AgentCommandState.Reported);
+    Add(command, "$uncertain", (int)AgentCommandState.OutcomeUncertain); Add(command, "$now", Format(DateTimeOffset.UtcNow));
+    await using var reader = await command.ExecuteReaderAsync(ct); var result = new List<AgentCommand>();
+    while (await reader.ReadAsync(ct)) result.Add(ReadCommand(reader)); return result;
+  }
+
+  public async Task UpdateCommandAsync(Guid id, AgentCommandState state, string? error = null, CancellationToken ct = default)
+  {
+    await using var db = await OpenAsync(ct); await using var command = db.CreateCommand();
+    command.CommandText = "UPDATE command_journal SET state=$state,error=$error WHERE command_id=$id";
+    Add(command, "$state", (int)state); Add(command, "$error", error); Add(command, "$id", id);
+    await command.ExecuteNonQueryAsync(ct);
+  }
+
   public async Task<int> GetSchemaVersionAsync(CancellationToken ct = default)
   { await using var db = await OpenAsync(ct); await using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT version FROM schema_info"; return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture); }
   private async Task SetAsync<T>(string key, T value, CancellationToken ct) { await using var db = await OpenAsync(ct); await using var cmd = db.CreateCommand(); cmd.CommandText = "INSERT INTO singleton_state VALUES($key,$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value"; Add(cmd, "$key", key); Add(cmd, "$value", JsonSerializer.Serialize(value, JsonOptions)); await cmd.ExecuteNonQueryAsync(ct); }
   private async Task<T?> GetAsync<T>(string key, CancellationToken ct) { await using var db = await OpenAsync(ct); await using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT value FROM singleton_state WHERE key=$key"; Add(cmd, "$key", key); var value = (string?)await cmd.ExecuteScalarAsync(ct); return value is null ? default : JsonSerializer.Deserialize<T>(value, JsonOptions); }
   private async Task<SqliteConnection> OpenAsync(CancellationToken ct) { var db = new SqliteConnection(ConnectionString); await db.OpenAsync(ct); return db; }
   private static AgentAsset ReadAsset(SqliteDataReader r) => new(Guid.Parse(r.GetString(0)), (AssetKind)r.GetInt32(1), Guid.Parse(r.GetString(2)), GuidOrNull(r, 3), GuidOrNull(r, 4), GuidOrNull(r, 5), r.IsDBNull(6) ? null : DateOnly.Parse(r.GetString(6), CultureInfo.InvariantCulture), (RotationScope?)IntOrNull(r, 7), r.GetString(8), r.GetString(9), r.GetString(10), r.GetInt64(11), r.GetString(12), r.GetInt32(13) != 0, r.GetInt32(14) != 0, Parse(r.GetString(15)));
+  private static AgentCommand ReadCommand(SqliteDataReader r) => new(Guid.Parse(r.GetString(0)), Guid.Parse(r.GetString(1)), Guid.Parse(r.GetString(2)), GuidOrNull(r, 3), r.GetString(4), JsonDocument.Parse(r.GetString(5)).RootElement.Clone(), r.GetString(6), (AgentCommandState)r.GetInt32(7), r.GetInt32(8), r.IsDBNull(9) ? null : Parse(r.GetString(9)), StringOrNull(r, 10));
   private static Guid? GuidOrNull(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : Guid.Parse(r.GetString(i));
   private static int? IntOrNull(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetInt32(i);
   private static string? StringOrNull(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetString(i);

@@ -96,7 +96,15 @@ public sealed partial class MainWindow : Window
   private void NavigationChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
   { var tag = (args.SelectedItem as NavigationViewItem)?.Tag?.ToString(); RoomView.Visibility = tag == "room" ? Visibility.Visible : Visibility.Collapsed; SettingsView.Visibility = tag == "settings" ? Visibility.Visible : Visibility.Collapsed; KioskView.Visibility = tag == "kiosk" ? Visibility.Visible : Visibility.Collapsed; }
   private async void SyncClick(object sender, RoutedEventArgs e) { await RunAsync(async () => { await agent.SyncAsync(); await RefreshAsync(); }, "Synchronization requested."); }
-  private async void OpenPresentationClick(object sender, RoutedEventArgs e) { var version = dashboard?.CurrentSession?.Presentation?.VersionId; if (version is null) { await Message("Presentation not ready", "A verified local presentation is not available."); return; } await RunAsync(() => agent.LaunchAsync(version.Value), "Presentation opened."); }
+  private async void OpenPresentationClick(object sender, RoutedEventArgs e)
+  {
+    var sessionId = selectedSession >= 0 && selectedSession < sessions.Count
+        ? sessions[selectedSession].SessionId : dashboard?.CurrentSession?.SessionId;
+    var presentations = sessionId.HasValue ? await agent.PresentationsAsync(sessionId.Value) : null;
+    var version = presentations?.FirstOrDefault()?.VersionId;
+    if (version is null) { await Message("Presentation not ready", "A verified local presentation is not available for the selected session."); return; }
+    await RunAsync(() => agent.LaunchAsync(version.Value), "Presentation opened.");
+  }
   private async void IntakeClick(object sender, RoutedEventArgs e) => await IntakeAsync(false);
   private async void KioskIntakeClick(object sender, RoutedEventArgs e) => await IntakeAsync(true);
   private async Task IntakeAsync(bool kiosk)

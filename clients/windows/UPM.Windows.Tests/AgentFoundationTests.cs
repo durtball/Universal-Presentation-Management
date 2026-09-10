@@ -133,7 +133,7 @@ public sealed class AgentFoundationTests
     await store.SetLibraryPathAsync(asset, session, old);
     var reopened = new AgentStateStore(Path.Combine(root.Path, "agent.db")); await reopened.InitializeAsync();
     Assert.Equal(old, await reopened.GetLibraryPathAsync(asset, session));
-    Assert.Equal(2, await reopened.GetSchemaVersionAsync());
+    Assert.Equal(AgentStateStore.SchemaVersion, await reopened.GetSchemaVersionAsync());
   }
 
   [Fact]
@@ -151,6 +151,31 @@ public sealed class AgentFoundationTests
     Assert.Equal("Presenter FINAL.pptx", Path.GetFileName(newPath));
     Assert.Contains("Bellini", newPath, StringComparison.Ordinal);
     Assert.Contains("10-45 AM - Updated Session - 3489435", newPath, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task SharedVersionCanRetainMultipleAssignmentPlacements()
+  {
+    using var root = Temp(); var store = new AgentStateStore(Path.Combine(root.Path, "agent.db")); await store.InitializeAsync();
+    var version = Guid.NewGuid(); var file = Path.Combine(root.Path, "deck.pptx"); await File.WriteAllTextAsync(file, "deck");
+    var first = Asset(Guid.NewGuid(), file, "deck.pptx", new DateOnly(2026, 8, 31), RotationScope.Room) with { VersionId = version, RoomId = Guid.NewGuid() };
+    var second = first with { AssetId = Guid.NewGuid(), RoomId = Guid.NewGuid() };
+    await store.UpsertAssetAsync(first); await store.UpsertAssetAsync(second);
+    Assert.Equal(2, (await store.ListAssetsAsync()).Count(asset => asset.VersionId == version));
+  }
+
+  [Fact]
+  public async Task CommandJournalDeduplicatesAndPreservesUncertainLaunchAcrossRestart()
+  {
+    using var root = Temp(); var path = Path.Combine(root.Path, "agent.db");
+    var store = new AgentStateStore(path); await store.InitializeAsync();
+    using var payload = System.Text.Json.JsonDocument.Parse($$"""{"presentation_version_id":"{{Guid.NewGuid()}}"}""");
+    var command = new AgentCommand(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), null, "open",
+        payload.RootElement.Clone(), "stable-command", AgentCommandState.Pending);
+    await store.SaveCommandAsync(command); await store.SaveCommandAsync(command);
+    await store.UpdateCommandAsync(command.CommandId, AgentCommandState.OutcomeUncertain, "operator recovery required");
+    var reopened = new AgentStateStore(path); await reopened.InitializeAsync();
+    Assert.Empty(await reopened.ListRecoverableCommandsAsync());
   }
 
   private static AgentSession Session(string? identifier = "3489435") => new(Guid.NewGuid(), identifier, "Agentic Model Risk Management", "Presenter", Guid.NewGuid(), "Venetian G", new DateTimeOffset(2026, 8, 31, 10, 15, 0, TimeSpan.Zero), new DateTimeOffset(2026, 8, 31, 11, 0, 0, TimeSpan.Zero), false, 1);

@@ -1077,6 +1077,10 @@ def register_agent_control_routes(
         c = s.get(DeviceCommand, command_id)
         if not c or c.device_id != d.device_id:
             raise HTTPException(404, "command not found")
+        # Agent result delivery is at-least-once. A dropped response must be safely
+        # retried without manufacturing a second command attempt or audit record.
+        if c.status == p.status and c.status in {"acknowledged", "running", "succeeded", "failed"}:
+            return view(c)
         allowed = {
             "delivered": {"acknowledged", "running", "succeeded", "failed"},
             "acknowledged": {"running", "succeeded", "failed"},
@@ -1312,6 +1316,16 @@ def register_agent_control_routes(
         media = s.get(MediaObject, p.media_object_id)
         if not r or r.device_id != d.device_id:
             raise HTTPException(404, "review not found")
+        if p.force_new_revision:
+            raise HTTPException(403, "force promotion requires an authenticated operator action")
+        if r.saveback_version_id is not None:
+            completed = s.get(PresentationVersion, r.saveback_version_id)
+            return {
+                "review_session_id": r.review_session_id,
+                "state": r.state,
+                "presentation_version_id": r.saveback_version_id,
+                "version_number": completed.version_number if completed else None,
+            }
         if (
             not media
             or media.site_id != r.site_id
