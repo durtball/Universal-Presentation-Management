@@ -60,7 +60,9 @@ public sealed partial class MainWindow : Window
     EventRoomText.Text = $"{state.EventName ?? "No event"}  •  {state.RoomName ?? "No room assignment"}  •  {state.Role}";
     LastSyncText.Text = state.LastSiteSync is null ? "No successful Site sync" : $"Last Site sync {state.LastSiteSync:g}";
     OpenKioskButton.Visibility = state.Role.HasFlag(DeviceRole.UploadKiosk) || state.Settings.KioskEnabled ? Visibility.Visible : Visibility.Collapsed;
-    ApplySettings(state); ApplyBranding(state.Branding);
+    // Periodic telemetry refresh must not overwrite controls while an operator edits settings.
+    if (SettingsView.Visibility != Visibility.Visible) ApplySettings(state);
+    ApplyBranding(state.Branding);
   }
 
   private static SessionView Project(AgentSession value, AgentDashboard state) => new(value.SessionId, value.SessionIdentifier, value.Title, value.Presenter, value.StartsAt, value.EndsAt,

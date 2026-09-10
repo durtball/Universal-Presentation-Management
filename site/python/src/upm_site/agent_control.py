@@ -63,6 +63,17 @@ def discovery_signature(secret: str, site_id: UUID, endpoint: str, issued_at: in
     return hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
 
 
+def existing_enrollment_proven(device, authorization: str | None) -> bool:
+    proof = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    return bool(
+        device.agent_token_hash
+        and proof
+        and secrets.compare_digest(
+            device.agent_token_hash, hashlib.sha256(proof.encode()).hexdigest()
+        )
+    )
+
+
 class CommandCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     device_id: UUID
@@ -269,7 +280,12 @@ def register_agent_control_routes(
         return {"site_id": local.site_id, "site_name": local.display_name}
 
     @app.post("/api/v1/agent/enroll", tags=["agent"])
-    def automatic_enrollment(payload: AutomaticAgentEnrollment, request: Request, s: Write):
+    def automatic_enrollment(
+        payload: AutomaticAgentEnrollment,
+        request: Request,
+        s: Write,
+        authorization: Annotated[str | None, Header()] = None,
+    ):
         configured = discovery_settings()
         local = identity(s)
         now = int(utc_now().timestamp())
@@ -285,6 +301,11 @@ def register_agent_control_routes(
         if not secrets.compare_digest(expected, payload.discovery_signature):
             raise HTTPException(401, "invalid discovery ticket")
         device = s.scalar(select(Device).where(Device.agent_identity == payload.agent_id))
+        if device is not None:
+            if device.revoked_at is not None:
+                raise HTTPException(403, "revoked Agent requires operator-approved recovery")
+            if not existing_enrollment_proven(device, authorization):
+                raise HTTPException(401, "existing Agent credential proof required")
         if device is None:
             exact = s.scalars(
                 select(Device).where(
@@ -304,7 +325,6 @@ def register_agent_control_routes(
         device.agent_identity = payload.agent_id
         device.machine_name = payload.machine_name
         device.enrolled_at = device.enrolled_at or utc_now()
-        device.revoked_at = None
         token = secrets.token_urlsafe(48)
         device.agent_token_hash = hashlib.sha256(token.encode()).hexdigest()
         assignment = s.scalar(
@@ -568,6 +588,7 @@ def register_agent_control_routes(
             "sessions": session_views,
             "assets": assets,
             "branding": {
+                "event_id": event.event_id,
                 "revision": branding.revision if branding else 0,
                 "source": "Site Local Override"
                 if branding and branding.local_override

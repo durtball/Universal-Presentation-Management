@@ -10,6 +10,7 @@ namespace UPM.RoomAgent.Service;
 
 public static class RoomAgentHost
 {
+  public static string LoopbackToken { get; } = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
   public static async Task<WebApplication> StartAsync(CancellationToken cancellationToken = default)
   {
     var builder = WebApplication.CreateBuilder();
@@ -64,6 +65,14 @@ public static class RoomAgentHost
       if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None))
       {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+      }
+      if (context.Request.Method != HttpMethods.Get &&
+          !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+              System.Text.Encoding.UTF8.GetBytes(context.Request.Headers["X-UPM-Loopback-Token"].ToString()),
+              System.Text.Encoding.UTF8.GetBytes(LoopbackToken)))
+      {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
       }
       await next();

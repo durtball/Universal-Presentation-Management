@@ -168,7 +168,8 @@ public sealed record BrandingState(
     string? UploadInstructions,
     string? Footer,
     string? SponsorPath,
-    DateTimeOffset? UpdatedAt);
+    DateTimeOffset? UpdatedAt,
+    Guid? EventId = null);
 
 public sealed record AgentSettings(
     bool PresentationLibraryEnabled,
@@ -266,4 +267,5 @@ public sealed record BrandingManifest(
     string? WelcomeMessage,
     string? UploadInstructions,
     string? Footer,
-    IReadOnlyList<BrandingAssetDescriptor> Assets);
+    IReadOnlyList<BrandingAssetDescriptor> Assets,
+    Guid? EventId = null);

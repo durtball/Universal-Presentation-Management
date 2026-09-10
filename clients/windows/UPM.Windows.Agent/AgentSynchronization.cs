@@ -39,6 +39,7 @@ public sealed class SiteAgentClient(HttpClient http)
   public async Task<AutomaticEnrollmentResponse> EnrollAsync(
       DiscoveredSite discovered,
       LocalAgentIdentity identity,
+      string? existingCredential,
       CancellationToken ct)
   {
     using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(discovered.Endpoint, "api/v1/agent/enroll"));
@@ -50,6 +51,8 @@ public sealed class SiteAgentClient(HttpClient http)
         ["room_agent", "upload_kiosk", "room_agent_kiosk"],
         discovered.IssuedAt, discovered.Nonce, discovered.Signature, discovered.Endpoint),
         options: SiteJson);
+    if (!string.IsNullOrEmpty(existingCredential))
+      request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", existingCredential);
     using var response = await http.SendAsync(request, ct);
     response.EnsureSuccessStatusCode();
     return await response.Content.ReadFromJsonAsync<AutomaticEnrollmentResponse>(SiteJson, ct)
@@ -253,7 +256,7 @@ public sealed class AgentSyncWorker(
       return;
     }
     await state.SetConnectionPhaseAsync(AgentConnectionPhase.Registering, ct);
-    var enrolled = await site.EnrollAsync(found, identity, ct);
+    var enrolled = await site.EnrollAsync(found, identity, await credentials.ReadAsync(ct), ct);
     await credentials.SaveAsync(enrolled.AgentCredential, ct);
     await state.SaveProvisioningAsync(new(identity.AgentId, enrolled.DeviceId, identity.MachineName,
         enrolled.SiteId, found.Endpoint, enrolled.EventId, enrolled.Role, enrolled.RoomId,
@@ -400,7 +403,7 @@ public sealed class AgentSyncWorker(
   private async Task ApplyBrandingAsync(BrandingManifest manifest, Uri address, string credential, CancellationToken ct)
   {
     var current = await state.GetBrandingAsync(ct);
-    if (current?.Revision == manifest.Revision)
+    if (current?.Revision == manifest.Revision && current.EventId == manifest.EventId)
     {
       var refreshed = current with
       {
@@ -442,7 +445,7 @@ public sealed class AgentSyncWorker(
       }
       else Directory.Move(staging, active);
       string? Slot(string name) => paths.TryGetValue(name, out var value) ? Path.Combine(active, Path.GetFileName(value)) : null;
-      await state.SaveBrandingAsync(new(manifest.Revision, manifest.Source, manifest.EventName, Slot("event-logo"), Slot("client-logo"), Slot("kiosk-logo"), Slot("kiosk-background"), Slot("room-client-background"), manifest.AccentColor, manifest.PrimaryColor, manifest.WelcomeMessage, manifest.UploadInstructions, manifest.Footer, Slot("sponsor"), DateTimeOffset.UtcNow), ct);
+      await state.SaveBrandingAsync(new(manifest.Revision, manifest.Source, manifest.EventName, Slot("event-logo"), Slot("client-logo"), Slot("kiosk-logo"), Slot("kiosk-background"), Slot("room-client-background"), manifest.AccentColor, manifest.PrimaryColor, manifest.WelcomeMessage, manifest.UploadInstructions, manifest.Footer, Slot("sponsor"), DateTimeOffset.UtcNow, manifest.EventId), ct);
     }
     catch { if (Directory.Exists(staging)) Directory.Delete(staging, true); throw; }
   }
