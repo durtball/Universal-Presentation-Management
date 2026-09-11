@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .db import factory
-from .models import Display, PlaybackState, Projection, Publication, Source
+from .models import Display, Layout, PlaybackState, Projection, Publication, Source
 from .scheduler import room_door
 
 
@@ -27,6 +27,13 @@ class Heartbeat(BaseModel):
     media_ready: bool
     current_item: str | None = None
     error: str | None = None
+
+
+class LayoutWrite(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    template: str = Field(pattern=r"^(room_door|playlist)$")
+    aspect_ratio: str = Field(pattern=r"^(9:16|16:9|21:9|1:1)$")
+    configuration: dict = Field(default_factory=dict)
 
 
 def create_app():
@@ -92,6 +99,57 @@ def create_app():
         s.add(row)
         s.flush()
         return {"display_id": row.display_id, "player_credential": token}
+
+    @app.get("/api/v1/layouts")
+    def layouts(
+        s: Annotated[Session, Depends(read)],
+        x_upm_operator_password: Annotated[str | None, Header()] = None,
+    ):
+        operator(x_upm_operator_password)
+        return list(s.scalars(select(Layout).order_by(Layout.name)))
+
+    @app.post("/api/v1/layouts", status_code=201)
+    def create_layout(
+        body: LayoutWrite,
+        s: Annotated[Session, Depends(write)],
+        x_upm_operator_password: Annotated[str | None, Header()] = None,
+    ):
+        operator(x_upm_operator_password)
+        row = Layout(**body.model_dump())
+        s.add(row)
+        s.flush()
+        return row
+
+    @app.put("/api/v1/layouts/{layout_id}")
+    def save_layout(
+        layout_id: UUID,
+        body: LayoutWrite,
+        s: Annotated[Session, Depends(write)],
+        x_upm_operator_password: Annotated[str | None, Header()] = None,
+    ):
+        operator(x_upm_operator_password)
+        row = s.get(Layout, layout_id)
+        if row is None:
+            raise HTTPException(404, "layout not found")
+        for name, value in body.model_dump().items():
+            setattr(row, name, value)
+        return row
+
+    @app.post("/api/v1/layouts/{layout_id}/publish")
+    def publish_layout(
+        layout_id: UUID,
+        s: Annotated[Session, Depends(write)],
+        x_upm_operator_password: Annotated[str | None, Header()] = None,
+    ):
+        operator(x_upm_operator_password)
+        row = s.get(Layout, layout_id)
+        if row is None:
+            raise HTTPException(404, "layout not found")
+        row.configuration = {
+            **row.configuration,
+            "publication": {"state": "published", "published_at": datetime.now(UTC).isoformat()},
+        }
+        return row
 
     @app.get("/api/v1/player/manifest")
     def manifest(

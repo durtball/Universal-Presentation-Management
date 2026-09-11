@@ -57,3 +57,22 @@ def test_player_bundles_persistent_offline_shell():
     assert "serviceWorker.register" in player
     assert "OFFLINE · CACHED SCHEDULE" in player
     assert "cache.addAll" in worker
+
+
+def test_layout_editor_matches_required_designer_surfaces():
+    from pathlib import Path
+
+    editor = Path("signage/web/index.html").read_text()
+    for label in (
+        "Create Layout",
+        "Add Element",
+        "Current Session Block",
+        "Canvas Size",
+        "Template Breakpoints",
+        "Save Draft",
+        "Publish Layout",
+        "Position & Size",
+        "Typography",
+    ):
+        assert label in editor
+    assert "/api/v1/layouts" in editor
