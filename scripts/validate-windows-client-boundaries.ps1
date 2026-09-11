@@ -84,3 +84,24 @@ if ($dashboardXaml -match 'SizeChanged="PageSizeChanged"' -and $dashboardCode -n
     throw "DashboardPage has a dangling SizeChanged handler."
 }
 Write-Host "Validated WinUI resources, theme, icons, and event handlers."
+
+$signageProjectPath = Join-Path $PSScriptRoot "../clients/windows/UPM.Signage/UPM.Signage.csproj"
+if (-not (Test-Path $signageProjectPath)) { throw "Missing native UPM Signage project: $signageProjectPath" }
+[xml]$signageProject = Get-Content $signageProjectPath
+if ($signageProject.Project.PropertyGroup.OutputType -notcontains "WinExe" -or
+    $signageProject.Project.PropertyGroup.AssemblyName -notcontains "UPM.Signage") {
+    throw "UPM Signage must build as the independent UPM.Signage.exe WinExe."
+}
+$signageReferences = @($signageProject.Project.ItemGroup.ProjectReference.Include)
+if ($signageReferences | Where-Object { $_ -match "RoomAgent|SiteManager" }) {
+    throw "UPM Signage must not depend on Room Agent or Site Manager."
+}
+$signageSource = Get-ChildItem (Split-Path $signageProjectPath) -File | Get-Content -Raw
+foreach ($forbidden in @("localStorage.operatorPassword", "?token=")) {
+    if ($signageSource -match [regex]::Escape($forbidden)) { throw "Native Signage violates credential boundary: $forbidden" }
+}
+$playerSource = Get-Content (Join-Path $PSScriptRoot "../signage/player/index.html") -Raw
+if ($playerSource -match "URLSearchParams\(location.search\).*token|localStorage\.token") {
+    throw "The Signage player must not receive or persist credentials through its URL/browser storage."
+}
+Write-Host "Validated independent native Signage executable and credential boundaries."

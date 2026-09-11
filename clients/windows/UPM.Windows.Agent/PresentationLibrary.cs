@@ -35,12 +35,15 @@ public sealed class PresentationLibrary
 
   public string SessionPath(AgentSession session)
   {
-    var day = DayPath(DateOnly.FromDateTime(session.StartsAt.LocalDateTime));
+    // StartsAt already carries the event-local wall-clock offset. LocalDateTime would
+    // reinterpret it in the Windows account timezone and produce different folders.
+    var eventLocalTime = session.StartsAt.DateTime;
+    var day = DayPath(DateOnly.FromDateTime(eventLocalTime));
     var room = WindowsPathPolicy.SanitizeSegment(session.RoomName);
     var title = WindowsPathPolicy.SanitizeSegment(session.Title, maxLength: 80);
     var identifier = string.IsNullOrWhiteSpace(session.SessionIdentifier)
         ? string.Empty : $" - {WindowsPathPolicy.SanitizeSegment(session.SessionIdentifier, maxLength: 40)}";
-    var folder = $"{session.StartsAt.LocalDateTime:hh-mm tt} - {title}{identifier}";
+    var folder = $"{eventLocalTime:hh-mm tt} - {title}{identifier}";
     if (session.Cancelled) folder = Path.Combine("_Cancelled", folder);
     return WindowsPathPolicy.EnsureContained(day, room, folder);
   }

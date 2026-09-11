@@ -42,6 +42,14 @@ public sealed class AgentFoundationTests
   }
 
   [Fact]
+  public void LibraryFolderUsesEventWallClockRatherThanWindowsAccountTimezone()
+  {
+    using var root = Temp(); var library = new PresentationLibrary(root.Path);
+    var session = Session() with { StartsAt = new DateTimeOffset(2026, 9, 1, 9, 30, 0, TimeSpan.FromHours(10)) };
+    Assert.EndsWith(Path.Combine("2026-09-01 - Tuesday", "Venetian G", "09-30 AM - Agentic Model Risk Management - 3489435"), library.SessionPath(session));
+  }
+
+  [Fact]
   public void EnabledLibraryCreatesMissingDefaultOrCustomRootImmediately()
   {
     using var root = Temp();

@@ -57,6 +57,9 @@ def test_player_bundles_persistent_offline_shell():
     assert "serviceWorker.register" in player
     assert "OFFLINE · CACHED SCHEDULE" in player
     assert "cache.addAll" in worker
+    assert "URLSearchParams(location.search)" not in player
+    assert "localStorage.token" not in player
+    assert "upmSetPlayerCredential" in player
 
 
 def test_layout_editor_matches_required_designer_surfaces():
@@ -76,3 +79,23 @@ def test_layout_editor_matches_required_designer_surfaces():
     ):
         assert label in editor
     assert "/api/v1/layouts" in editor
+    assert "localStorage.operatorPassword" not in editor
+    assert "upmSetOperatorPassword" in editor
+    assert "Element editing is unavailable" in editor
+
+
+def test_native_signage_is_independent_and_does_not_expose_credentials():
+    from pathlib import Path
+
+    project = Path("clients/windows/UPM.Signage/UPM.Signage.csproj").read_text()
+    source = "\n".join(
+        path.read_text()
+        for path in Path("clients/windows/UPM.Signage").glob("*.cs")
+    )
+    assert "<AssemblyName>UPM.Signage</AssemblyName>" in project
+    assert "RoomAgent" not in project
+    assert "PasswordVault" in source
+    assert "PlayerCredential" not in source or "PairingResult" in source
+    assert "?token=" not in source
+    assert "last-verified-manifest.json" in source
+    assert "rendererRecoveries > 3" in source
