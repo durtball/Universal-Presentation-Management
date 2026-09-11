@@ -8,6 +8,7 @@ members = [
     "upm-development",
     "upm-media-storage",
     "upm-shared",
+    "upm-signage",
     "upm-site",
 ]
 
@@ -683,6 +684,33 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "uuid6", specifier = ">=2025.0.1" },
+]
+
+[[package]]
+name = "upm-signage"
+version = "0.1.0"
+source = { editable = "signage/python" }
+dependencies = [
+    { name = "alembic" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy" },
+    { name = "upm-shared" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.16,<2" },
+    { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
+    { name = "pydantic-settings", specifier = ">=2.10,<3" },
+    { name = "sqlalchemy", specifier = ">=2.0.41,<3" },
+    { name = "upm-shared", editable = "shared/python" },
+    { name = "uvicorn", specifier = ">=0.35,<1" },
 ]
 
 [[package]]

@@ -87,6 +87,7 @@ from upm_site.presentation_media_api import register_presentation_media_routes
 from upm_site.program_api import register_program_routes
 from upm_site.program_imports import register_program_import_routes
 from upm_site.rotation_api import register_rotation_routes
+from upm_site.signage_api import register_signage_routes
 from upm_site.sync import (
     apply_central_event,
     bootstrap_identity,
@@ -954,6 +955,7 @@ for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
     register_agent_control_routes(app, get_session, transaction, settings=get_settings)
+    register_signage_routes(app, get_session, get_settings)
     register_program_routes(app, get_session)
     register_program_import_routes(app, get_session, transaction)
     register_operations_routes(app, get_session, transaction)
