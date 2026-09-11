@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     site_url: str | None = None
     site_credential: str | None = None
     event_id: UUID | None = None
-    operator_password: Annotated[str, Field(min_length=12)]
+    operator_password: Annotated[str, Field(min_length=12)] | None = None
     media_root: str = "/media"
     poll_seconds: Annotated[float, Field(ge=1, le=300)] = 10
     lease_seconds: Annotated[int, Field(ge=10, le=600)] = 60

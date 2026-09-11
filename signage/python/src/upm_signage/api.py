@@ -59,6 +59,8 @@ def create_app():
         return row
 
     def operator(password: str | None):
+        if not settings.operator_password:
+            raise HTTPException(503, "operator access is not configured")
         if not secrets.compare_digest(password or "", settings.operator_password):
             raise HTTPException(401, "operator password required")
 

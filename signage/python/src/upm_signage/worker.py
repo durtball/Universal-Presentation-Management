@@ -30,7 +30,6 @@ async def sync_once(settings, sessions):
             source = Source(
                 site_id=UUID(body["source_site_id"]),
                 base_url=settings.site_url,
-                credential=settings.site_credential,
             )
             session.add(source)
             session.flush()

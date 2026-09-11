@@ -16,7 +16,6 @@ class Source(Base):
     source_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
     site_id: Mapped[UUID] = mapped_column(PGUUID, unique=True)
     base_url: Mapped[str] = mapped_column(String(2048))
-    credential: Mapped[str] = mapped_column(Text)
     committed_cursor: Mapped[int] = mapped_column(BigInteger, default=0)
     snapshot_generation: Mapped[int] = mapped_column(BigInteger, default=0)
     source_instance_id: Mapped[UUID | None] = mapped_column(PGUUID)

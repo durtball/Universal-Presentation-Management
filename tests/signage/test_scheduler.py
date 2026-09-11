@@ -46,3 +46,14 @@ def test_override_expiry_is_deterministic():
     ]
     assert effective_override(rows, datetime(2026, 9, 10, 10, 59, tzinfo=UTC))["override_id"] == "a"
     assert effective_override(rows, datetime(2026, 9, 10, 11, 0, tzinfo=UTC)) is None
+
+
+def test_player_bundles_persistent_offline_shell():
+    from pathlib import Path
+
+    player = Path("signage/player/index.html").read_text()
+    worker = Path("signage/player/sw.js").read_text()
+    assert "indexedDB.open" in player
+    assert "serviceWorker.register" in player
+    assert "OFFLINE · CACHED SCHEDULE" in player
+    assert "cache.addAll" in worker

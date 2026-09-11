@@ -3,7 +3,7 @@
 import secrets
 from collections.abc import Callable, Iterator
 from typing import Annotated
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy import func, select
@@ -99,7 +99,10 @@ def register_signage_routes(app: FastAPI, read_db: Callable[[], Iterator[Session
         return {
             "schema_version": SCHEMA_VERSION,
             "source_site_id": identity.site_id,
-            "source_instance_id": identity.site_id,
+            "source_instance_id": uuid5(
+                NAMESPACE_URL,
+                f"upm-site:{identity.site_id}:{event.created_at.isoformat()}",
+            ),
             "event_id": event_id,
             "snapshot_generation": generation,
             "committed_cursor": generation,
