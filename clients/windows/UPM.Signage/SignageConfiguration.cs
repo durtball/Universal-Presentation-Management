@@ -50,6 +50,11 @@ internal static class DisplayCredentialStore
     foreach (var old in vault.FindAllByResource(Resource)) vault.Remove(old);
     vault.Add(new PasswordCredential(Resource, displayId.ToString(), credential));
   }
+  public static void Remove(Guid displayId)
+  {
+    var vault = new PasswordVault();
+    try { var value = vault.Retrieve(Resource, displayId.ToString()); vault.Remove(value); } catch { }
+  }
   public static string? Read(Guid? displayId)
   {
     if (displayId is null) return null;

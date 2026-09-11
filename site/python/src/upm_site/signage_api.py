@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from upm_site.persistence.models import (
     LocalSiteIdentity,
     Room,
     RoomAssignment,
+    User,
 )
 from upm_site.persistence.models import Session as ProgramSession
 
@@ -29,6 +31,35 @@ def register_signage_routes(app: FastAPI, read_db: Callable[[], Iterator[Session
         supplied = value[7:] if value and value.startswith("Bearer ") else ""
         if not configured or not secrets.compare_digest(configured, supplied):
             raise HTTPException(401, "invalid Signage service credential")
+
+    @app.get("/api/v1/signage/status", tags=["signage"])
+    async def status():
+        """Resolve the Site-managed Signage entry point without exposing credentials."""
+        configured = settings()
+        if not configured.signage_internal_url or not configured.signage_public_url:
+            return {
+                "installed": False,
+                "healthy": False,
+                "message": "Signage service is not installed on this Site.",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(configured.signage_internal_url.rstrip("/") + "/health")
+                response.raise_for_status()
+            health = response.json()
+            return {
+                "installed": True,
+                "healthy": True,
+                "url": configured.signage_public_url,
+                "source_connected": bool(health.get("source_connected")),
+            }
+        except (httpx.HTTPError, ValueError):
+            return {
+                "installed": True,
+                "healthy": False,
+                "url": configured.signage_public_url,
+                "message": "Signage service is installed but unavailable.",
+            }
 
     @app.get("/api/v1/signage/projection", tags=["signage"])
     def projection(
@@ -53,13 +84,33 @@ def register_signage_routes(app: FastAPI, read_db: Callable[[], Iterator[Session
             )
         }
         items = []
+        for user in s.scalars(select(User).where(User.active.is_(True), User.web_access.is_(True))):
+            if user.web_password_hash and "administrator" in user.roles:
+                items.append(
+                    {
+                        "type": "operator_user",
+                        "id": user.central_user_id or user.user_id,
+                        "event_id": event_id,
+                        "tombstone": False,
+                        "data": {
+                            "user_id": str(user.central_user_id or user.user_id),
+                            "username": user.username,
+                            "normalized_username": user.normalized_username,
+                            "display_name": user.display_name,
+                            # A one-way scrypt verifier crosses only this authenticated
+                            # service boundary; plaintext credentials never do.
+                            "password_verifier": user.web_password_hash,
+                            "roles": user.roles,
+                        },
+                    }
+                )
         for room in rooms.values():
             items.append(
                 {
                     "type": "room",
                     "id": room.room_id,
                     "event_id": event_id,
-                    "tombstone": not room.active,
+                    "tombstone": not room.enabled or room.archived_at is not None,
                     "data": {"room_id": str(room.room_id), "name": room.label},
                 }
             )

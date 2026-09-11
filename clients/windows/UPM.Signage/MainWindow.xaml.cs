@@ -13,7 +13,6 @@ public sealed partial class MainWindow : Window
   private readonly SignageApiClient api = new();
   private readonly SignageConfigurationStore store = new();
   private SignageConfiguration configuration = new();
-  private string? operatorPassword;
   private int rendererRecoveries;
   private DateTimeOffset recoveryWindow = DateTimeOffset.UtcNow;
   private IReadOnlyList<MonitorInfo> monitors = [];
@@ -28,7 +27,6 @@ public sealed partial class MainWindow : Window
   private async Task InitializeAsync()
   {
     configuration = await store.LoadAsync();
-    ServerUrl.Text = configuration.ServerUrl; DisplayName.Text = configuration.DisplayName;
     Fullscreen.IsOn = configuration.Fullscreen; PlayerWidth.Value = configuration.Width; PlayerHeight.Value = configuration.Height; StartWithWindows.IsOn = configuration.StartWithWindows;
     monitors = MonitorService.FindAll();
     foreach (var display in monitors) Monitor.Items.Add(display.Name);
@@ -36,52 +34,40 @@ public sealed partial class MainWindow : Window
     try { _ = CoreWebView2Environment.GetAvailableBrowserVersionString(); }
     catch (Exception exception) { Diagnostics.Text = "Renderer unavailable: install the Microsoft Edge WebView2 Runtime. " + exception.Message; return; }
     await Player.EnsureCoreWebView2Async();
+    await Designer.EnsureCoreWebView2Async();
+    Designer.Source = api.ValidateEndpoint(configuration.ServerUrl);
+    try { var health = await api.HealthAsync(configuration.ServerUrl); ServiceStatus.Text = health.SourceConnected ? "Signage Online · Site Source Connected" : "Signage Online · Site Source Offline · Playback Ready"; }
+    catch { ServiceStatus.Text = "Signage service not discovered · open Settings when service becomes available"; }
     var assets = Path.Combine(AppContext.BaseDirectory, "Assets", "player");
     Player.CoreWebView2.SetVirtualHostNameToFolderMapping("player.upm.local", assets, CoreWebView2HostResourceAccessKind.DenyCors);
     Player.Source = new Uri("https://player.upm.local/index.html");
     if (Environment.GetCommandLineArgs().Contains("--player", StringComparer.OrdinalIgnoreCase)) PlayerClick(this, new RoutedEventArgs());
   }
 
-  private async void TestClick(object sender, RoutedEventArgs e)
+  private async void DesignerMessageReceived(WebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
   {
-    try { var health = await api.HealthAsync(ServerUrl.Text); ServiceStatus.Text = health.SourceConnected ? "Signage ready · Site source connected" : "Signage ready · Site source offline (cached schedule active)"; }
-    catch (Exception exception) { ServiceStatus.Text = "Signage server unavailable"; OperatorMessage.Text = exception.Message; }
+    using var message = JsonDocument.Parse(args.WebMessageAsJson);
+    if (message.RootElement.GetProperty("type").GetString() != "store-display-credential") return;
+    var id = message.RootElement.GetProperty("displayId").GetGuid();
+    var credential = message.RootElement.GetProperty("credential").GetString();
+    if (credential is null) return;
+    DisplayCredentialStore.Save(id, credential);
+    configuration = configuration with { DisplayId = id };
+    await store.SaveAsync(configuration);
   }
 
-  private async void LoginClick(object sender, RoutedEventArgs e)
-  {
-    try
-    {
-      await api.LoginAsync(ServerUrl.Text, OperatorPassword.Password); operatorPassword = OperatorPassword.Password; OperatorPassword.Password = "";
-      Designer.Source = new Uri(api.ValidateEndpoint(ServerUrl.Text), ""); Designer.Visibility = Visibility.Visible; DesignerUnavailable.Visibility = Visibility.Collapsed;
-      OperatorMessage.Text = "Authenticated. Designer changes are saved by the Signage API.";
-    }
-    catch (Exception exception) { operatorPassword = null; OperatorMessage.Text = "Login failed: " + exception.Message; }
-  }
-
-  private async void PairClick(object sender, RoutedEventArgs e)
-  {
-    if (operatorPassword is null) { OperatorMessage.Text = "Log in before pairing a display."; return; }
-    try
-    {
-      var roomDoor = ((ComboBoxItem)DisplayMode.SelectedItem).Content.ToString() == "room_door";
-      Guid? eventId = roomDoor ? Guid.Parse(EventId.Text) : null; Guid? roomId = roomDoor ? Guid.Parse(RoomId.Text) : null;
-      var result = await api.PairAsync(ServerUrl.Text, operatorPassword, new { name = DisplayName.Text, aspect_ratio = ((ComboBoxItem)AspectRatio.SelectedItem).Content, mode = ((ComboBoxItem)DisplayMode.SelectedItem).Content, event_id = eventId, room_id = roomId });
-      DisplayCredentialStore.Save(result.DisplayId, result.PlayerCredential);
-      configuration = configuration with { ServerUrl = ServerUrl.Text.TrimEnd('/'), DisplayId = result.DisplayId, DisplayName = DisplayName.Text };
-      await store.SaveAsync(configuration); OperatorMessage.Text = $"Display {result.DisplayId} paired and assigned. Its credential is protected for this Windows user.";
-    }
-    catch (Exception exception) { OperatorMessage.Text = "Pairing failed: " + exception.Message; }
-  }
-
-  private async void DesignerNavigationCompleted(WebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
-  {
-    if (args.IsSuccess && operatorPassword is not null)
-      await Designer.ExecuteScriptAsync($"window.upmSetOperatorPassword({JsonSerializer.Serialize(operatorPassword)})");
-  }
+  private void DesignerProcessFailed(WebView2 sender, CoreWebView2ProcessFailedEventArgs args)
+  { ServiceStatus.Text = "Signage Manager renderer failed · restart UPM Signage"; }
 
   private void OperatorClick(object sender, RoutedEventArgs e) { OperatorPanel.Visibility = Visibility.Visible; PlayerPanel.Visibility = Visibility.Collapsed; }
   private async void PlayerClick(object sender, RoutedEventArgs e) { OperatorPanel.Visibility = Visibility.Collapsed; PlayerPanel.Visibility = Visibility.Visible; await RefreshPlayerAsync(); }
+
+  private async void UnpairLocalClick(object sender, RoutedEventArgs e)
+  {
+    if (configuration.DisplayId is Guid id) DisplayCredentialStore.Remove(id);
+    configuration = configuration with { DisplayId = null }; await store.SaveAsync(configuration);
+    Diagnostics.Text = "Local player unpaired. The server assignment must also be unpaired in Operator mode.";
+  }
 
   private async void PlayerMessageReceived(WebView2 sender, CoreWebView2WebMessageReceivedEventArgs args) => await RefreshPlayerAsync();
   private async Task RefreshPlayerAsync()

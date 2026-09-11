@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 
 from .config import Settings
 from .db import factory
-from .models import Projection, Source
+from .models import OperatorUser, Projection, Source
 
 
 async def sync_once(settings, sessions):
@@ -40,6 +40,30 @@ async def sync_once(settings, sessions):
         if body["full_resync"] or restored:
             session.execute(delete(Projection).where(Projection.source_id == source.source_id))
         for item in body["items"]:
+            if item["type"] == "operator_user":
+                data = item["data"]
+                user = session.scalar(
+                    select(OperatorUser).where(
+                        OperatorUser.normalized_username == data["normalized_username"]
+                    )
+                )
+                if user is None:
+                    user = OperatorUser(
+                        user_id=UUID(data["user_id"]),
+                        username=data["username"],
+                        normalized_username=data["normalized_username"],
+                        display_name=data["display_name"],
+                        password_hash=data["password_verifier"],
+                        roles=data["roles"],
+                    )
+                    session.add(user)
+                else:
+                    user.username = data["username"]
+                    user.display_name = data["display_name"]
+                    user.password_hash = data["password_verifier"]
+                    user.roles = data["roles"]
+                    user.active = not item["tombstone"]
+                continue
             row = session.scalar(
                 select(Projection).where(
                     Projection.source_id == source.source_id,

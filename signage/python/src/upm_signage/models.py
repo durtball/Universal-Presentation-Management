@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint
@@ -9,6 +9,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from upm_shared.identifiers import new_uuid7
 
 from .db import Base
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class Source(Base):
@@ -41,6 +45,9 @@ class Display(Base):
     display_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
     name: Mapped[str] = mapped_column(String(255))
     aspect_ratio: Mapped[str] = mapped_column(String(16), default="9:16")
+    width: Mapped[int] = mapped_column(Integer, default=1080)
+    height: Mapped[int] = mapped_column(Integer, default=1920)
+    orientation: Mapped[str] = mapped_column(String(16), default="portrait")
     event_id: Mapped[UUID | None] = mapped_column(PGUUID)
     room_id: Mapped[UUID | None] = mapped_column(PGUUID)
     mode: Mapped[str] = mapped_column(String(32), default="room_door")
@@ -52,9 +59,56 @@ class Layout(Base):
     __tablename__ = "layouts"
     layout_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
     name: Mapped[str] = mapped_column(String(255))
-    template: Mapped[str] = mapped_column(String(64))
+    event_id: Mapped[UUID | None] = mapped_column(PGUUID, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    mode: Mapped[str] = mapped_column(String(32), default="room_door")
+    template: Mapped[str] = mapped_column(String(64), default="room_door")
     aspect_ratio: Mapped[str] = mapped_column(String(16))
+    width: Mapped[int] = mapped_column(Integer, default=1920)
+    height: Mapped[int] = mapped_column(Integer, default=1080)
+    orientation: Mapped[str] = mapped_column(String(16), default="landscape")
+    safe_area: Mapped[dict] = mapped_column(JSONB, default=dict)
+    background: Mapped[dict] = mapped_column(JSONB, default=dict)
+    elements: Mapped[list] = mapped_column(JSONB, default=list)
     configuration: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_by: Mapped[UUID | None] = mapped_column(PGUUID)
+    draft_revision: Mapped[int] = mapped_column(BigInteger, default=1)
+    published_revision: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32), default="draft")
+
+
+class LayoutRevision(Base):
+    __tablename__ = "layout_revisions"
+    __table_args__ = (UniqueConstraint("layout_id", "revision"),)
+    layout_revision_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
+    layout_id: Mapped[UUID] = mapped_column(PGUUID, index=True)
+    revision: Mapped[int] = mapped_column(BigInteger)
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    published_by: Mapped[UUID | None] = mapped_column(PGUUID)
+
+
+class OperatorUser(Base):
+    __tablename__ = "operator_users"
+    user_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
+    username: Mapped[str] = mapped_column(String(255), unique=True)
+    normalized_username: Mapped[str] = mapped_column(String(255), unique=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    password_hash: Mapped[str] = mapped_column(Text)
+    roles: Mapped[list] = mapped_column(JSONB, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class OperatorSession(Base):
+    __tablename__ = "operator_sessions"
+    session_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
+    user_id: Mapped[UUID] = mapped_column(PGUUID, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Playlist(Base):

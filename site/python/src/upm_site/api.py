@@ -288,6 +288,10 @@ def create_app(
         if (
             request.url.path in {"/health", "/api/v1/auth/login"}
             or request.url.path.startswith("/api/v1/agent/")
+            # This machine-to-machine projection authenticates itself in the
+            # route with the Signage service credential.  Browser cookies and
+            # CSRF are intentionally not part of this trust boundary.
+            or request.url.path == "/api/v1/signage/projection"
             or not get_settings().auth_required
         ):
             return await call_next(request)

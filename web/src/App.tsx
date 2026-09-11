@@ -30,6 +30,7 @@ import {
   SiteRoomDetail,
   SiteRooms,
   SiteDevices,
+  SiteSignage,
 } from "./pages/site/SitePages";
 
 export function App({ deployment }: { deployment: Deployment }) {
@@ -122,6 +123,7 @@ function SiteApp() {
         <Route path="/admin/storage" element={<StoragePage mode="site" />} />
         <Route path="/admin/media" element={<SitePresentationMedia />} />
         <Route path="/admin/presentations" element={<SitePresentations />} />
+        <Route path="/admin/signage" element={<SiteSignage />} />
         <Route path="/admin/logs" element={<LogsPage mode="site" />} />
         <Route path="*" element={<Navigate to="/admin" replace />} />
       </Routes>
