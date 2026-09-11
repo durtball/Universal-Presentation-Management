@@ -235,6 +235,12 @@ public sealed class SiteClientFactory(
       value.Replace(" ", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
 }
 
+public sealed record IngestionReceiptResponse(
+    [property: JsonPropertyName("media_object_id")] Guid MediaObjectId,
+    [property: JsonPropertyName("size_bytes")] long? SizeBytes,
+    [property: JsonPropertyName("content_hash")] string? ContentHash,
+    [property: JsonPropertyName("availability")] string Availability);
+
 public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
 {
   private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -579,7 +585,7 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
   public Task<JsonElement> GetOperationsDashboardAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/operations/dashboard", cancellationToken);
 
-  public async Task<HttpResponseMessage> UploadAsync(
+  public async Task<ByteTransferReceipt> UploadAsync(
       TransferItem item,
       Guid canonicalSiteId,
       Stream body,
@@ -588,7 +594,7 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     var query = new List<string>
         {
             $"site_id={Uri.EscapeDataString(canonicalSiteId.ToString())}",
-            "category=presentation",
+            "category=open_file",
             $"expected_size={item.Length}",
         };
     if (item.EventId.HasValue)
@@ -597,21 +603,41 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
     }
 
     var path = $"api/v1/media/ingestions?{string.Join('&', query)}";
-    var response = await SendUploadAsync(path, item, body, cancellationToken);
+    using var response = await SendUploadAsync(path, item, body, cancellationToken);
     if (response.StatusCode != HttpStatusCode.Forbidden || !body.CanSeek)
     {
-      return response;
+      EnsureSiteSuccess(response, "staged media intake");
+      return Receipt(await ReadAsync<IngestionReceiptResponse>(response, cancellationToken));
     }
 
-    response.Dispose();
     var session = await RestoreSessionAsync(cancellationToken);
     if (session is null)
     {
-      return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+      throw new SiteEndpointException("Site authentication expired during media intake.", SiteConnectionState.SessionExpired);
     }
 
     body.Position = 0;
-    return await SendUploadAsync(path, item, body, cancellationToken);
+    using var retry = await SendUploadAsync(path, item, body, cancellationToken);
+    EnsureSiteSuccess(retry, "staged media intake");
+    return Receipt(await ReadAsync<IngestionReceiptResponse>(retry, cancellationToken));
+  }
+
+  public async Task<ByteTransferReceipt?> FindIngestionReceiptAsync(
+      Guid canonicalSiteId, string idempotencyKey, CancellationToken cancellationToken)
+  {
+    var path = $"api/v1/media/ingestions/receipt?site_id={canonicalSiteId}&idempotency_key={Uri.EscapeDataString(idempotencyKey)}";
+    using var response = await http.GetAsync(path, cancellationToken);
+    if (response.StatusCode == HttpStatusCode.NotFound) return null;
+    EnsureSiteSuccess(response, "media receipt reconciliation");
+    return Receipt(await ReadAsync<IngestionReceiptResponse>(response, cancellationToken));
+  }
+
+  private static ByteTransferReceipt Receipt(IngestionReceiptResponse value)
+  {
+    if (!value.Availability.Equals("available", StringComparison.OrdinalIgnoreCase) ||
+        value.SizeBytes is null || string.IsNullOrWhiteSpace(value.ContentHash))
+      throw new InvalidDataException("Site receipt does not confirm durable verified bytes.");
+    return new(value.MediaObjectId, value.SizeBytes.Value, value.ContentHash);
   }
 
   public async Task<JsonDocument> CreateCommandAsync(

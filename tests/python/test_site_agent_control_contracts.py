@@ -14,8 +14,18 @@ from upm_site.agent_control import (
     Heartbeat,
     LocalChanges,
     discovery_signature,
+    existing_enrollment_proven,
     register_agent_control_routes,
 )
+
+
+def test_existing_enrollment_requires_current_device_credential_proof():
+    class Device:
+        agent_token_hash = __import__("hashlib").sha256(b"current-secret").hexdigest()
+
+    assert existing_enrollment_proven(Device(), "Bearer current-secret")
+    assert not existing_enrollment_proven(Device(), None)
+    assert not existing_enrollment_proven(Device(), "Bearer replacement-secret")
 
 
 def test_command_contract_rejects_unknown_fields_and_accepts_idempotency():

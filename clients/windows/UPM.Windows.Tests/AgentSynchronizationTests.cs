@@ -64,7 +64,7 @@ public sealed class AgentSynchronizationTests
             ? new(HttpStatusCode.OK) { Content = new StringContent("{}", Encoding.UTF8, "application/json") }
             : new(HttpStatusCode.OK) { Content = new StringContent(responses.Dequeue(), Encoding.UTF8, "application/json") })));
     var dashboards = new AgentDashboardService(store, storage);
-    var worker = new AgentSyncWorker(store, credentials, client, storage, dashboards, new AgentSyncSignal(),
+    var worker = new AgentSyncWorker(store, credentials, client, storage, new AgentSyncSignal(),
         new SiteDiscoveryService(), NullLogger<AgentSyncWorker>.Instance);
 
     await worker.SynchronizeAsync(CancellationToken.None);

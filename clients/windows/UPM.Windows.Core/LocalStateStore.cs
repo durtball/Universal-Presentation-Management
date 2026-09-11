@@ -48,7 +48,8 @@ public sealed class LocalStateStore
                 sha256 TEXT,
                 retry_count INTEGER NOT NULL,
                 retry_at TEXT,
-                error TEXT
+                error TEXT,
+                receipt_id TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_transfer_work ON transfer_queue(state,retry_at);
             CREATE TABLE IF NOT EXISTS site_profiles(
@@ -71,6 +72,13 @@ public sealed class LocalStateStore
             );
             """;
     await command.ExecuteNonQueryAsync(cancellationToken);
+    // Existing desktop databases predate terminal byte receipts.
+    command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('transfer_queue') WHERE name='receipt_id'";
+    if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) == 0)
+    {
+      command.CommandText = "ALTER TABLE transfer_queue ADD COLUMN receipt_id TEXT";
+      await command.ExecuteNonQueryAsync(cancellationToken);
+    }
   }
 
   public async Task UpsertSiteProfileAsync(
@@ -204,9 +212,12 @@ public sealed class LocalStateStore
     await using var database = await OpenAsync(cancellationToken);
     var command = database.CreateCommand();
     command.CommandText = """
-            INSERT INTO transfer_queue VALUES(
+            INSERT INTO transfer_queue(
+                transfer_id,profile_id,event_id,source_path,original_filename,relative_path,
+                source_volume,length,source_modified,idempotency_key,state,bytes_transferred,
+                sha256,retry_count,retry_at,error,receipt_id) VALUES(
                 $id,$profile,$event,$path,$name,$relative,$volume,$length,$modified,$key,
-                $state,$bytes,$hash,$retry,$retry_at,$error)
+                $state,$bytes,$hash,$retry,$retry_at,$error,$receipt)
             ON CONFLICT(idempotency_key) DO NOTHING
             """;
     Add(command, "$id", item.TransferId);
@@ -225,6 +236,7 @@ public sealed class LocalStateStore
     Add(command, "$retry", item.RetryCount);
     Add(command, "$retry_at", Format(item.RetryAt));
     Add(command, "$error", item.Error);
+    Add(command, "$receipt", item.ReceiptId);
     await command.ExecuteNonQueryAsync(cancellationToken);
   }
 
@@ -236,13 +248,15 @@ public sealed class LocalStateStore
       int retry = 0,
       DateTimeOffset? retryAt = null,
       string? error = null,
+      Guid? receiptId = null,
       CancellationToken cancellationToken = default)
   {
     await using var database = await OpenAsync(cancellationToken);
     var command = database.CreateCommand();
     command.CommandText = """
             UPDATE transfer_queue SET state=$state,bytes_transferred=$bytes,
-            sha256=COALESCE($hash,sha256),retry_count=$retry,retry_at=$retry_at,error=$error
+            sha256=COALESCE($hash,sha256),retry_count=$retry,retry_at=$retry_at,error=$error,
+            receipt_id=COALESCE($receipt,receipt_id)
             WHERE transfer_id=$id
             """;
     Add(command, "$state", (int)state);
@@ -251,6 +265,7 @@ public sealed class LocalStateStore
     Add(command, "$retry", retry);
     Add(command, "$retry_at", Format(retryAt));
     Add(command, "$error", error);
+    Add(command, "$receipt", receiptId);
     Add(command, "$id", transferId);
     await command.ExecuteNonQueryAsync(cancellationToken);
   }
@@ -276,14 +291,41 @@ public sealed class LocalStateStore
   {
     await using var database = await OpenAsync(cancellationToken);
     var command = database.CreateCommand();
-    command.CommandText = "SELECT * FROM transfer_queue WHERE state NOT IN ($complete,$cancelled) ORDER BY rowid";
+    command.CommandText = "SELECT * FROM transfer_queue WHERE state NOT IN ($received,$complete,$failed,$cancelled) AND (retry_at IS NULL OR retry_at <= $now) ORDER BY rowid";
+    Add(command, "$received", (int)TransferState.ReceivedBySite);
     Add(command, "$complete", (int)TransferState.Complete);
+    Add(command, "$failed", (int)TransferState.Failed);
     Add(command, "$cancelled", (int)TransferState.Cancelled);
+    Add(command, "$now", Format(DateTimeOffset.UtcNow));
     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
     while (await reader.ReadAsync(cancellationToken))
     {
       yield return ReadTransfer(reader);
     }
+  }
+
+  public async Task<TransferItem?> ClaimDueAsync(CancellationToken cancellationToken = default)
+  {
+    await using var database = await OpenAsync(cancellationToken);
+    var command = database.CreateCommand();
+    command.CommandText = """
+        UPDATE transfer_queue SET state=$hashing,retry_at=NULL
+        WHERE transfer_id=(
+          SELECT transfer_id FROM transfer_queue
+          WHERE state NOT IN ($received,$complete,$failed,$cancelled)
+            AND (retry_at IS NULL OR retry_at <= $now)
+          ORDER BY rowid LIMIT 1
+        )
+        RETURNING *
+        """;
+    Add(command, "$hashing", (int)TransferState.Hashing);
+    Add(command, "$received", (int)TransferState.ReceivedBySite);
+    Add(command, "$complete", (int)TransferState.Complete);
+    Add(command, "$failed", (int)TransferState.Failed);
+    Add(command, "$cancelled", (int)TransferState.Cancelled);
+    Add(command, "$now", Format(DateTimeOffset.UtcNow));
+    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+    return await reader.ReadAsync(cancellationToken) ? ReadTransfer(reader) : null;
   }
 
   private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)
@@ -322,7 +364,8 @@ public sealed class LocalStateStore
       ReadString(reader, 12),
       reader.GetInt32(13),
       ReadDate(reader, 14),
-      ReadString(reader, 15));
+      ReadString(reader, 15),
+      ReadGuid(reader, 16));
 
   private static string? ReadString(SqliteDataReader reader, int ordinal) =>
       reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);

@@ -1,0 +1,59 @@
+name: ${UPM_SIGNAGE_PROJECT_NAME:-upm-signage}
+services:
+  signage-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SIGNAGE_POSTGRES_DB:?Set SIGNAGE_POSTGRES_DB}
+      POSTGRES_USER: ${SIGNAGE_POSTGRES_USER:?Set SIGNAGE_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${SIGNAGE_POSTGRES_PASSWORD:?Set SIGNAGE_POSTGRES_PASSWORD}
+    volumes: [signage-postgres-data:/var/lib/postgresql/data]
+    networks: [signage-internal]
+    healthcheck: {test: [CMD-SHELL, 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB'], interval: 5s, timeout: 5s, retries: 10}
+  signage-migrate:
+    build: {context: ., dockerfile: signage/Dockerfile}
+    image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
+    command: [alembic, -c, database/signage/alembic.ini, upgrade, head]
+    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}'}
+    depends_on: {signage-postgres: {condition: service_healthy}}
+    networks: [signage-internal]
+  signage-api:
+    image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
+    restart: unless-stopped
+    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_MEDIA_ROOT: /media, UPM_SIGNAGE_OPERATOR_PASSWORD: '${UPM_SIGNAGE_OPERATOR_PASSWORD:?Set UPM_SIGNAGE_OPERATOR_PASSWORD}'}
+    volumes: [signage-media:/media]
+    depends_on: {signage-migrate: {condition: service_completed_successfully}}
+    networks: [signage-internal, signage-edge]
+    healthcheck: {test: [CMD, python, -c, "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health').read()"], interval: 10s, timeout: 3s, retries: 5}
+  signage-worker:
+    image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
+    command: [python, -m, upm_signage.worker]
+    restart: unless-stopped
+    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_SITE_URL: '${UPM_SIGNAGE_SITE_URL:-}', UPM_SIGNAGE_SITE_CREDENTIAL: '${UPM_SIGNAGE_SITE_CREDENTIAL:-}', UPM_SIGNAGE_EVENT_ID: '${UPM_SIGNAGE_EVENT_ID:?Set UPM_SIGNAGE_EVENT_ID}', UPM_SIGNAGE_MEDIA_ROOT: /media}
+    volumes: [signage-media:/media]
+    depends_on: {signage-migrate: {condition: service_completed_successfully}}
+    networks: [signage-internal, signage-site-egress]
+  signage-web:
+    build: {context: ., dockerfile: signage/web/Dockerfile}
+    restart: unless-stopped
+    networks: [signage-edge]
+  signage-player:
+    build: {context: ., dockerfile: signage/player/Dockerfile}
+    restart: unless-stopped
+    networks: [signage-edge]
+  signage-caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ['${SIGNAGE_HTTP_PORT:-9180}:80']
+    volumes: [./infrastructure/caddy/signage/Caddyfile:/etc/caddy/Caddyfile:ro, signage-caddy-data:/data, signage-caddy-config:/config]
+    depends_on: {signage-api: {condition: service_healthy}, signage-web: {condition: service_started}, signage-player: {condition: service_started}}
+    networks: [signage-edge]
+networks:
+  signage-internal: {internal: true}
+  signage-edge: {}
+  signage-site-egress: {}
+volumes:
+  signage-postgres-data: {}
+  signage-media: {}
+  signage-caddy-data: {}
+  signage-caddy-config: {}

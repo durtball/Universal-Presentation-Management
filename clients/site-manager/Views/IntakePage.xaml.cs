@@ -15,6 +15,7 @@ public sealed partial class IntakePage : Page
 {
   private readonly IOperatorContext context = App.Services.GetRequiredService<IOperatorContext>();
   private readonly LocalStateStore store = App.Services.GetRequiredService<LocalStateStore>();
+  private readonly TransferWorker transferWorker = App.Services.GetRequiredService<TransferWorker>();
   private readonly List<SiteIntakeRow> siteIntake = [];
   private readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromSeconds(12) };
   private bool reloading;
@@ -89,6 +90,7 @@ public sealed partial class IntakePage : Page
                        context.SelectedEventId))
     {
       await store.EnqueueAsync(item);
+      transferWorker.Signal();
     }
 
     await ReloadAsync();

@@ -102,7 +102,7 @@ public sealed class SiteConnectivityTests
         return Json(SessionJson);
       }
 
-      return new HttpResponseMessage(HttpStatusCode.Created) { Content = JsonContent("{}") };
+      return Receipt();
     });
     var api = CreateApi(handler);
     await api.RestoreSessionAsync(CancellationToken.None);
@@ -110,12 +110,15 @@ public sealed class SiteConnectivityTests
     var canonicalId = Guid.NewGuid();
     var item = Transfer(profileId);
 
-    using var response = await api.UploadAsync(item, canonicalId, new MemoryStream([1, 2, 3]), CancellationToken.None);
+    var receipt = await api.UploadAsync(item, canonicalId, new MemoryStream([1, 2, 3]), CancellationToken.None);
     var upload = handler.Requests.Last();
 
     Assert.Contains($"site_id={canonicalId}", upload.RequestUri!.Query, StringComparison.Ordinal);
     Assert.DoesNotContain($"site_id={profileId}", upload.RequestUri.Query, StringComparison.Ordinal);
+    Assert.Contains("category=open_file", upload.RequestUri.Query, StringComparison.Ordinal);
+    Assert.DoesNotContain("presentation_version_id", upload.RequestUri.Query, StringComparison.Ordinal);
     Assert.Equal("fresh-csrf", upload.Headers.GetValues("X-CSRF-Token").Single());
+    Assert.NotEqual(Guid.Empty, receipt.ReceiptId);
   }
 
   [Fact]
@@ -135,22 +138,43 @@ public sealed class SiteConnectivityTests
       return new HttpResponseMessage(
               uploadCount == 1 ? HttpStatusCode.Forbidden : HttpStatusCode.Created)
       {
-        Content = JsonContent("{}"),
+        Content = ReceiptContent(),
       };
     });
     var api = CreateApi(handler);
     await api.RestoreSessionAsync(CancellationToken.None);
 
-    using var response = await api.UploadAsync(
+    _ = await api.UploadAsync(
         Transfer(Guid.NewGuid()),
         Guid.NewGuid(),
         new MemoryStream([1, 2, 3]),
         CancellationToken.None);
 
-    Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     Assert.Equal(2, uploadCount);
     Assert.Equal(2, sessionCount);
     Assert.Equal("csrf-2", handler.Requests.Last().Headers.GetValues("X-CSRF-Token").Single());
+  }
+
+  [Fact]
+  public async Task LostUploadResponseCanBeReconciledWithoutSendingBytesAgain()
+  {
+    var receiptId = Guid.NewGuid();
+    var handler = new RecordingHandler(request =>
+    {
+      Assert.Equal(HttpMethod.Get, request.Method);
+      Assert.Equal("/api/v1/media/ingestions/receipt", request.RequestUri!.AbsolutePath);
+      Assert.Contains("idempotency_key=idempotency-key", request.RequestUri.Query, StringComparison.Ordinal);
+      return new HttpResponseMessage(HttpStatusCode.OK)
+      {
+        Content = JsonContent($$"""{"media_object_id":"{{receiptId}}","size_bytes":3,"content_hash":"{{new string('a', 64)}}","availability":"available"}"""),
+      };
+    });
+
+    var receipt = await CreateApi(handler).FindIngestionReceiptAsync(
+        Guid.NewGuid(), "idempotency-key", CancellationToken.None);
+
+    Assert.Equal(receiptId, receipt!.ReceiptId);
+    Assert.Single(handler.Requests);
   }
 
   [Fact]
@@ -338,6 +362,8 @@ public sealed class SiteConnectivityTests
   }
 
   private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK) { Content = JsonContent(json) };
+  private static HttpResponseMessage Receipt() => new(HttpStatusCode.Created) { Content = ReceiptContent() };
+  private static StringContent ReceiptContent() => JsonContent($$"""{"media_object_id":"{{Guid.NewGuid()}}","size_bytes":3,"content_hash":"{{new string('a', 64)}}","availability":"available"}""");
   private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
 
   private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> response) : HttpMessageHandler

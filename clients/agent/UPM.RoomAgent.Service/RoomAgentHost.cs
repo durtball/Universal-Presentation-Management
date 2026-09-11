@@ -10,6 +10,7 @@ namespace UPM.RoomAgent.Service;
 
 public static class RoomAgentHost
 {
+  public static string LoopbackToken { get; } = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
   public static async Task<WebApplication> StartAsync(CancellationToken cancellationToken = default)
   {
     var builder = WebApplication.CreateBuilder();
@@ -29,6 +30,10 @@ public static class RoomAgentHost
     builder.Services.AddHttpClient<SiteAgentClient>(client => client.Timeout = TimeSpan.FromMinutes(30));
     builder.Services.AddSingleton<AgentSyncWorker>();
     builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentSyncWorker>());
+    builder.Services.AddSingleton<AgentHeartbeatWorker>();
+    builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentHeartbeatWorker>());
+    builder.Services.AddSingleton<AgentCommandWorker>();
+    builder.Services.AddHostedService(provider => provider.GetRequiredService<AgentCommandWorker>());
 
     var app = builder.Build();
     var state = app.Services.GetRequiredService<AgentStateStore>();
@@ -62,6 +67,14 @@ public static class RoomAgentHost
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         return;
       }
+      if (context.Request.Method != HttpMethods.Get &&
+          !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+              System.Text.Encoding.UTF8.GetBytes(context.Request.Headers["X-UPM-Loopback-Token"].ToString()),
+              System.Text.Encoding.UTF8.GetBytes(LoopbackToken)))
+      {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return;
+      }
       await next();
     });
 
@@ -81,6 +94,9 @@ public static class RoomAgentHost
       });
     });
     app.MapGet("/api/v1/sessions", (AgentStateStore store, CancellationToken ct) => store.ListSessionsAsync(ct));
+    app.MapGet("/api/v1/sessions/{sessionId:guid}/presentations", async (Guid sessionId, AgentStateStore store, CancellationToken ct) =>
+        (await store.ListAssetsAsync(ct)).Where(asset => asset.SessionId == sessionId &&
+            asset.Kind == AssetKind.Presentation && asset.Verified).ToArray());
     app.MapGet("/api/v1/dashboard", (AgentDashboardService dashboard, CancellationToken ct) => dashboard.GetAsync(ct: ct));
     app.MapGet("/api/v1/settings", async (AgentStateStore store, AgentDashboardService dashboard, CancellationToken ct) =>
         (await dashboard.GetAsync(ct: ct)).Settings);
@@ -111,6 +127,14 @@ public static class RoomAgentHost
     app.MapDelete("/api/v1/provisioning", async (AgentStateStore store, IAgentCredentialStore credentials, CancellationToken ct) =>
     { await credentials.ClearAsync(ct); await store.ClearProvisioningAsync(ct); return Results.NoContent(); });
     app.MapPost("/api/v1/sync", (AgentSyncSignal signal) => { signal.Request(); return Results.Accepted(); });
+    app.MapPost("/api/v1/commands/{commandId:guid}/recover", async (Guid commandId, bool launched,
+        AgentStateStore store, CancellationToken ct) =>
+    {
+      await store.UpdateCommandAsync(commandId,
+          launched ? AgentCommandState.Succeeded : AgentCommandState.Failed,
+          launched ? null : "Operator confirmed the interrupted launch did not complete.", ct);
+      return Results.Accepted();
+    });
     app.MapPost("/api/v1/discovery/reset", async (AgentSyncWorker sync, CancellationToken ct) =>
     { await sync.DiscoverAsync(ct); return Results.Accepted(); });
     app.MapGet("/api/v1/presentation-library", async (AgentDashboardService dashboard, CancellationToken ct) =>

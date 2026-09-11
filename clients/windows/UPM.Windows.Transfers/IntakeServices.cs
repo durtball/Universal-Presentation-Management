@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using UPM.Windows.Core;
@@ -35,6 +34,12 @@ public static class IntakeEnumerator
         }
 
         var info = new FileInfo(file);
+        var initialLength = info.Length;
+        var initialWrite = info.LastWriteTimeUtc;
+        await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+        info.Refresh();
+        if (!info.Exists || info.Length != initialLength || info.LastWriteTimeUtc != initialWrite)
+          throw new IOException($"File is still being written and was not queued: {file}");
         yield return new TransferItem(
             Guid.CreateVersion7(),
             profileId,
@@ -43,9 +48,9 @@ public static class IntakeEnumerator
             info.Name,
             Path.GetRelativePath(basePath, file),
             Path.GetPathRoot(file),
-            info.Length,
-            info.LastWriteTimeUtc,
-            TransferIdentity.Create(profileId, eventId, file, info.Length, info.LastWriteTimeUtc));
+            initialLength,
+            initialWrite,
+            TransferIdentity.Create(profileId, eventId, file, initialLength, initialWrite));
         await Task.Yield();
       }
     }
@@ -67,11 +72,10 @@ public sealed class TransferWorker(
     ISiteTransferRouter router,
     ILogger<TransferWorker> logger) : BackgroundService
 {
-  private readonly Channel<TransferItem> queue = Channel.CreateBounded<TransferItem>(
-      new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.Wait });
+  private const int MaxRetries = 5;
+  private readonly SemaphoreSlim signal = new(0, 1);
 
-  public ValueTask QueueAsync(TransferItem item, CancellationToken cancellationToken) =>
-      queue.Writer.WriteAsync(item, cancellationToken);
+  public void Signal() { if (signal.CurrentCount == 0) signal.Release(); }
 
   public static Task<SiteTransferDestination> ResolveDestinationAsync(
       TransferItem item,
@@ -81,22 +85,25 @@ public sealed class TransferWorker(
 
   protected override async Task ExecuteAsync(CancellationToken stoppingToken)
   {
-    var workers = Enumerable.Range(0, 4).Select(_ => RunAsync(stoppingToken)).ToArray();
-    await foreach (var item in store.LoadPendingAsync(stoppingToken))
+    while (!stoppingToken.IsCancellationRequested)
     {
-      await queue.Writer.WriteAsync(item with { State = TransferState.Queued }, stoppingToken);
+      var item = await store.ClaimDueAsync(stoppingToken);
+      if (item is not null)
+      {
+        await ProcessAsync(item, stoppingToken);
+        continue;
+      }
+      using var poll = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+      poll.CancelAfter(TimeSpan.FromSeconds(2));
+      try { await signal.WaitAsync(poll.Token); }
+      catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested) { }
     }
-
-    await Task.WhenAll(workers);
   }
 
-  private async Task RunAsync(CancellationToken cancellationToken)
+  private async Task ProcessAsync(TransferItem item, CancellationToken cancellationToken)
   {
-    await foreach (var item in queue.Reader.ReadAllAsync(cancellationToken))
-    {
       try
       {
-        await store.UpdateAsync(item.TransferId, TransferState.Hashing, cancellationToken: cancellationToken);
         string hash;
         await using (var file = new FileStream(
             item.SourcePath,
@@ -109,33 +116,46 @@ public sealed class TransferWorker(
           hash = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken)).ToLowerInvariant();
           file.Position = 0;
           var destination = await ResolveDestinationAsync(item, router, cancellationToken);
+          var existing = await destination.Api.FindIngestionReceiptAsync(
+              destination.CanonicalSiteId, item.IdempotencyKey, cancellationToken);
+          if (existing is not null)
+          {
+            ValidateReceipt(item, hash, existing);
+            await store.UpdateAsync(item.TransferId, TransferState.ReceivedBySite,
+                existing.Size, existing.Sha256, item.RetryCount, receiptId: existing.ReceiptId,
+                cancellationToken: cancellationToken);
+            return;
+          }
           await store.UpdateAsync(
               item.TransferId,
               TransferState.Uploading,
               hash: hash,
               cancellationToken: cancellationToken);
-          using var response = await destination.Api.UploadAsync(
+          var receipt = await destination.Api.UploadAsync(
               item,
               destination.CanonicalSiteId,
               file,
               cancellationToken);
-          response.EnsureSuccessStatusCode();
+          ValidateReceipt(item, hash, receipt);
+          await store.UpdateAsync(
+              item.TransferId, TransferState.ReceivedBySite, receipt.Size, receipt.Sha256,
+              item.RetryCount, receiptId: receipt.ReceiptId, cancellationToken: cancellationToken);
         }
-
-        await store.UpdateAsync(
-            item.TransferId,
-            TransferState.ReceivedBySite,
-            item.Length,
-            hash,
-            cancellationToken: cancellationToken);
       }
       catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
       {
-        break;
+        return;
       }
       catch (Exception exception)
       {
         var retries = item.RetryCount + 1;
+        if (retries >= MaxRetries)
+        {
+          await store.UpdateAsync(item.TransferId, TransferState.Failed, retry: retries,
+              error: $"Transfer stopped after {retries} attempts: {exception.Message}", cancellationToken: cancellationToken);
+          logger.LogError(exception, "Transfer {TransferId} exhausted retries; verify Site authentication, free space, and source availability", item.TransferId);
+          return;
+        }
         var delay = TimeSpan.FromSeconds(
             Math.Min(300, Math.Pow(2, retries)) + Random.Shared.NextDouble());
         await store.UpdateAsync(
@@ -150,11 +170,13 @@ public sealed class TransferWorker(
             "Transfer {TransferId} for Site profile {ProfileId} will retry",
             item.TransferId,
             item.SiteProfileId);
-        await Task.Delay(delay, cancellationToken);
-        await queue.Writer.WriteAsync(
-            item with { State = TransferState.RetryWaiting, RetryCount = retries, RetryAt = DateTimeOffset.UtcNow },
-            cancellationToken);
       }
-    }
+  }
+
+  private static void ValidateReceipt(TransferItem item, string hash, ByteTransferReceipt receipt)
+  {
+    if (receipt.Size != item.Length || !receipt.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase))
+      throw new InvalidDataException(
+          $"Site receipt integrity mismatch for {item.OriginalFilename}; expected {item.Length} bytes and SHA-256 {hash}.");
   }
 }

@@ -5,13 +5,17 @@ on:
     paths:
       - "clients/site-manager/**"
       - "clients/windows/**"
+      - "signage/player/**"
       - "scripts/validate-windows-client-boundaries.ps1"
+      - "scripts/publish-windows-clients.ps1"
       - ".github/workflows/windows-clients.yml"
   pull_request:
     paths:
       - "clients/site-manager/**"
       - "clients/windows/**"
+      - "signage/player/**"
       - "scripts/validate-windows-client-boundaries.ps1"
+      - "scripts/publish-windows-clients.ps1"
       - ".github/workflows/windows-clients.yml"
 
 permissions:
@@ -63,3 +67,7 @@ jobs:
         run: |
           dotnet restore clients/site-manager/UPM.SiteManager.csproj -p:Platform=x64
           dotnet build clients/site-manager/UPM.SiteManager.csproj --configuration Release --no-restore -p:Platform=x64
+
+      - name: Publish native Windows applications
+        shell: pwsh
+        run: ./scripts/publish-windows-clients.ps1

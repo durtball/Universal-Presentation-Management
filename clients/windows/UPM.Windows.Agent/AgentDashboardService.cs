@@ -5,6 +5,8 @@ namespace UPM.Windows.Agent;
 
 public sealed class AgentDashboardService(AgentStateStore state, AgentStorage storage)
 {
+  private long cachedDirectorySize;
+  private DateTimeOffset cachedDirectorySizeAt = DateTimeOffset.MinValue;
   public async Task<AgentDashboard> GetAsync(DateTimeOffset? selectedAt = null, CancellationToken ct = default)
   {
     var provisioning = await state.GetProvisioningAsync(ct);
@@ -37,7 +39,7 @@ public sealed class AgentDashboardService(AgentStateStore state, AgentStorage st
         provisioning?.SiteName, provisioning?.EventName, provisioning?.RoomName, provisioning?.Role ?? DeviceRole.None,
         Project(current, assets), Project(next, assets), await state.GetLastSuccessfulSyncAsync(ct), branding, settings,
         Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0", Environment.OSVersion.VersionString,
-        drive.AvailableFreeSpace, DirectorySize(storage.Cache), assets.Count(row => !row.Verified), DetectPowerPoint(),
+        drive.AvailableFreeSpace, CacheSize(), assets.Count(row => !row.Verified), DetectPowerPoint(),
         phase, identity.AgentId, provisioning?.SiteId, await state.GetPresentationLibraryErrorAsync(ct));
   }
 
@@ -55,6 +57,12 @@ public sealed class AgentDashboardService(AgentStateStore state, AgentStorage st
 
   private static long DirectorySize(string path) => Directory.Exists(path)
       ? Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length) : 0;
+  private long CacheSize()
+  {
+    if (DateTimeOffset.UtcNow - cachedDirectorySizeAt < TimeSpan.FromMinutes(5)) return cachedDirectorySize;
+    cachedDirectorySize = DirectorySize(storage.Cache); cachedDirectorySizeAt = DateTimeOffset.UtcNow;
+    return cachedDirectorySize;
+  }
   private static bool DetectPowerPoint() => OperatingSystem.IsWindows() &&
       Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\POWERPNT.EXE") is not null;
 }

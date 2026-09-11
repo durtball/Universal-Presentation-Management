@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 namespace UPM.Windows.Agent;
@@ -22,7 +24,26 @@ public sealed class AgentCredentialStore(AgentStorage storage) : IAgentCredentia
         ? ProtectedData.Protect(plain, null, DataProtectionScope.LocalMachine)
         : plain;
     await File.WriteAllBytesAsync(PathName, protectedBytes, ct);
-    if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(PathName, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    if (OperatingSystem.IsWindows()) RestrictWindowsAcl();
+    else File.SetUnixFileMode(PathName, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+  }
+
+  [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+  private void RestrictWindowsAcl()
+  {
+    var current = WindowsIdentity.GetCurrent().User
+        ?? throw new InvalidOperationException("Windows user identity is unavailable.");
+    var security = new FileSecurity();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    foreach (var identity in new SecurityIdentifier[]
+    {
+      current,
+      new(WellKnownSidType.LocalSystemSid, null),
+      new(WellKnownSidType.BuiltinAdministratorsSid, null),
+    })
+      security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
+          AccessControlType.Allow));
+    new FileInfo(PathName).SetAccessControl(security);
   }
 
   public async Task<string?> ReadAsync(CancellationToken ct = default)
