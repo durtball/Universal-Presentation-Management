@@ -292,6 +292,7 @@ def create_app(
             # route with the Signage service credential.  Browser cookies and
             # CSRF are intentionally not part of this trust boundary.
             or request.url.path == "/api/v1/signage/projection"
+            or request.url.path.startswith("/api/v1/signage/service/")
             or not get_settings().auth_required
         ):
             return await call_next(request)
@@ -959,7 +960,7 @@ for(const row of rows){const pre=document.createElement('pre');
 pre.textContent=JSON.stringify(row,null,2);out.append(pre)}}load();</script></body></html>"""
 
     register_agent_control_routes(app, get_session, transaction, settings=get_settings)
-    register_signage_routes(app, get_session, get_settings)
+    register_signage_routes(app, transaction, get_settings)
     register_program_routes(app, get_session)
     register_program_import_routes(app, get_session, transaction)
     register_operations_routes(app, get_session, transaction)

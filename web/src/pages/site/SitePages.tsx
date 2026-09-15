@@ -630,7 +630,7 @@ export function SiteRoomDetail() {
         <Page
           eyebrow="Room operations"
           title={detail.label}
-          description={`Stable room UUID ${detail.room_id}`}
+          description="Server-authoritative physical room assignment"
           actions={
             <Link className="button" to="/admin/rooms">
               Back to rooms
@@ -642,7 +642,7 @@ export function SiteRoomDetail() {
           <div className="panel-grid panel-grid--two">
             <Panel
               title="Program room mapping"
-              description="Imported location labels remain labels until this Site maps them to the physical room UUID."
+              description="Imported location labels remain labels until this Site maps them to a physical room."
             >
               {!deployments.data?.length ? (
                 <Empty title="No deployed program" />

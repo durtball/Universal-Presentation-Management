@@ -41,6 +41,7 @@ class SiteSettings(BaseSettings):
     sync_max_payload_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 10_485_760
     heartbeat_interval_seconds: Annotated[float, Field(gt=0)] = 30.0
     signage_projection_token: str | None = None
+    signage_enrollment_secret_file: str | None = "/run/upm-signage/enrollment-secret"
     signage_internal_url: str | None = None
     signage_public_url: str | None = None
     discovery_secret: Annotated[str, Field(min_length=32)] | None = None

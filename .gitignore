@@ -5,6 +5,7 @@
 
 # Local runtime state
 .local/
+.upm-runtime/
 data/
 volumes/
 *.pid

@@ -27,6 +27,18 @@ class Source(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
 
 
+class Installation(Base):
+    __tablename__ = "installation"
+    installation_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=new_uuid7)
+    singleton_key: Mapped[int] = mapped_column(Integer, unique=True, default=1)
+    site_id: Mapped[UUID | None] = mapped_column(PGUUID)
+    site_name: Mapped[str | None] = mapped_column(String(255))
+    site_url: Mapped[str | None] = mapped_column(String(2048))
+    credential_encrypted: Mapped[bytes | None] = mapped_column()
+    credential_revision: Mapped[int] = mapped_column(Integer, default=0)
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Projection(Base):
     __tablename__ = "projections"
     __table_args__ = (UniqueConstraint("source_id", "entity_type", "entity_id"),)
@@ -122,13 +134,17 @@ class Asset(Base):
     __tablename__ = "assets"
     asset_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True)
     source_id: Mapped[UUID] = mapped_column(PGUUID)
+    event_id: Mapped[UUID | None] = mapped_column(PGUUID, index=True)
     media_id: Mapped[UUID] = mapped_column(PGUUID)
+    name: Mapped[str] = mapped_column(String(255), default="asset")
+    original_filename: Mapped[str] = mapped_column(String(1024), default="asset")
     mime_type: Mapped[str] = mapped_column(String(255))
     size: Mapped[int] = mapped_column(BigInteger)
     sha256: Mapped[str] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(32), default="pending")
     confirmed_offset: Mapped[int] = mapped_column(BigInteger, default=0)
     local_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class Override(Base):
@@ -158,6 +174,7 @@ class PlaybackState(Base):
     current_item: Mapped[str | None] = mapped_column(String(255))
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    player_version: Mapped[str | None] = mapped_column(String(64))
 
 
 class Job(Base):

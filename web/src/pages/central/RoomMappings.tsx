@@ -13,8 +13,7 @@ const columns: Column<RoomMapping>[] = [
   { key: "imported", label: "Imported room", value: (row) => row.imported_label },
   { key: "status", label: "Mapping", value: (row) => row.mapping_status,
     render: (row) => <StatusBadge value={row.mapping_status} /> },
-  { key: "physical", label: "Site room", value: (row) => row.target_room_label || "—" },
-  { key: "id", label: "Site room UUID", value: (row) => row.target_room_id || "—" },
+  { key: "physical", label: "Site room", value: (row) => row.target_room_label || "Not assigned" },
 ];
 
 export function RoomMappings() {
@@ -31,13 +30,9 @@ export function RoomMappings() {
       ? api.roomMappings(selectedEvent, selectedSite, signal) : Promise.resolve([]),
     [api, selectedEvent, selectedSite],
   );
-  const [editing, setEditing] = useState<RoomMapping>();
-  const [roomId, setRoomId] = useState("");
-  const [roomLabel, setRoomLabel] = useState("");
-  const [error, setError] = useState<unknown>();
   return (
     <Page eyebrow="Site resources" title="Room mapping"
-      description="Map imported logical room labels to physical rooms independently for each Site.">
+      description="Review how imported room labels resolve to physical rooms at each Site.">
       <AdminBoundary>
         {events.loading || sites.loading ? <Loading /> : events.error || sites.error ? (
           <ErrorSurface error={events.error || sites.error} />
@@ -50,31 +45,10 @@ export function RoomMappings() {
               {sites.data.map((site) => <option key={site.site_id} value={site.site_id}>{site.display_name}</option>)}
             </select></label>
           </div>
-          {mappings.loading ? <Loading /> : mappings.error ? <ErrorSurface error={mappings.error} /> : (
-            <DataTable rows={mappings.data ?? []} columns={columns} rowKey={(row) => row.normalized_imported_label}
-              label="Imported room mappings" actions={(row) => <button className="button button--small" onClick={() => {
-                setEditing(row); setRoomId(row.target_room_id || ""); setRoomLabel(row.target_room_label || "");
-              }}>Reconcile</button>} />
-          )}
-          {editing ? <Panel title={`Map ${editing.imported_label}`} description="Use a room UUID from the Site-local Rooms API. Existing deliberate Site assignments are never overwritten.">
-            <div className="inline-form">
-              <label className="field">Site room UUID<input className="input" value={roomId} onChange={(e) => setRoomId(e.target.value)} /></label>
-              <label className="field">Site room label<input className="input" value={roomLabel} onChange={(e) => setRoomLabel(e.target.value)} /></label>
-              <button className="button button--primary" onClick={async () => {
-                setError(undefined);
-                try { await api.saveRoomMapping({ site_id: selectedSite, imported_label: editing.imported_label,
-                  target_room_id: roomId, target_room_label: roomLabel, mapping_status: "mapped" });
-                  setEditing(undefined); mappings.refresh(); }
-                catch (caught) { setError(caught); }
-              }}>Save mapping</button>
-              <button className="button" onClick={async () => {
-                await api.saveRoomMapping({ site_id: selectedSite, imported_label: editing.imported_label,
-                  target_room_id: null, target_room_label: null, mapping_status: "unmapped" });
-                setEditing(undefined); mappings.refresh();
-              }}>Leave unassigned</button>
-            </div>
-            {error != null ? <ErrorSurface error={error} /> : null}
-          </Panel> : null}
+          <Panel title="Server-authoritative mappings" description="Assign or reconcile physical rooms from the selected Site's Rooms page; internal identifiers are never entered manually here.">
+            {mappings.loading ? <Loading /> : mappings.error ? <ErrorSurface error={mappings.error} /> :
+              <DataTable rows={mappings.data ?? []} columns={columns} rowKey={(row) => row.normalized_imported_label} label="Imported room mappings" />}
+          </Panel>
         </>}
       </AdminBoundary>
     </Page>

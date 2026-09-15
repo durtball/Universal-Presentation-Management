@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     database_url: str
     site_url: str | None = None
     site_credential: str | None = None
+    enrollment_secret_file: str | None = "/run/upm-signage/enrollment-secret"
+    installation_name: str = "UPM Signage"
+    application_version: str = "0.2.0"
     event_id: UUID | None = None
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: Annotated[str, Field(min_length=1, max_length=1024)] = "admin"

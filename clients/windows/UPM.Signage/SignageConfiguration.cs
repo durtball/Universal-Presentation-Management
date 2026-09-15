@@ -7,7 +7,8 @@ namespace UPM.Signage;
 
 internal sealed record SignageConfiguration(
   string ServerUrl = "https://localhost:8445", Guid? DisplayId = null, string DisplayName = "Lobby display",
-  int Monitor = 0, bool Fullscreen = true, int Width = 1080, int Height = 1920, bool StartWithWindows = false);
+  int Monitor = 0, bool Fullscreen = true, int Width = 1080, int Height = 1920, bool StartWithWindows = false,
+  bool HasConnected = false);
 
 internal sealed class SignageConfigurationStore
 {
@@ -60,5 +61,31 @@ internal static class DisplayCredentialStore
     if (displayId is null) return null;
     try { var value = new PasswordVault().Retrieve(Resource, displayId.Value.ToString()); value.RetrievePassword(); return value.Password; }
     catch { return null; }
+  }
+}
+
+internal static class OperatorSessionStore
+{
+  private const string Resource = "UPM.Signage.OperatorSession";
+  public static async Task CaptureAsync(Microsoft.Web.WebView2.Core.CoreWebView2 webView, string endpoint)
+  {
+    var cookies = await webView.CookieManager.GetCookiesAsync(endpoint);
+    var session = cookies.FirstOrDefault(x => x.Name == "upm_signage_session");
+    if (session is null || session.IsSession) return;
+    var vault = new PasswordVault();
+    try { foreach (var old in vault.FindAllByResource(Resource)) vault.Remove(old); } catch { }
+    vault.Add(new PasswordCredential(Resource, new Uri(endpoint).Host, session.Value));
+  }
+  public static Task RestoreAsync(Microsoft.Web.WebView2.Core.CoreWebView2 webView, Uri endpoint)
+  {
+    try
+    {
+      var saved = new PasswordVault().Retrieve(Resource, endpoint.Host); saved.RetrievePassword();
+      var cookie = webView.CookieManager.CreateCookie("upm_signage_session", saved.Password, endpoint.Host, "/");
+      cookie.IsHttpOnly = true; cookie.IsSecure = true; cookie.Expires = DateTime.UtcNow.AddHours(12);
+      webView.CookieManager.AddOrUpdateCookie(cookie);
+    }
+    catch { }
+    return Task.CompletedTask;
   }
 }
