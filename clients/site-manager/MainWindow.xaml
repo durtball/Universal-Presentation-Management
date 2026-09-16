@@ -69,6 +69,7 @@
                 <NavigationViewItem Content="Transfers" Tag="transfers" Icon="Sync" />
                 <NavigationViewItem Content="Review Sessions" Tag="reviews" Icon="Preview" />
                 <NavigationViewItem Content="Devices" Tag="devices" Icon="Remote" />
+                <NavigationViewItem Content="Signage" Tag="signage" Icon="Pictures" />
                 <NavigationViewItem Content="Activity" Tag="activity" Icon="List" />
                 <NavigationViewItem Content="Settings" Tag="settings" Icon="Setting" />
             </NavigationView.MenuItems>

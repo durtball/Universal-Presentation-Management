@@ -1,7 +1,16 @@
-{ auto_https off }
-:80 {
- handle /health { reverse_proxy signage-api:8080 }
- handle /api/* { reverse_proxy signage-api:8080 }
- handle /player/* { uri strip_prefix /player; reverse_proxy signage-player:8080 }
- handle { reverse_proxy signage-web:8080 }
+https://{$UPM_SIGNAGE_HOSTNAME:localhost} {
+	tls internal
+	handle /health {
+		reverse_proxy signage-api:8080
+	}
+	handle /api/* {
+		reverse_proxy signage-api:8080
+	}
+	handle /player/* {
+		uri strip_prefix /player
+		reverse_proxy signage-player:8080
+	}
+	handle {
+		reverse_proxy signage-web:8080
+	}
 }

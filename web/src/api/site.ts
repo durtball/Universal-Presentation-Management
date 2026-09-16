@@ -28,6 +28,9 @@ export const siteApi = {
   setSmbPassword: (id:string,password:string) => siteClient.request(`/api/v1/users/${id}/smb-password`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})}),
   revokeSmb: (id:string) => siteClient.request<void>(`/api/v1/users/${id}/smb-access`,{method:"DELETE"}),
   health: (signal?: AbortSignal) => get<Health>("/health", signal),
+  signage: (signal?: AbortSignal) =>
+    get<{installed:boolean;healthy:boolean;url?:string;source_connected?:boolean;message?:string}>(
+      "/api/v1/signage/status", signal),
   registration: (signal?: AbortSignal) =>
     get<SiteRegistration>("/api/v1/central-registration", signal),
   testCentral: (centralUrl: string) => siteClient.request<{reachable:boolean;central_url:string;central_identity:string;status?:string}>("/api/v1/central-registration/test", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({central_url:centralUrl})}),

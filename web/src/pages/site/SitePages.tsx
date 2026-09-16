@@ -51,6 +51,26 @@ const deploymentColumns: Column<SiteDeployment>[] = [
     ),
   },
 ];
+export function SiteSignage() {
+  const result = useApi((signal) => siteApi.signage(signal), []);
+  return (
+    <Page
+      eyebrow="UPM Site"
+      title="Signage"
+      description="Open this Site's managed Signage service without entering an address or credential."
+    >
+      <PageState {...result} onRetry={result.refresh}>
+        {(data) => (
+          <Panel title="Signage service">
+            <p><StatusBadge value={data.healthy ? "online" : data.installed ? "offline" : "not installed"} /></p>
+            <p>{data.message ?? (data.source_connected ? "Site source connected." : "Playback ready from cached data; Site source is currently offline.")}</p>
+            {data.healthy && data.url ? <a className="button" href={data.url}>Open Signage Manager</a> : null}
+          </Panel>
+        )}
+      </PageState>
+    </Page>
+  );
+}
 export function SiteOverview() {
   const result = useApi(async (signal) => {
     const [health, registration, deployments, operations] = await Promise.all([
@@ -610,7 +630,7 @@ export function SiteRoomDetail() {
         <Page
           eyebrow="Room operations"
           title={detail.label}
-          description={`Stable room UUID ${detail.room_id}`}
+          description="Server-authoritative physical room assignment"
           actions={
             <Link className="button" to="/admin/rooms">
               Back to rooms
@@ -622,7 +642,7 @@ export function SiteRoomDetail() {
           <div className="panel-grid panel-grid--two">
             <Panel
               title="Program room mapping"
-              description="Imported location labels remain labels until this Site maps them to the physical room UUID."
+              description="Imported location labels remain labels until this Site maps them to a physical room."
             >
               {!deployments.data?.length ? (
                 <Empty title="No deployed program" />

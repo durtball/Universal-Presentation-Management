@@ -6,12 +6,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="UPM_SIGNAGE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="UPM_SIGNAGE_", extra="ignore", env_ignore_empty=True
+    )
     database_url: str
     site_url: str | None = None
     site_credential: str | None = None
+    enrollment_secret_file: str | None = "/run/upm-signage/enrollment-secret"
+    installation_name: str = "UPM Signage"
+    application_version: str = "0.2.0"
     event_id: UUID | None = None
-    operator_password: Annotated[str, Field(min_length=12)] | None = None
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: Annotated[str, Field(min_length=1, max_length=1024)] = "admin"
+    session_cookie_secure: bool = True
+    session_hours: Annotated[int, Field(ge=1, le=168)] = 12
     media_root: str = "/media"
     poll_seconds: Annotated[float, Field(ge=1, le=300)] = 10
     lease_seconds: Annotated[int, Field(ge=10, le=600)] = 60

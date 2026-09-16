@@ -23,6 +23,7 @@ public sealed partial class MainWindow : Window
         ["transfers"] = typeof(TransfersPage),
         ["reviews"] = typeof(ReviewSessionsPage),
         ["devices"] = typeof(DevicesPage),
+        ["signage"] = typeof(SignagePage),
         ["activity"] = typeof(ActivityPage),
         ["settings"] = typeof(SettingsPage),
       };

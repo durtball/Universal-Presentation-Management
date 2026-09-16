@@ -49,6 +49,15 @@ public sealed class SiteHealth
   public string Status { get; set; } = string.Empty;
 }
 
+public sealed class SignageStatus
+{
+  [JsonPropertyName("installed")] public bool Installed { get; set; }
+  [JsonPropertyName("healthy")] public bool Healthy { get; set; }
+  [JsonPropertyName("url")] public string? Url { get; set; }
+  [JsonPropertyName("source_connected")] public bool SourceConnected { get; set; }
+  [JsonPropertyName("message")] public string? Message { get; set; }
+}
+
 public sealed class SiteRegistration
 {
   [JsonPropertyName("site_id")]
@@ -584,6 +593,9 @@ public sealed class SiteApiClient(HttpClient http, CookieContainer cookies)
 
   public Task<JsonElement> GetOperationsDashboardAsync(CancellationToken cancellationToken) =>
       GetAsync<JsonElement>("api/v1/operations/dashboard", cancellationToken);
+
+  public Task<SignageStatus> GetSignageStatusAsync(CancellationToken cancellationToken) =>
+      GetAsync<SignageStatus>("api/v1/signage/status", cancellationToken);
 
   public async Task<ByteTransferReceipt> UploadAsync(
       TransferItem item,

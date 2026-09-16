@@ -1,6 +1,12 @@
 name: ${UPM_SITE_PROJECT_NAME:-upm-site}
 
 services:
+  signage-enrollment-bootstrap:
+    image: alpine:3.22
+    restart: "no"
+    command: [sh, -c, "umask 077; mkdir -p /run/upm-signage; test -s /run/upm-signage/enrollment-secret || head -c 48 /dev/urandom | base64 > /run/upm-signage/enrollment-secret"]
+    volumes: [./.upm-runtime/signage:/run/upm-signage]
+
   site-smb:
     profiles: ["smb"]
     build:
@@ -60,7 +66,6 @@ services:
     command: ["python", "-m", "upm_site.discovery"]
     environment:
       UPM_SITE_DISCOVERY_SECRET: ${UPM_SITE_DISCOVERY_SECRET:?Set UPM_SITE_DISCOVERY_SECRET}
-      UPM_SITE_SIGNAGE_PROJECTION_TOKEN: ${UPM_SITE_SIGNAGE_PROJECTION_TOKEN:-}
       UPM_SITE_DISCOVERY_API_URL: http://127.0.0.1:${SITE_HTTP_PORT:-9080}
       UPM_SITE_DISCOVERY_PUBLIC_PORT: ${SITE_HTTP_PORT:-9080}
       UPM_SITE_DISCOVERY_SCHEME: ${UPM_SITE_DISCOVERY_SCHEME:-http}
@@ -88,22 +93,32 @@ services:
       UPM_SITE_DEFAULT_DISPLAY_NAME: ${UPM_SITE_DEFAULT_DISPLAY_NAME:-UPM Site}
       UPM_SITE_AUTH_REQUIRED: "true"
       UPM_SITE_BOOTSTRAP_ADMIN_USERNAME: ${UPM_SITE_BOOTSTRAP_ADMIN_USERNAME:-admin}
-      UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD: ${UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD:?Set UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD}
+      UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD: ${UPM_SITE_BOOTSTRAP_ADMIN_PASSWORD:-admin}
       UPM_SITE_SESSION_COOKIE_SECURE: ${UPM_SITE_SESSION_COOKIE_SECURE:-false}
       UPM_SITE_MEDIA_STORAGE_URL: http://site-media-storage:8080
       UPM_SITE_MEDIA_STORAGE_TOKEN: ${UPM_SITE_MEDIA_STORAGE_TOKEN:?Set UPM_SITE_MEDIA_STORAGE_TOKEN}
       UPM_SITE_DISCOVERY_SECRET: ${UPM_SITE_DISCOVERY_SECRET:?Set UPM_SITE_DISCOVERY_SECRET}
+      UPM_SITE_SIGNAGE_PROJECTION_TOKEN: ${UPM_SITE_SIGNAGE_PROJECTION_TOKEN:-}
+      UPM_SITE_SIGNAGE_INTERNAL_URL: ${UPM_SITE_SIGNAGE_INTERNAL_URL:-http://host.docker.internal:9181}
+      UPM_SITE_SIGNAGE_PUBLIC_URL: ${UPM_SITE_SIGNAGE_PUBLIC_URL:-}
+      UPM_SITE_SIGNAGE_ENROLLMENT_SECRET_FILE: /run/upm-signage/enrollment-secret
       UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS: ${UPM_SITE_SMB_INTAKE_SCAN_INTERVAL_SECONDS:-5}
       UPM_SITE_SMB_INTAKE_STABILITY_SECONDS: ${UPM_SITE_SMB_INTAKE_STABILITY_SECONDS:-10}
       UPM_SITE_SMB_CONTROL_URL: http://site-smb:8080
       UPM_SITE_SMB_CONTROL_TOKEN: ${UPM_SITE_SMB_CONTROL_TOKEN:-}
     depends_on:
+      signage-enrollment-bootstrap:
+        condition: service_completed_successfully
       site-postgres:
         condition: service_healthy
       site-migrate:
         condition: service_completed_successfully
       site-media-storage:
         condition: service_healthy
+    volumes:
+      - ./.upm-runtime/signage:/run/upm-signage:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()"]
       interval: 10s

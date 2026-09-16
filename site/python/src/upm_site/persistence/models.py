@@ -177,6 +177,22 @@ class LocalSiteIdentity(SiteBase):
     )
 
 
+class SignageInstallation(SiteBase):
+    """A revocable, Site-scoped Signage service identity."""
+
+    __tablename__ = "signage_installations"
+    installation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    site_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    credential_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    credential_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CentralRegistration(SiteBase):
     __tablename__ = "central_registration"
 

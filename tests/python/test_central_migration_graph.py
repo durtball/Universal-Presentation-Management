@@ -72,7 +72,7 @@ def test_storage_root_revision_upgrade_is_reversible() -> None:
 
 def test_site_agent_change_feed_repair_has_one_head() -> None:
     script = site_script()
-    assert script.get_heads() == ["a73c5e91f204"]
+    assert script.get_heads() == ["e52b19a73c40"]
     assert script.get_revision("a73c5e91f204").down_revision == "d12a9f73bc21"
     assert script.get_revision("d12a9f73bc21").down_revision == "c91e72f04a11"
     assert script.get_revision("c91e72f04a11").down_revision == "b82f7a19d340"

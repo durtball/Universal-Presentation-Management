@@ -2,7 +2,7 @@
 name = "upm-signage"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
-dependencies = ["alembic>=1.16,<2", "fastapi>=0.116,<1", "httpx>=0.28,<1", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.10,<3", "sqlalchemy>=2.0.41,<3", "uvicorn>=0.35,<1", "upm-shared"]
+dependencies = ["alembic>=1.16,<2", "cryptography>=45,<47", "fastapi>=0.116,<1", "httpx>=0.28,<1", "pillow>=11,<13", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.10,<3", "python-multipart>=0.0.20,<1", "qrcode>=8,<9", "sqlalchemy>=2.0.41,<3", "uvicorn>=0.35,<1", "upm-shared"]
 [tool.uv.sources]
 upm-shared = { workspace = true }
 [build-system]

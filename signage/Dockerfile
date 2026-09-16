@@ -17,6 +17,6 @@ ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /app/database /app/database
-RUN useradd -u 10003 -m signage && mkdir /media && chown signage /media
+RUN useradd -u 10003 -m signage && mkdir -p /media && chown signage:signage /media
 USER signage
 CMD ["uvicorn","upm_signage.api:create_app","--factory","--host","0.0.0.0","--port","8080"]

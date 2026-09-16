@@ -1,5 +1,10 @@
 name: ${UPM_SIGNAGE_PROJECT_NAME:-upm-signage}
 services:
+  signage-enrollment-bootstrap:
+    image: alpine:3.22
+    restart: "no"
+    command: [sh, -c, "umask 077; mkdir -p /run/upm-signage; test -s /run/upm-signage/enrollment-secret || head -c 48 /dev/urandom | base64 > /run/upm-signage/enrollment-secret"]
+    volumes: [./.upm-runtime/signage:/run/upm-signage]
   signage-postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -20,18 +25,20 @@ services:
   signage-api:
     image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
     restart: unless-stopped
-    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_MEDIA_ROOT: /media, UPM_SIGNAGE_OPERATOR_PASSWORD: '${UPM_SIGNAGE_OPERATOR_PASSWORD:?Set UPM_SIGNAGE_OPERATOR_PASSWORD}'}
+    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_MEDIA_ROOT: /media, UPM_SIGNAGE_BOOTSTRAP_ADMIN_USERNAME: '${UPM_SIGNAGE_BOOTSTRAP_ADMIN_USERNAME:-admin}', UPM_SIGNAGE_BOOTSTRAP_ADMIN_PASSWORD: '${UPM_SIGNAGE_BOOTSTRAP_ADMIN_PASSWORD:-admin}'}
     volumes: [signage-media:/media]
     depends_on: {signage-migrate: {condition: service_completed_successfully}}
     networks: [signage-internal, signage-edge]
+    ports: ['127.0.0.1:${SIGNAGE_INTERNAL_API_PORT:-9181}:8080']
     healthcheck: {test: [CMD, python, -c, "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health').read()"], interval: 10s, timeout: 3s, retries: 5}
   signage-worker:
     image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
     command: [python, -m, upm_signage.worker]
     restart: unless-stopped
-    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_SITE_URL: '${UPM_SIGNAGE_SITE_URL:-}', UPM_SIGNAGE_SITE_CREDENTIAL: '${UPM_SIGNAGE_SITE_CREDENTIAL:-}', UPM_SIGNAGE_EVENT_ID: '${UPM_SIGNAGE_EVENT_ID:?Set UPM_SIGNAGE_EVENT_ID}', UPM_SIGNAGE_MEDIA_ROOT: /media}
-    volumes: [signage-media:/media]
-    depends_on: {signage-migrate: {condition: service_completed_successfully}}
+    environment: {UPM_SIGNAGE_DATABASE_URL: '${UPM_SIGNAGE_DATABASE_URL:?Set UPM_SIGNAGE_DATABASE_URL}', UPM_SIGNAGE_SITE_URL: '${UPM_SIGNAGE_SITE_URL:-http://host.docker.internal:9080}', UPM_SIGNAGE_SITE_CREDENTIAL: '${UPM_SIGNAGE_SITE_CREDENTIAL:-}', UPM_SIGNAGE_EVENT_ID: '${UPM_SIGNAGE_EVENT_ID:-}', UPM_SIGNAGE_ENROLLMENT_SECRET_FILE: /run/upm-signage/enrollment-secret, UPM_SIGNAGE_MEDIA_ROOT: /media}
+    volumes: [signage-media:/media, ./.upm-runtime/signage:/run/upm-signage:ro]
+    extra_hosts: [host.docker.internal:host-gateway]
+    depends_on: {signage-migrate: {condition: service_completed_successfully}, signage-enrollment-bootstrap: {condition: service_completed_successfully}}
     networks: [signage-internal, signage-site-egress]
   signage-web:
     build: {context: ., dockerfile: signage/web/Dockerfile}
@@ -41,10 +48,19 @@ services:
     build: {context: ., dockerfile: signage/player/Dockerfile}
     restart: unless-stopped
     networks: [signage-edge]
+  signage-discovery:
+    image: ${UPM_SIGNAGE_API_IMAGE:-upm-signage-api:local}
+    command: [python, -m, upm_signage.discovery]
+    restart: unless-stopped
+    environment: {UPM_SIGNAGE_DISCOVERY_API_URL: http://signage-api:8080, UPM_SIGNAGE_HOSTNAME: '${UPM_SIGNAGE_HOSTNAME:-localhost}', UPM_SIGNAGE_HTTPS_PORT: '${SIGNAGE_HTTPS_PORT:-8445}'}
+    ports: ['43821:43821/udp']
+    depends_on: {signage-api: {condition: service_healthy}}
+    networks: [signage-edge]
   signage-caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports: ['${SIGNAGE_HTTP_PORT:-9180}:80']
+    environment: {UPM_SIGNAGE_HOSTNAME: '${UPM_SIGNAGE_HOSTNAME:-localhost}'}
+    ports: ['${SIGNAGE_HTTPS_PORT:-8445}:443']
     volumes: [./infrastructure/caddy/signage/Caddyfile:/etc/caddy/Caddyfile:ro, signage-caddy-data:/data, signage-caddy-config:/config]
     depends_on: {signage-api: {condition: service_healthy}, signage-web: {condition: service_started}, signage-player: {condition: service_started}}
     networks: [signage-edge]

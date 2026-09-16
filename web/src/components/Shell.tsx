@@ -14,6 +14,7 @@ const centralNav = [
   ["/admin/sessions", "Sessions"],
   ["/admin/presenters", "Presenters"],
   ["/admin/presentations", "Presentations"],
+  ["/admin/signage", "Signage"],
   ["/admin/media", "Presentation Media"],
   ["/admin/imports", "Imports"],
   ["/admin/room-mappings", "Room Mapping"],
